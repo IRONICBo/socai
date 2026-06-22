@@ -31,6 +31,27 @@ parameters under `metadata`.
 socai does not intentionally send note bodies, comments, images, browser cookies,
 API keys, raw tool output bodies, or Axiom credentials.
 
+### Desktop app
+
+The desktop app (`source: "desktop"`) emits agent-task lifecycle events —
+`socai_agent_task_start` / `_end`, one `socai_tool_call` per tool invocation,
+plus `socai_browser_connect` when the user connects Chrome. Setup/config actions
+(API-key save, model pick, Codex login, app open) are not tracked; the provider
+and model in use are captured on `socai_agent_task_start`. Unlike the CLI, the
+desktop sends the full agent prompt as
+`task_text` with **no per-field opt-out**; `SOCAI_TELEMETRY=off` disables the
+whole desktop pipeline. It never sends agent results (`report.md` / `final_text`),
+assistant/reasoning text, or raw tool arguments/output. Desktop identity and the
+local buffer live under `~/.socai/app/telemetry/` (`$SOCAI_HOME/app/telemetry/`
+when set). Desktop events route to the same `socai-cli-prod` dataset; filter by
+`source == "desktop"`.
+
+Delivery is best-effort: `capture()` is fire-and-forget over a bounded in-process
+queue, so under a heavy burst of `socai_tool_call` events a few may be
+dropped without backpressure. Lifecycle start/end events are very unlikely to be
+lost given the single-concurrent-task limit. Treat tool-call counts as
+near-complete, not exact.
+
 ## User controls
 
 The README should document only these user controls, not proxy/Axiom internals.
@@ -74,15 +95,23 @@ If `SOCAI_HOME` is set, the path is:
 $SOCAI_HOME/telemetry/events.jsonl
 ```
 
+The desktop app writes its own buffer under the app data dir:
+
+```text
+~/.socai/app/telemetry/events.jsonl
+```
+
 Example inspection:
 
 ```bash
 tail -n 5 ~/.socai/telemetry/events.jsonl
+tail -n 5 ~/.socai/app/telemetry/events.jsonl
 ```
 
-The local buffer is a debugging aid. It can contain internal fields, such as the
-client-side validation event name and local creation timestamp, that the proxy
-strips before forwarding to Axiom.
+The local buffer is a debugging aid. It can contain a local creation timestamp
+(`created_at_ms`) that the client removes before sending to the proxy. The proxy
+itself no longer filters fields — it forwards everything the client sends,
+sanitizing values only.
 
 ## Upgrade note: restart old daemons
 
@@ -98,17 +127,20 @@ The next CLI command will start a fresh daemon from the new binary.
 ## Maintainer architecture
 
 ```text
-socai CLI daemon
-  -> local JSONL buffer
+socai CLI daemon  ┐  (source: cli_daemon)
+socai desktop app ┘  (source: desktop)
+  -> local JSONL buffer (under each surface's data dir)
   -> https://socai.io/v1/events
   -> Vercel serverless proxy
-  -> Axiom dataset
+  -> Axiom dataset (socai-cli-prod)
 ```
 
 Important files:
 
-- CLI telemetry worker: `cli/src/tracking.rs`
-- daemon instrumentation: `cli/src/daemon.rs`
+- Shared telemetry client: `core/src/telemetry/mod.rs`
+- CLI daemon instrumentation: `cli/src/daemon.rs`
+- Desktop instrumentation: `app/src-tauri/src/telemetry.rs`,
+  `app/src-tauri/src/commands.rs`, `app/src-tauri/src/lib.rs`
 - Vercel proxy: `site/api/telemetry.js`
 - Vercel rewrite/runtime config: `site/vercel.json`
 
@@ -178,9 +210,10 @@ axiom query "['socai-cli-prod'] | where request_id == '${request_id}' | limit 1"
   --no-spinner
 ```
 
-The resulting row should include `request_id`, `command`, `tool_name`, `ok`, and
-`metadata.num_notes`. It should not include non-null custom `event`, `arch`,
-`created_at_ms`, `client_created_at_ms`, or `received_at_ms` values.
+The resulting row should include `event` (`socai_runbook_smoke_test`),
+`request_id`, `command`, `tool_name`, `ok`, and `metadata.num_notes`. It should
+not include non-null custom `arch`, `created_at_ms`, `client_created_at_ms`, or
+`received_at_ms` values.
 
 ## CLI smoke checks
 

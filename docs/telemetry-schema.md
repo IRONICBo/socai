@@ -1,11 +1,17 @@
-# CLI telemetry schema
+# socai telemetry schema
 
 This document is the current schema, privacy, and configuration contract for
-socai CLI daemon telemetry. It describes the implementation merged in PR #63.
+socai telemetry across both surfaces that emit events:
 
-The finalized model is **one sanitized trace per top-level CLI tool command**.
-Telemetry is not a stream of lifecycle events, and the public CLI does not talk
-to PostHog or Axiom directly.
+- the **CLI daemon** (`source: "cli_daemon"`) — one sanitized trace per
+  top-level CLI tool command (introduced in PR #63), and
+- the **desktop app** (`source: "desktop"`) — agent-task lifecycle and per-tool
+  events for tasks the user runs in the Tauri app.
+
+Both surfaces share the same `Telemetry` client in `core/src/telemetry/mod.rs`,
+the same first-party proxy at `https://socai.io/v1/events`, and the same Axiom
+dataset; the `source` field distinguishes them. The public clients never talk to
+PostHog or Axiom directly.
 
 ## Transport and ownership
 
@@ -27,10 +33,12 @@ socai CLI daemon
 
 Source references:
 
-- CLI enrichment, identity, endpoint, and local JSONL:
-  `cli/src/tracking.rs`
-- Command trace shape and safe result metrics: `cli/src/daemon.rs`
-- Proxy allowlist, sanitization, and Axiom forwarding: `site/api/telemetry.js`
+- Shared telemetry client (enrichment, identity, endpoint, local JSONL):
+  `core/src/telemetry/mod.rs`
+- CLI command trace shape and safe result metrics: `cli/src/daemon.rs`
+- Desktop agent-task instrumentation: `app/src-tauri/src/telemetry.rs`,
+  `app/src-tauri/src/commands.rs`, `app/src-tauri/src/lib.rs`
+- Proxy validation, value sanitization, and Axiom forwarding: `site/api/telemetry.js`
 
 ## User controls
 
@@ -65,21 +73,26 @@ Supported command/tool mapping:
 | `topic_scan` | `topic_scan` | `topic_scan` |
 | `extract_note` | `extract_note` | `read_note` |
 
-The internal client-to-proxy payload currently includes an internal event name
-for proxy validation. The proxy strips that before forwarding to Axiom. Axiom
-rows for the current schema should not contain a custom `event` value.
+Every event carries a top-level `event` field naming its type — the CLI tool
+trace is `socai_tool_call`. The proxy validates that it starts with `socai_` and
+forwards it to Axiom as the type discriminator. The emitting surface is carried
+separately in `source`, so the same `event` value (for example `socai_tool_call`)
+spans both the CLI daemon and the desktop app.
 
 ## Forwarded Axiom fields
 
-The proxy forwards only allowlisted fields. Fields not listed here should be
-assumed unavailable in Axiom.
+The proxy forwards **every field the client sends** — there is no field
+allowlist; it only sanitizes values. The fields below are what the clients
+currently emit, so use this as the reference for what to expect in Axiom (not as
+a filter the proxy enforces). Any new client field reaches Axiom automatically.
 
 ### Identity and correlation
 
 | Field | Type | Description |
 | --- | --- | --- |
+| `event` | string | Event type, for example `socai_tool_call`, `socai_agent_task_start`, or `socai_agent_task_end`. The surface lives in `source`, not the event name. |
 | `install_id` | string UUID | Stable anonymous install identity stored in `telemetry/identity.json`. |
-| `session_id` | string UUID | One daemon process lifetime. |
+| `session_id` | string UUID | One daemon/app process lifetime. |
 | `request_id` | string | One CLI request/daemon command invocation. Treat as opaque. |
 | `schema_version` | number | Telemetry schema version. Current value: `1`. |
 
@@ -88,15 +101,15 @@ assumed unavailable in Axiom.
 | Field | Type | Description |
 | --- | --- | --- |
 | `app` | string | Always `socai`. |
-| `source` | string | Current source is `cli_daemon`. |
-| `app_version` | string | CLI crate version. |
+| `source` | string | Emitting surface: `cli_daemon` or `desktop`. |
+| `app_version` | string | socai-core (workspace) version, shared by the CLI daemon and desktop. |
 | `platform` | string | Rust target OS, such as `macos` or `linux`. |
 | `os_version` | string | OS version, for example macOS product version or Linux `PRETTY_NAME`. |
 | `os_kernel_version` | string | Kernel version when available. |
 | `memory_total_mb` | number | Total device memory in MiB when available. |
 | `cpu_count` | number | Available CPU parallelism when available. |
-| `terminal_app` | string | Best-effort terminal/app detection, such as Terminal, Ghostty, WezTerm, kitty, VS Code, Codex-related parent process, or `$TERM`. |
-| `parent_process` | string | Best-effort parent process command name on Unix. |
+| `terminal_app` | string | Best-effort terminal/app detection, such as Terminal, Ghostty, WezTerm, kitty, VS Code, Codex-related parent process, or `$TERM`. CLI daemon only. |
+| `parent_process` | string | Best-effort parent process command name on Unix. CLI daemon only. |
 
 ### Command, query, and explicit parameters
 
@@ -134,46 +147,76 @@ Current metadata keys:
 | `has_run_dir` | boolean | Whether the command returned a run directory. |
 | `proxy_version` | number | Added by the proxy. Current value: `1`. |
 
-## Fields intentionally not forwarded to Axiom
+## Desktop events
 
-Current Axiom rows should not include these custom fields:
+The desktop app emits agent-task lifecycle events rather than a single
+per-command trace. Each event carries the shared identity and context fields
+above with `source: "desktop"`; terminal/parent-process fields are omitted
+because a GUI has no meaningful terminal. Setup/config actions (API-key save,
+model pick, Codex login, app open) are not tracked on their own — the provider
+and model in use are captured on `socai_agent_task_start`.
 
-- `event`
-- `arch`
-- `created_at_ms`
-- `client_created_at_ms`
-- `received_at_ms`
-- `daemon_session_id`
-- `query_redacted`
-- raw `tab_label` or raw top-level `num_notes` outside `metadata`
-- `note_id_present`
+| Event | Emitted when | Event-specific fields |
+| --- | --- | --- |
+| `socai_browser_connect` | User connects Chrome | — |
+| `socai_agent_task_start` | A task begins running | `task_id`, `provider`, `model`, `task_len`, `task_text` |
+| `socai_agent_task_end` | A task reaches a terminal state | `task_id`, `run_id`, `provider`, `model`, `outcome`, `turns`, `input_tokens`, `output_tokens`, `duration_ms`, `error` |
+| `socai_tool_call` | Each tool call completes | `task_id`, `run_id`, `tool_name`, `turn`, `sequence`, `duration_ms`, `ok`, `error` |
 
-Axiom still has native time columns:
+Desktop field semantics:
 
-- `_time`
-- `_sysTime`
+| Field | Type | Description |
+| --- | --- | --- |
+| `task_id` | string | Stable desktop task identifier (`task-<ms>-<seq>`). Primary correlation key. |
+| `run_id` | string | Core agent run id, attached once the run starts. |
+| `provider` | string | LLM provider requested for the task. |
+| `model` | string | Model id requested for the task. |
+| `outcome` | string | Terminal state: `completed`, `failed`, `cancelled`, or `interrupted`. |
+| `turns` | number | Agent loop turns when known. |
+| `input_tokens` / `output_tokens` | number | Token usage for the run when known. |
+| `task_len` | number | Agent prompt length in Unicode scalar values. |
+| `task_text` | string | Full agent prompt. Always sent on desktop; see privacy boundaries. |
+| `turn` / `sequence` | number | Position of a tool call within the run. |
 
-Those are Axiom-managed fields, not custom CLI telemetry fields. Historical rows
-in the existing dataset created older columns, so Axiom may still display fields
-such as `event`, `arch`, or `created_at_ms` as `null` on new rows. `null` in
-those old columns does not mean the current proxy forwarded those values.
+Unlike the CLI's `query_text`, **the desktop has no opt-out for `task_text`**: it
+is sent whenever desktop telemetry is enabled. `SOCAI_TELEMETRY=off` is the only
+switch and disables the entire desktop pipeline. The proxy caps `task_text` at
+8,000 characters (other strings stay capped at 2,000).
+
+## Value-level handling
+
+There is **no field allowlist** — every key the client sends is forwarded. The
+proxy only sanitizes values:
+
+- Non-scalar values (objects / arrays) other than `metadata` are dropped.
+- Control characters are stripped from strings; strings are trimmed and truncated.
+- `metadata` is coerced to a shallow primitive object (see limits below).
+- `daemon_session_id` → `session_id` and `distinct_id` → `install_id` aliases are
+  applied; a nested `properties` object is flattened up to the top level.
+
+Axiom also has native time columns (`_time`, `_sysTime`) that it manages itself.
+The client removes `created_at_ms` before sending, so it normally won't appear —
+but because the proxy no longer filters fields, **anything a client sends now
+reaches Axiom**, which is why the privacy boundaries below are enforced
+client-side.
 
 ## Local JSONL caveat
 
 The local JSONL buffer is a debug/replay aid, not the forwarded Axiom schema. It
 may contain local-only fields such as:
 
-- `event`
 - `created_at_ms`
 - `properties.created_at_ms`
 - `properties.note_id_present`
 
-The CLI strips the local millisecond timestamp before sending to the proxy, and
-the proxy strips/ignores non-allowlisted fields before forwarding to Axiom.
+The CLI/desktop client strips the local millisecond timestamp before sending to
+the proxy; the proxy forwards every remaining field, sanitizing values only.
 
 ## Privacy boundaries
 
-The telemetry contract must never send:
+These boundaries are enforced **entirely by the clients** — the proxy no longer
+filters fields, so anything a client sends reaches Axiom. The clients must never
+send:
 
 - note body text
 - comments
@@ -182,9 +225,19 @@ The telemetry contract must never send:
 - API keys, bearer tokens, Axiom tokens, or other secrets
 - raw tool output bodies
 - raw note ids or note-id presence flags in forwarded Axiom rows
+- desktop agent results or model output: `report.md` / `final_text`, assistant or
+  reasoning text, and raw tool arguments/results
 
-Approved content-bearing telemetry is limited to query text, which is included by
-default and can be omitted with `SOCAI_TELEMETRY_QUERY_TEXT=off`.
+Approved content-bearing telemetry is limited to:
+
+- the CLI search `query_text` — included by default, omit with
+  `SOCAI_TELEMETRY_QUERY_TEXT=off`; and
+- the desktop agent `task_text` (the prompt the user submits) — always sent when
+  desktop telemetry is enabled, with no per-field opt-out. Only
+  `SOCAI_TELEMETRY=off` suppresses it.
+
+Desktop tool telemetry is limited to tool name, timing, success, and a truncated
+error string — never tool arguments or output bodies.
 
 ## Sanitization and limits
 
@@ -193,10 +246,13 @@ Proxy behavior in `site/api/telemetry.js`:
 - Accepts only JSON `POST` requests.
 - Enforces a maximum request body size of 128 KiB.
 - Accepts at most 100 events/traces per request envelope.
-- Requires the internal validation event name to start with `socai_`.
-- Uses an allowlist for forwarded fields.
+- Requires each event's `event` name to start with `socai_` (the routing gate);
+  `event` is forwarded as the type discriminator.
+- Forwards every other field the client sends — there is no field allowlist.
+- Drops non-scalar values (objects / arrays) other than `metadata`.
 - Removes ASCII control characters from strings, trims whitespace, and truncates
-  strings longer than 2,000 characters with an ellipsis.
+  strings longer than 2,000 characters with an ellipsis. `task_text` uses a higher
+  cap of 8,000 characters.
 - Accepts `metadata` as a shallow object only.
 - Limits `metadata` to 20 entries.
 - Allows metadata keys up to 80 characters matching `[A-Za-z0-9_.-]+`.
@@ -222,6 +278,7 @@ Representative Axiom row after proxy sanitization:
 
 ```json
 {
+  "event": "socai_tool_call",
   "install_id": "11111111-1111-4111-8111-111111111111",
   "session_id": "22222222-2222-4222-8222-222222222222",
   "request_id": "12345-1780616790123",
@@ -272,6 +329,7 @@ Representative Axiom row:
 
 ```json
 {
+  "event": "socai_tool_call",
   "install_id": "11111111-1111-4111-8111-111111111111",
   "session_id": "22222222-2222-4222-8222-222222222222",
   "request_id": "12345-1780616790456",
@@ -302,7 +360,7 @@ analysis without storing the query string.
 
 - `schema_version=1` covers the one-trace-per-tool-command schema described in
   this document.
-- Additive fields may be introduced through the proxy allowlist and documented
-  here.
+- Additive fields flow through automatically (no allowlist); document them here
+  so Axiom consumers know to expect them.
 - Removing or renaming fields should update this document and any dashboard or
   release-smoke-test queries that depend on the old names.

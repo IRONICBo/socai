@@ -1,4 +1,5 @@
 use crate::tasks::{now_ms, AgentTaskRegistry, AgentTaskSnapshot};
+use crate::telemetry::{duration_ms, short_error, DesktopTelemetry};
 use crate::timeline::{agent_event_to_timeline, AgentTaskEventKind, AgentTaskEventPayload};
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -37,8 +38,12 @@ fn app_site() -> Result<&'static SiteSpec> {
 // ── CDP connect tests (existing) ───────────────────────────────────────────
 
 #[tauri::command]
-pub async fn cdp_connect(runtime: State<'_, SocaiRuntime>) -> Result<(), String> {
+pub async fn cdp_connect(
+    runtime: State<'_, SocaiRuntime>,
+    telemetry: State<'_, DesktopTelemetry>,
+) -> Result<(), String> {
     runtime.connect_browser();
+    telemetry.capture("socai_browser_connect", json!({}));
     Ok(())
 }
 
@@ -427,6 +432,7 @@ pub async fn agent_task_start(
     app: AppHandle,
     runtime: State<'_, SocaiRuntime>,
     tasks: State<'_, AgentTaskRegistry>,
+    telemetry: State<'_, DesktopTelemetry>,
     task: String,
     provider: Option<String>,
     model: Option<String>,
@@ -446,12 +452,14 @@ pub async fn agent_task_start(
     let snapshot = registry
         .create(
             task_text.clone(),
+            provider.clone(),
             model.clone(),
             run_dir.display().to_string(),
         )
         .await;
     let task_id = snapshot.task_id.clone();
     let runtime = runtime.inner().clone();
+    let telemetry = telemetry.inner().clone();
     let task_id_for_spawn = task_id.clone();
     let app_for_task = app.clone();
     let registry_for_task = registry.clone();
@@ -469,6 +477,7 @@ pub async fn agent_task_start(
             provider,
             model,
             run_dir,
+            telemetry,
         )
         .await;
     });
@@ -523,6 +532,7 @@ pub async fn agent_task_cancel(
     app: AppHandle,
     runtime: State<'_, SocaiRuntime>,
     tasks: State<'_, AgentTaskRegistry>,
+    telemetry: State<'_, DesktopTelemetry>,
     task_id: String,
 ) -> Result<AgentTaskSnapshot, String> {
     let (snapshot, abort_handle, target_id, changed) = tasks
@@ -536,6 +546,20 @@ pub async fn agent_task_cancel(
         let _ = runtime.close_target(&target_id).await;
     }
     if changed {
+        telemetry.capture(
+            "socai_agent_task_end",
+            json!({
+                "task_id": task_id.clone(),
+                "provider": snapshot.provider.clone(),
+                "run_id": snapshot.run_id.clone(),
+                "model": snapshot.model.clone(),
+                "outcome": "cancelled",
+                "turns": snapshot.turns,
+                "input_tokens": snapshot.input_tokens,
+                "output_tokens": snapshot.output_tokens,
+                "duration_ms": duration_ms(snapshot.started_at, snapshot.finished_at),
+            }),
+        );
         emit_task_event(
             &app,
             tasks.inner(),
@@ -549,31 +573,7 @@ pub async fn agent_task_cancel(
     Ok(snapshot)
 }
 
-// Compatibility command for the old one-shot UI path. New desktop UI should
-// use agent_task_start/list/get plus agent_task:event.
-#[tauri::command]
-pub async fn agent_run(
-    app: AppHandle,
-    runtime: State<'_, SocaiRuntime>,
-    task: String,
-    model: Option<String>,
-) -> Result<AgentRunOutcome, String> {
-    require_connected(&runtime).await?;
-    run_agent_task_on_fresh_page(
-        app,
-        "legacy-agent-run".into(),
-        runtime.inner().clone(),
-        &task,
-        None,
-        model.as_deref(),
-        None,
-        None,
-        "agent".into(),
-    )
-    .await
-    .map_err(|e| format!("{e:#}"))
-}
-
+#[allow(clippy::too_many_arguments)]
 async fn run_agent_task_background(
     app: AppHandle,
     registry: AgentTaskRegistry,
@@ -583,17 +583,29 @@ async fn run_agent_task_background(
     provider: Option<String>,
     model: Option<String>,
     run_dir: PathBuf,
+    telemetry: DesktopTelemetry,
 ) {
     let Some(_permit) = registry.acquire_run_permit().await else {
         let error = "task runner queue closed".to_string();
         if let Some(snapshot) = registry
-            .update(&task_id, |snapshot| {
+            .finalize_if_active(&task_id, |snapshot| {
                 snapshot.status = "failed".into();
                 snapshot.finished_at = Some(now_ms());
                 snapshot.error = Some(error.clone());
             })
             .await
         {
+            telemetry.capture(
+                "socai_agent_task_end",
+                json!({
+                    "task_id": task_id.clone(),
+                    "provider": provider.clone(),
+                    "model": model.clone(),
+                    "outcome": "failed",
+                    "error": short_error(&error),
+                    "duration_ms": duration_ms(snapshot.started_at, snapshot.finished_at),
+                }),
+            );
             emit_task_event(&app, &registry, &task_id, "failed", error, Some(snapshot)).await;
         }
         return;
@@ -617,6 +629,17 @@ async fn run_agent_task_background(
         .await;
     }
 
+    telemetry.capture(
+        "socai_agent_task_start",
+        json!({
+            "task_id": task_id.clone(),
+            "provider": provider.clone(),
+            "model": model.clone(),
+            "task_len": task.chars().count(),
+            "task_text": task.clone(),
+        }),
+    );
+
     let result = run_agent_task_on_fresh_page(
         app.clone(),
         task_id.clone(),
@@ -626,6 +649,7 @@ async fn run_agent_task_background(
         model.as_deref(),
         Some(run_dir),
         Some(registry.clone()),
+        telemetry.clone(),
         format!("task · {}", title_safe(&task)),
     )
     .await;
@@ -635,7 +659,7 @@ async fn run_agent_task_background(
     match result {
         Ok(outcome) => {
             if let Some(snapshot) = registry
-                .update(&task_id, |snapshot| {
+                .finalize_if_active(&task_id, |snapshot| {
                     snapshot.status = "completed".into();
                     snapshot.finished_at = Some(now_ms());
                     snapshot.run_id = Some(outcome.run_id.clone());
@@ -649,6 +673,20 @@ async fn run_agent_task_background(
                 })
                 .await
             {
+                telemetry.capture(
+                    "socai_agent_task_end",
+                    json!({
+                        "task_id": task_id.clone(),
+                        "run_id": outcome.run_id.clone(),
+                        "provider": provider.clone(),
+                        "model": model.clone(),
+                        "outcome": "completed",
+                        "turns": outcome.turns,
+                        "input_tokens": outcome.input_tokens,
+                        "output_tokens": outcome.output_tokens,
+                        "duration_ms": duration_ms(snapshot.started_at, snapshot.finished_at),
+                    }),
+                );
                 emit_task_event(
                     &app,
                     &registry,
@@ -663,13 +701,24 @@ async fn run_agent_task_background(
         Err(err) => {
             let error = format!("{err:#}");
             if let Some(snapshot) = registry
-                .update(&task_id, |snapshot| {
+                .finalize_if_active(&task_id, |snapshot| {
                     snapshot.status = "failed".into();
                     snapshot.finished_at = Some(now_ms());
                     snapshot.error = Some(error.clone());
                 })
                 .await
             {
+                telemetry.capture(
+                    "socai_agent_task_end",
+                    json!({
+                        "task_id": task_id.clone(),
+                        "provider": provider.clone(),
+                        "model": model.clone(),
+                        "outcome": "failed",
+                        "error": short_error(&error),
+                        "duration_ms": duration_ms(snapshot.started_at, snapshot.finished_at),
+                    }),
+                );
                 emit_task_event(&app, &registry, &task_id, "failed", error, Some(snapshot)).await;
             }
         }
@@ -686,6 +735,7 @@ async fn run_agent_task_on_fresh_page(
     model: Option<&str>,
     run_dir: Option<PathBuf>,
     registry: Option<AgentTaskRegistry>,
+    telemetry: DesktopTelemetry,
     title_label: String,
 ) -> Result<AgentRunOutcome> {
     let task = task.trim();
@@ -720,7 +770,7 @@ async fn run_agent_task_on_fresh_page(
     let outcome = async {
         let tools = (site.agent_tools)(page.clone(), llm_provider.clone()).await?;
         let (tx, rx) = tokio::sync::broadcast::channel::<AgentEvent>(256);
-        let pump = pump_agent_task_events(app, registry.clone(), task_id.clone(), rx);
+        let pump = pump_agent_task_events(app, registry.clone(), task_id.clone(), telemetry, rx);
 
         let config = AgentRunConfig {
             extra_instructions: (site.agent_instructions)(TAURI_AGENT_PREAMBLE),
@@ -757,10 +807,52 @@ fn pump_agent_task_events(
     app: AppHandle,
     registry: Option<AgentTaskRegistry>,
     task_id: String,
+    telemetry: DesktopTelemetry,
     mut rx: tokio::sync::broadcast::Receiver<AgentEvent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // The core run_id only surfaces on Started; remember it so each tool-call
+        // event can correlate back to the run that produced it.
+        let mut run_id: Option<String> = None;
         while let Ok(event) = rx.recv().await {
+            match &event {
+                AgentEvent::Started { run_id: id, .. } => {
+                    run_id = Some(id.clone());
+                    // Persist the core run_id so cancelled/interrupted terminal
+                    // events (which read the snapshot, not this local) can still
+                    // correlate to their tool_call rows.
+                    if let Some(registry) = &registry {
+                        let _ = registry
+                            .update(&task_id, |snapshot| {
+                                snapshot.run_id = Some(id.clone());
+                            })
+                            .await;
+                    }
+                }
+                AgentEvent::ToolResult {
+                    name,
+                    turn,
+                    sequence,
+                    duration_ms: tool_duration_ms,
+                    error,
+                    ..
+                } => {
+                    telemetry.capture(
+                        "socai_tool_call",
+                        json!({
+                            "task_id": task_id.clone(),
+                            "run_id": run_id.clone(),
+                            "tool_name": name,
+                            "turn": turn,
+                            "sequence": sequence,
+                            "duration_ms": tool_duration_ms,
+                            "ok": error.is_none(),
+                            "error": error.as_deref().map(short_error),
+                        }),
+                    );
+                }
+                _ => {}
+            }
             let payload = agent_event_to_timeline(&event);
             emit_timeline_payload(&app, registry.as_ref(), &task_id, payload, None).await;
         }

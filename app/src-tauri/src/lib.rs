@@ -1,23 +1,29 @@
 mod commands;
 mod tasks;
+mod telemetry;
 mod timeline;
 
 use std::collections::HashSet;
 
+use serde_json::json;
 use socai_core::runtime::{RuntimeBrowserEvent, SocaiRuntime};
 use tasks::AgentTaskRegistry;
+use telemetry::{duration_ms, DesktopTelemetry};
 use tauri::{Emitter, Manager};
 
 pub fn run() {
     // Tauri owns its own in-process runtime.
     let runtime = SocaiRuntime::new();
+    let telemetry = DesktopTelemetry::new();
 
     tauri::Builder::default()
         .manage(runtime)
         .manage(AgentTaskRegistry::default())
+        .manage(telemetry)
         .setup(|app| {
             let runtime = app.state::<SocaiRuntime>().inner().clone();
             let tasks = app.state::<AgentTaskRegistry>().inner().clone();
+            let telemetry = app.state::<DesktopTelemetry>().inner().clone();
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut rx = runtime.subscribe_browser_events();
@@ -36,6 +42,23 @@ pub fn run() {
                                     handle.abort();
                                 }
                                 let task_id = snapshot.task_id.clone();
+                                telemetry.capture(
+                                    "socai_agent_task_end",
+                                    json!({
+                                        "task_id": task_id.clone(),
+                                        "provider": snapshot.provider.clone(),
+                                        "run_id": snapshot.run_id.clone(),
+                                        "model": snapshot.model.clone(),
+                                        "outcome": "interrupted",
+                                        "turns": snapshot.turns,
+                                        "input_tokens": snapshot.input_tokens,
+                                        "output_tokens": snapshot.output_tokens,
+                                        "duration_ms": duration_ms(
+                                            snapshot.started_at,
+                                            snapshot.finished_at,
+                                        ),
+                                    }),
+                                );
                                 commands::emit_task_event(
                                     &handle,
                                     &tasks,
@@ -70,7 +93,6 @@ pub fn run() {
             commands::agent_task_get,
             commands::agent_task_events,
             commands::agent_task_cancel,
-            commands::agent_run,
         ])
         .run(tauri::generate_context!())
         .expect("error while running socai");

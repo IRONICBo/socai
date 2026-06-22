@@ -3,46 +3,13 @@ const DEFAULT_DATASET = 'socai-cli-prod';
 const MAX_BODY_BYTES = 128 * 1024;
 const MAX_EVENTS_PER_REQUEST = 100;
 const MAX_STRING_CHARS = 2_000;
+// Per-field overrides for the default string cap. The desktop sends the full
+// agent prompt as `task_text`, which is routinely longer than a search query.
+const FIELD_MAX_CHARS = { task_text: 8_000 };
 const MAX_METADATA_FIELDS = 20;
 const MAX_METADATA_KEY_CHARS = 80;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_EVENTS = 1_200;
-
-const ALLOWED_FIELDS = new Set([
-  'install_id',
-  'distinct_id',
-  'session_id',
-  'request_id',
-  'schema_version',
-  'app',
-  'source',
-  'app_version',
-  'platform',
-  'os_version',
-  'os_kernel_version',
-  'memory_total_mb',
-  'cpu_count',
-  'terminal_app',
-  'parent_process',
-  'command',
-  'site',
-  'tool_name',
-  'query_text',
-  'query_len',
-  'query_text_enabled',
-  'metadata',
-  'duration_ms',
-  'ok',
-  'error',
-  'result_ok',
-  'cards_count',
-  'search_cards_count',
-  'selected_cards_count',
-  'notes_count',
-  'notes_skipped_count',
-  'has_run_dir',
-  'proxy_version',
-]);
 
 const rateLimits = new Map();
 
@@ -162,20 +129,24 @@ function sanitizeEvent(raw) {
     return null;
   }
 
-  const out = {
-    proxy_version: 1,
-  };
+  // No field allowlist: forward every key the client sent, sanitizing values
+  // only (control chars, length caps, metadata shape). Non-scalar values other
+  // than `metadata` are still dropped by sanitizeValue. Privacy is now the
+  // client's responsibility — the proxy no longer gates which fields may be sent.
+  const out = {};
 
   for (const [key, value] of Object.entries(flattened)) {
-    if (!ALLOWED_FIELDS.has(key)) {
-      continue;
-    }
-    const safe = key === 'metadata' ? sanitizeMetadata(value) : sanitizeValue(value);
+    const safe =
+      key === 'metadata'
+        ? sanitizeMetadata(value)
+        : sanitizeValue(value, FIELD_MAX_CHARS[key] ?? MAX_STRING_CHARS);
     if (safe !== undefined) {
       out[key] = safe;
     }
   }
 
+  // Stamp proxy_version after the loop so a client-sent value can't override it.
+  out.proxy_version = 1;
   return out;
 }
 
@@ -219,13 +190,13 @@ function sanitizeMetadata(value) {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function sanitizeValue(value) {
+function sanitizeValue(value, maxChars = MAX_STRING_CHARS) {
   if (value === null) {
     return null;
   }
   switch (typeof value) {
     case 'string':
-      return cleanString(value);
+      return cleanString(value, maxChars);
     case 'number':
       return Number.isFinite(value) ? value : undefined;
     case 'boolean':
@@ -246,12 +217,12 @@ function cleanMetadataKey(value) {
   return key;
 }
 
-function cleanString(value) {
+function cleanString(value, maxChars = MAX_STRING_CHARS) {
   if (typeof value !== 'string') {
     return undefined;
   }
   const cleaned = value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim();
-  return cleaned.length > MAX_STRING_CHARS ? `${cleaned.slice(0, MAX_STRING_CHARS)}…` : cleaned;
+  return cleaned.length > maxChars ? `${cleaned.slice(0, maxChars)}…` : cleaned;
 }
 
 function rateLimitKey(req, events) {
@@ -322,8 +293,3 @@ function setSecurityHeaders(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Cache-Control', 'no-store');
 }
-
-export const __testing = {
-  normalizeEvents,
-  sanitizeEvent,
-};
