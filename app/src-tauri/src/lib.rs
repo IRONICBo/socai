@@ -17,6 +17,8 @@ pub fn run() {
     let telemetry = DesktopTelemetry::new();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(runtime)
         .manage(AgentTaskRegistry::default())
         .manage(telemetry)
