@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -73,8 +74,9 @@ pub async fn resolve_explicit_endpoint(
     Ok(None)
 }
 
-/// One-shot discovery: explicit endpoints first, then `DevToolsActivePort` /
-/// `/json/version` probes on the standard Chrome profile roots and ports.
+/// One-shot discovery: explicit endpoints first, then `DevToolsActivePort`
+/// browser websocket markers, then `/json/version` probes on standard debug
+/// ports when no websocket marker is available.
 pub async fn discover_existing_chrome_endpoint() -> anyhow::Result<Option<Endpoint>> {
     if let Some(endpoint) = resolve_explicit_endpoint(None, None).await? {
         return Ok(Some(endpoint));
@@ -169,20 +171,19 @@ pub(crate) async fn endpoint_from_active_port(profile: &Path) -> Option<Endpoint
     let port: u16 = lines.next()?.trim().parse().ok()?;
     let ws_path = lines.next().map(str::trim).unwrap_or("").to_string();
 
-    // Prefer richer info via HTTP /json/version. Fall back to constructing the
-    // ws URL ourselves if the HTTP endpoint refuses but DevToolsActivePort
-    // gave us the path.
-    let http_url = format!("http://127.0.0.1:{port}");
-    let source = format!("active_port:{}", marker.display());
-    if let Ok(endpoint) = endpoint_from_http_url(&http_url, &source).await {
-        return Some(endpoint);
-    }
+    // `DevToolsActivePort` already contains the browser websocket path. Use it
+    // directly instead of probing `/json/version`: some user Chrome profiles
+    // expose the websocket while returning 404 from the HTTP discovery API, and
+    // the runtime's target inventory/lifecycle now uses raw browser-websocket
+    // `Target.*` commands for both existing and managed Chrome.
     if ws_path.is_empty() {
         return None;
     }
+    let source = format!("active_port:{}", marker.display());
+    let browser_ws_url = format!("ws://127.0.0.1:{port}{ws_path}");
     Some(Endpoint {
         source,
-        browser_ws_url: format!("ws://127.0.0.1:{port}{ws_path}"),
+        browser_ws_url,
         http_version_url: None,
         version: None,
         managed: false,
@@ -276,12 +277,30 @@ fn shellexpand(s: &str) -> String {
 }
 
 async fn get_json<T: for<'de> serde::Deserialize<'de>>(url: &str) -> anyhow::Result<T> {
-    let resp = reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .build()?
+    let resp = debug_http_client()?
         .get(url)
         .send()
         .await?
         .error_for_status()?;
     Ok(resp.json().await?)
+}
+
+fn debug_http_client() -> anyhow::Result<reqwest::Client> {
+    // Built once and cloned thereafter (clone is a cheap Arc bump that shares
+    // the connection pool). HTTP is no longer used for active target
+    // lifecycle, but explicit `SOCAI_CDP_URL` / conventional-port discovery may
+    // still need `/json/version`.
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
+    }
+    let client = reqwest::Client::builder()
+        // Chrome's remote-debugging HTTP API is always a local control plane
+        // endpoint (`127.0.0.1:<port>`). Do not honor HTTP(S)_PROXY / ALL_PROXY
+        // here: proxy tools such as Clash can otherwise intercept `/json/*`
+        // discovery calls and return 502 even though Chrome is healthy.
+        .no_proxy()
+        .timeout(HTTP_TIMEOUT)
+        .build()?;
+    Ok(CLIENT.get_or_init(|| client).clone())
 }
