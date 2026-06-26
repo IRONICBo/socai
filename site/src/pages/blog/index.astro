@@ -1,26 +1,49 @@
 ---
-import "../styles/global.css";
-import SiteHeader from "../components/SiteHeader.astro";
-import SiteFooter from "../components/SiteFooter.astro";
-import { message as messageFor } from "../lib/i18n";
+import "../../styles/global.css";
+import SiteHeader from "../../components/SiteHeader.astro";
+import SiteFooter from "../../components/SiteFooter.astro";
+import { message as messageFor } from "../../lib/i18n";
 
-const githubIssuesUrl = "https://github.com/socai-io/socai/issues";
-const qrImage = "/wechat-group-qr.jpg";
 const currentYear = new Date().getFullYear();
 const siteUrl = "https://socai.io";
-const canonicalUrl = `${siteUrl}/contact`;
+const canonicalUrl = `${siteUrl}/blog`;
 const socialImageUrl = `${siteUrl}/social-card.png`;
 const defaultLanguage = "zh";
 const defaultHtmlLanguage =
     defaultLanguage === "zh" ? "zh-CN" : defaultLanguage;
 
+// Newest first. Each post is single-language; the blog index shows only the
+// posts matching the current site language (see [data-post-lang] in site.ts).
+const posts = [
+    {
+        href: "/blog/zh/xiaohongshu-automation-tools",
+        lang: "zh",
+        dateIso: "2026-06-07",
+        dateLabel: "2026 / 06",
+        title: "小红书自动化会被封号吗？我把 7 个开源工具的源码都读了一遍",
+        excerpt:
+            "逆向 API 还是浏览器自动化、签名与风控怎么过、哪种最容易被封，以及 socai 在这张地图里的位置。七个有代表性的小红书自动化开源项目，逐个读源码。",
+        more: "阅读全文 →",
+    },
+    {
+        href: "/blog/xiaohongshu-automation-tools",
+        lang: "en",
+        dateIso: "2026-06-07",
+        dateLabel: "2026 / 06",
+        title: "Will Xiaohongshu automation get you banned? I read the source of 7 open-source tools",
+        excerpt:
+            "Reverse-engineered API vs browser automation, signing and risk control, which gets banned fastest, and where socai fits. Reading the source of 7 Xiaohongshu tools.",
+        more: "Read more →",
+    },
+];
+
 const messages = {
     en: {
         meta: {
-            title: "socai · contact",
+            title: "博客 · socai",
             description:
-                "join the socai wechat group to reach us. the wechat group is our primary channel.",
-            socialImageAlt: "socai contact — join the wechat group",
+                "The socai blog: notes on Xiaohongshu automation and browser agents.",
+            socialImageAlt: "socai blog",
         },
         nav: {
             primaryAria: "primary navigation",
@@ -32,26 +55,21 @@ const messages = {
             languageAria: "language",
             releaseLabel: "release version {version}",
         },
-        contact: {
-            eyebrow: "contact",
-            qrAlt: "socai wechat group qr code",
-            altHead: "other ways",
-            githubLabel: "GitHub Issues",
-            githubDesc: "report a bug or request a feature",
+        blog: {
+            heading: "Blog",
         },
         footer: {
             linksAria: "footer links",
-            blog: "blog",
             connect: "connect guide",
             contact: "contact",
         },
     },
     zh: {
         meta: {
-            title: "socai · 联系我们",
+            title: "博客 · socai",
             description:
-                "加入 socai 微信群，和我们交流。微信群是我们主要的交流渠道。",
-            socialImageAlt: "socai 联系我们 — 加入微信群",
+                "socai 博客，记录小红书自动化、浏览器 agent 相关的文章。",
+            socialImageAlt: "socai 博客",
         },
         nav: {
             primaryAria: "主导航",
@@ -63,16 +81,11 @@ const messages = {
             languageAria: "语言",
             releaseLabel: "发布版本 {version}",
         },
-        contact: {
-            eyebrow: "联系我们",
-            qrAlt: "socai 小红书使用 微信群二维码",
-            altHead: "其他方式",
-            githubLabel: "GitHub Issues",
-            githubDesc: "提交 bug 或功能请求",
+        blog: {
+            heading: "博客",
         },
         footer: {
             linksAria: "页脚链接",
-            blog: "博客",
             connect: "连接教程",
             contact: "联系",
         },
@@ -154,57 +167,44 @@ const socialImageAlt = message("meta.socialImageAlt");
     </head>
     <body>
         <div class="site-shell">
-            <SiteHeader
-                messages={messages}
-                language={defaultLanguage}
-            />
+            <SiteHeader messages={messages} language={defaultLanguage} />
 
-            <main class="contact-main">
-                <section
-                    class="contact"
-                    aria-label={message("contact.eyebrow")}
-                    data-i18n-aria-label="contact.eyebrow"
-                >
-                    <span class="contact__eyebrow" data-i18n="contact.eyebrow"
-                        >{message("contact.eyebrow")}</span
-                    >
+            <main class="blog-main">
+                <section class="blog" aria-labelledby="blog-title">
+                    <header class="blog__head">
+                        <h1 id="blog-title" data-i18n="blog.heading">
+                            {message("blog.heading")}
+                        </h1>
+                    </header>
 
-                    <div class="qr-card">
-                        <img
-                            src={qrImage}
-                            alt={message("contact.qrAlt")}
-                            data-i18n-alt="contact.qrAlt"
-                            width="240"
-                            height="240"
-                        />
-                    </div>
-
-                    <div class="contact-alt">
-                        <span
-                            class="contact-alt__head"
-                            data-i18n="contact.altHead"
-                            >{message("contact.altHead")}</span
-                        >
-                        <div class="contact-alt__list">
-                            <a class="contact-alt__row" href={githubIssuesUrl}>
-                                <span>
-                                    <span
-                                        class="contact-alt__label"
-                                        data-i18n="contact.githubLabel"
-                                        >{message("contact.githubLabel")}</span
-                                    >
-                                    <span
-                                        class="contact-alt__desc"
-                                        data-i18n="contact.githubDesc"
-                                        >{message("contact.githubDesc")}</span
-                                    >
-                                </span>
-                                <span class="contact-alt__value"
-                                    >github.com/socai-io/socai ↗</span
+                    <ul class="post-list">
+                        {
+                            posts.map((post) => (
+                                <li
+                                    class="post-item"
+                                    data-post-lang={post.lang}
+                                    hidden={post.lang !== defaultLanguage}
                                 >
-                            </a>
-                        </div>
-                    </div>
+                                    <a class="post-card" href={post.href}>
+                                        <div class="post-card__meta">
+                                            <time datetime={post.dateIso}>
+                                                {post.dateLabel}
+                                            </time>
+                                        </div>
+                                        <h2 class="post-card__title">
+                                            {post.title}
+                                        </h2>
+                                        <p class="post-card__excerpt">
+                                            {post.excerpt}
+                                        </p>
+                                        <span class="post-card__more">
+                                            {post.more}
+                                        </span>
+                                    </a>
+                                </li>
+                            ))
+                        }
+                    </ul>
                 </section>
             </main>
 
@@ -221,7 +221,7 @@ const socialImageAlt = message("meta.socialImageAlt");
             set:html={JSON.stringify(messages)}
         />
         <script>
-            import "../scripts/site.ts";
+            import "../../scripts/site.ts";
         </script>
     </body>
 </html>
