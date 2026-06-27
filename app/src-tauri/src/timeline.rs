@@ -356,9 +356,13 @@ pub(crate) fn agent_event_to_timeline(event: &AgentEvent) -> AgentTaskEventKind 
     }
 }
 
+/// Human-readable label for a tool name. Computed when an event is written and
+/// baked into timeline.jsonl; the read path never recomputes it. So only current
+/// tool names ever reach here — renamed tools need no legacy aliases, and old
+/// runs keep the labels they were written with.
 pub(crate) fn user_label(name: &str) -> String {
     match name {
-        "search_notes" => "searched xiaohongshu",
+        "search" => "searched xiaohongshu",
         "extract_search_cards" => "read search cards",
         "list_search_tabs" => "listed search tabs",
         "click_search_tab" => "switched search tab",
@@ -372,7 +376,6 @@ pub(crate) fn user_label(name: &str) -> String {
         "scroll_in_note" => "scrolled note",
         "collect_carousel_images" => "collected carousel images",
         "extract_profile" => "read author profile",
-        "topic_scan" => "scanned topic",
         "page_state" => "checked page state",
         _ => return name.replace('_', " "),
     }
@@ -965,13 +968,23 @@ fn raw_tool_result_value(content: &Value) -> Option<Value> {
 }
 
 fn normalize_entities(tool: &str, value: &Value) -> Vec<TimelineEntity> {
+    // Like user_label, this runs at write time, so only the current tool name
+    // reaches here. `--preview` yields a `cards` array (-> card grid); the
+    // default full scan yields the aggregated bundle (-> xhs_search).
     match tool {
-        "search_notes" => value
-            .get("cards")
-            .and_then(Value::as_array)
-            .filter(|cards| !cards.is_empty())
-            .map(|cards| vec![entity("xhs_note_card_grid", Value::Array(cards.clone()))])
-            .unwrap_or_default(),
+        "search" => {
+            if let Some(cards) = value.get("cards").and_then(Value::as_array) {
+                if cards.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![entity("xhs_note_card_grid", Value::Array(cards.clone()))]
+                }
+            } else if value.is_object() {
+                vec![entity("xhs_search", value.clone())]
+            } else {
+                Vec::new()
+            }
+        }
         "extract_search_cards" => value
             .as_array()
             .filter(|cards| !cards.is_empty())
@@ -1002,13 +1015,6 @@ fn normalize_entities(tool: &str, value: &Value) -> Vec<TimelineEntity> {
         "extract_profile" => {
             if value.is_object() {
                 vec![entity("xhs_author_profile", value.clone())]
-            } else {
-                Vec::new()
-            }
-        }
-        "topic_scan" => {
-            if value.is_object() {
-                vec![entity("xhs_topic_scan", value.clone())]
             } else {
                 Vec::new()
             }
