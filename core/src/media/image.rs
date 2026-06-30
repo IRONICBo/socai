@@ -26,13 +26,140 @@ const VISION_GRID_BATCH: usize = 4;
 const VISION_GRID_CELL: u32 = 512;
 
 impl MediaProcessor {
-    pub fn ocr_image(&self, _payload: &[u8]) -> Result<String> {
+    pub fn ocr_image(&self, payload: &[u8]) -> Result<String> {
         if !self.config.use_ocr {
             anyhow::bail!(MediaUnavailable("OCR is disabled".into()));
         }
-        anyhow::bail!(MediaUnavailable(
-            "OCR is unavailable in the Rust media processor".into()
-        ));
+        if payload.is_empty() {
+            return Ok(String::new());
+        }
+        let mut batch = crate::media::ocr::ocr_images_bytes(vec![(0, payload.to_vec())]);
+        match batch.results.pop() {
+            Some((_, result)) => result.map_err(|err| anyhow::anyhow!(err)),
+            None => Ok(String::new()),
+        }
+    }
+
+    /// OCR the already-downloaded images of a note in place: read each image with
+    /// a `local_path`, run them as one batched PP-OCRv6 `predict`, and attach
+    /// `ocr_text` (or `ocr_error`) per image. Returns the batch inference time so
+    /// the caller can record per-note OCR cost. Runs the CPU-bound inference on a
+    /// blocking thread. No-op (returns zero) when OCR is disabled or no image has
+    /// a local path.
+    pub async fn ocr_downloaded_images(&self, images: &mut [Value]) -> std::time::Duration {
+        if !self.config.use_ocr || images.is_empty() {
+            return std::time::Duration::ZERO;
+        }
+        let jobs: Vec<(usize, String)> = images
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.get("ocr_text").is_none())
+            .filter_map(|(idx, item)| {
+                item.get("local_path")
+                    .and_then(Value::as_str)
+                    .filter(|path| !path.is_empty())
+                    .map(|path| (idx, path.to_string()))
+            })
+            .collect();
+        if jobs.is_empty() {
+            return std::time::Duration::ZERO;
+        }
+
+        let batch = tokio::task::spawn_blocking(move || {
+            let items: Vec<(usize, Vec<u8>)> = jobs
+                .into_iter()
+                .filter_map(|(idx, path)| std::fs::read(&path).ok().map(|bytes| (idx, bytes)))
+                .collect();
+            crate::media::ocr::ocr_images_bytes(items)
+        })
+        .await;
+
+        let Ok(batch) = batch else {
+            return std::time::Duration::ZERO;
+        };
+        self.timing.record("ocr_predict", batch.predict);
+        for (idx, result) in batch.results {
+            let Some(item) = images.get_mut(idx) else {
+                continue;
+            };
+            match result {
+                Ok(text) if !text.trim().is_empty() => {
+                    insert_string(item, "ocr_text", short(&text, 1200));
+                }
+                Ok(_) => {}
+                Err(err) => insert_string(item, "ocr_error", err),
+            }
+        }
+        batch.predict
+    }
+
+    /// OCR card cover images *without persisting them* — used by the cards-only
+    /// preview path so a search-results scan reads each cover like a human
+    /// glancing at the page. Downloads each `cover_url` to memory, OCRs them in
+    /// one batch, and attaches `ocr_text` (or `ocr_error`) to the card in place;
+    /// the downloaded bytes are dropped (nothing written to the run dir). Returns
+    /// the batch inference time.
+    pub async fn ocr_cover_images(&self, cards: &mut [Value], referer: &str) -> std::time::Duration {
+        if !self.config.use_ocr || cards.is_empty() {
+            return std::time::Duration::ZERO;
+        }
+        let jobs: Vec<(usize, String)> = cards
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, card)| {
+                card.get("cover_url")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .map(|url| (idx, url.to_string()))
+            })
+            .collect();
+        if jobs.is_empty() {
+            return std::time::Duration::ZERO;
+        }
+
+        // Fetch covers concurrently (network-bound), then OCR on a blocking
+        // thread (CPU-bound). Covers are small (one per card) and never saved.
+        let t_dl = Instant::now();
+        let downloads = jobs
+            .iter()
+            .map(|(idx, url)| {
+                let idx = *idx;
+                let url = url.clone();
+                let referer = referer.to_string();
+                async move {
+                    let (bytes, _err) = self.safe_download(url, referer).await;
+                    (idx, bytes)
+                }
+            })
+            .collect::<Vec<_>>();
+        let fetched: Vec<(usize, Vec<u8>)> = futures::stream::iter(downloads)
+            .buffered(IMAGE_DOWNLOAD_CONCURRENCY)
+            .filter(|(_, bytes)| futures::future::ready(!bytes.is_empty()))
+            .collect()
+            .await;
+        self.timing.record("ocr_cover_download_batch", t_dl.elapsed());
+
+        let batch =
+            tokio::task::spawn_blocking(move || crate::media::ocr::ocr_images_bytes(fetched)).await;
+
+        let Ok(batch) = batch else {
+            return std::time::Duration::ZERO;
+        };
+        self.timing.record("ocr_predict", batch.predict);
+        for (idx, result) in batch.results {
+            let Some(card) = cards.get_mut(idx) else {
+                continue;
+            };
+            match result {
+                Ok(text) if !text.trim().is_empty() => {
+                    insert_string(card, "ocr_text", short(&text, 1200));
+                }
+                Ok(_) => {}
+                Err(err) => insert_string(card, "ocr_error", err),
+            }
+        }
+        batch.predict
     }
 
     pub async fn describe_image(

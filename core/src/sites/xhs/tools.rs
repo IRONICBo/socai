@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::agent::{Backend as LlmProvider, Tool, ToolContext, ToolResult};
 use crate::cdp::PageSession;
-use crate::media::{timing_delta, MediaProcessor, TimingSnapshot};
+use crate::media::{ocr_diagnostics, ocr_warm_up, timing_delta, MediaProcessor, TimingSnapshot};
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 
@@ -83,11 +83,13 @@ pub fn xhs_tools_with_llm_provider(
             llm_provider,
             history: history.clone(),
             always_download_media: false,
+            always_ocr: false,
         }),
         Arc::new(AuthorScanTool {
             page: page.clone(),
             history,
             always_download_media: false,
+            always_ocr: false,
         }),
         Arc::new(PageStateTool { page }),
     ]
@@ -99,19 +101,21 @@ pub fn xhs_macro_tools_with_llm_provider(
 ) -> Vec<Arc<dyn Tool>> {
     let history = Arc::new(XhsHistoryStore::open_default());
     // The app/TUI agent interface always downloads note media so the offline
-    // files are on hand for deeper analysis; the CLI keeps its --download-media
-    // opt-in via the full tool set above.
+    // files are on hand for deeper analysis, and always OCRs every image; the
+    // CLI keeps its --download-media / --ocr opt-ins via the full tool set above.
     vec![
         Arc::new(SearchTool {
             page: page.clone(),
             llm_provider,
             history: history.clone(),
             always_download_media: true,
+            always_ocr: true,
         }) as Arc<dyn Tool>,
         Arc::new(AuthorScanTool {
             page,
             history,
             always_download_media: true,
+            always_ocr: true,
         }),
     ]
 }
@@ -199,6 +203,16 @@ pub static XHS_SITE: SiteSpec = SiteSpec {
                     kind: ArgKind::Flag,
                 },
                 CommandArg {
+                    key: "ocr",
+                    long: Some("ocr"),
+                    value_name: "OCR",
+                    help: "OCR every downloaded note image (PP-OCRv6 small, local) and \
+                           attach per-image ocr_text plus a per-note ocr summary. \
+                           Implies --download-media. Ignored with --preview.",
+                    required: false,
+                    kind: ArgKind::Flag,
+                },
+                CommandArg {
                     key: "preview",
                     long: Some("preview"),
                     value_name: "PREVIEW",
@@ -245,6 +259,16 @@ pub static XHS_SITE: SiteSpec = SiteSpec {
                     kind: ArgKind::Flag,
                 },
                 CommandArg {
+                    key: "ocr",
+                    long: Some("ocr"),
+                    value_name: "OCR",
+                    help: "OCR every downloaded note image (PP-OCRv6 small, local) and \
+                           attach per-image ocr_text plus a per-note ocr summary. \
+                           Implies --download-media. Only applies when notes are opened.",
+                    required: false,
+                    kind: ArgKind::Flag,
+                },
+                CommandArg {
                     key: "preview",
                     long: Some("preview"),
                     value_name: "PREVIEW",
@@ -279,14 +303,18 @@ fn run_search(page: Arc<PageSession>, args: Value, debug_snapshot: bool) -> BoxF
             .get("preview")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        // download_media doesn't apply to a card-only (--preview) read. Drop it
-        // on preview runs so the run envelope doesn't advertise a `media_dir`
-        // for media that is never downloaded.
+        // OCR applies in both modes: a full scan OCRs every downloaded image, a
+        // --preview pass OCRs each result card's cover (like a human scanning the
+        // results page). So `ocr` is not gated on !preview.
+        let ocr = args.get("ocr").and_then(Value::as_bool).unwrap_or(false);
+        // download_media (full media into the run dir) doesn't apply to a
+        // card-only (--preview) read; in a full scan, OCR implies it.
         let download_media = !preview
-            && args
-                .get("download_media")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            && (ocr
+                || args
+                    .get("download_media")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false));
         search_command(
             page,
             "search",
@@ -294,6 +322,7 @@ fn run_search(page: Arc<PageSession>, args: Value, debug_snapshot: bool) -> BoxF
             filters.as_ref(),
             num_notes,
             download_media,
+            ocr,
             preview,
             debug_snapshot,
         )
@@ -315,20 +344,24 @@ fn run_author_scan(page: Arc<PageSession>, args: Value, debug_snapshot: bool) ->
             .get("preview")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        // download_media only applies when notes are opened. Drop it on preview
-        // runs so the run envelope doesn't advertise a `media_dir` for media that
-        // is never downloaded (mirrors `search`).
+        // OCR applies in both modes: a full scan OCRs every downloaded image, a
+        // --preview pass OCRs each note card's cover. download_media (full media
+        // into the run dir) only applies when notes are opened (not preview);
+        // there a full scan's OCR implies it.
+        let ocr = args.get("ocr").and_then(Value::as_bool).unwrap_or(false);
         let download_media = !preview
-            && args
-                .get("download_media")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            && (ocr
+                || args
+                    .get("download_media")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false));
         author_scan_command(
             page,
             &author_id,
             num_notes,
             preview,
             download_media,
+            ocr,
             debug_snapshot,
         )
         .await
@@ -377,6 +410,7 @@ pub async fn search_command(
     filters: Option<&Value>,
     num_notes: Option<i64>,
     download_media: bool,
+    ocr: bool,
     preview: bool,
     debug_snapshot: bool,
 ) -> anyhow::Result<Value> {
@@ -390,24 +424,26 @@ pub async fn search_command(
     run_xhs_tool_command(
         page,
         spec,
-        search_input(query, filters, num_notes, download_media, preview)?,
+        search_input(query, filters, num_notes, download_media, ocr, preview)?,
         debug_snapshot,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn author_scan_command(
     page: Arc<PageSession>,
     author_id: &str,
     num_notes: Option<i64>,
     preview: bool,
     download_media: bool,
+    ocr: bool,
     debug_snapshot: bool,
 ) -> anyhow::Result<Value> {
     run_xhs_tool_command(
         page,
         AUTHOR_SCAN_COMMAND,
-        author_scan_input(author_id, num_notes, preview, download_media)?,
+        author_scan_input(author_id, num_notes, preview, download_media, ocr)?,
         debug_snapshot,
     )
     .await
@@ -418,6 +454,7 @@ fn search_input(
     filters: Option<&Value>,
     num_notes: Option<i64>,
     download_media: bool,
+    ocr: bool,
     preview: bool,
 ) -> anyhow::Result<Value> {
     let mut input = json!({
@@ -432,6 +469,9 @@ fn search_input(
     if download_media {
         input["download_media"] = json!(true);
     }
+    if ocr {
+        input["ocr"] = json!(true);
+    }
     if preview {
         input["preview"] = json!(true);
     }
@@ -443,6 +483,7 @@ fn author_scan_input(
     num_notes: Option<i64>,
     preview: bool,
     download_media: bool,
+    ocr: bool,
 ) -> anyhow::Result<Value> {
     let mut input = json!({
         "author_id": trimmed_required(author_id, "author_id")?,
@@ -455,6 +496,9 @@ fn author_scan_input(
     }
     if download_media {
         input["download_media"] = json!(true);
+    }
+    if ocr {
+        input["ocr"] = json!(true);
     }
     Ok(input)
 }
@@ -542,6 +586,7 @@ fn read_note_options(input: &Value) -> ReadNoteOptions {
         level: "lite".to_string(),
         include_media: get_bool(input, "include_media", false),
         download_media: get_bool(input, "download_media", false),
+        ocr: get_bool(input, "ocr", false),
         max_images: get_i64(input, "max_images", 12).max(1) as usize,
         max_video_frames: get_i64(input, "max_video_frames", 4).max(1) as usize,
         poster_url_fallback: get_str(input, "poster_url_fallback")
@@ -628,22 +673,25 @@ async fn scan_card_note(
     comment_count: i64,
     include_media: bool,
     download_media: bool,
+    ocr: bool,
+    // When true, images are downloaded inline but OCR is left to the caller (run
+    // in a background task so it overlaps the next note's read+download). The
+    // dedup check still uses the real `ocr` flag, so a cache hit returns the
+    // already-OCR'd entity and needs no background work.
+    defer_ocr: bool,
 ) -> Value {
     let requested_media = include_media;
-    let can_use_cached_reads = !download_media;
 
-    // Dedup: skip notes already processed at this level or deeper within the
-    // same run OR in a previous run (cross-run history). Media downloads are
-    // never cache-skipped: the caller expects fresh files under the run_dir.
-    if can_use_cached_reads
-        && !card.note_id.is_empty()
-        && ctx.has_processed_note(&card.note_id, level, requested_media)
-    {
+    // Dedup applies to every read, including download/OCR runs: if a prior run
+    // already covers this note at the requested level + enrichments (vision,
+    // downloaded media, OCR), reuse the cached entity instead of re-opening,
+    // re-downloading, and re-OCR'ing it. The cached entity carries its prior
+    // ocr_text / local_path, so the reuse is complete.
+    if !card.note_id.is_empty() && ctx.has_processed_note(&card.note_id, level, requested_media) {
         return skipped_note_entry(card, "already_processed", history);
     }
-    if can_use_cached_reads
-        && !card.note_id.is_empty()
-        && history.is_satisfied_by(&card.note_id, level, requested_media)
+    if !card.note_id.is_empty()
+        && history.is_satisfied_by(&card.note_id, level, requested_media, download_media, ocr)
         // Only short-circuit when we actually have the cached entity to return;
         // a pre-upgrade entry without one is re-read so it backfills the cache
         // instead of degrading to a bare card.
@@ -662,6 +710,9 @@ async fn scan_card_note(
                 level: level.to_string(),
                 include_media,
                 download_media,
+                // Inline OCR only when not deferred; otherwise just download and
+                // let the caller OCR in the background.
+                ocr: ocr && !defer_ocr,
                 // Pure downloads are cheap compared with OCR/vision, so allow
                 // full XHS carousels instead of the enrichment-oriented default.
                 max_images: if download_media { 100 } else { 12 },
@@ -732,6 +783,9 @@ async fn scan_card_note(
         }
     }
 
+    // The note-level `ocr_text` array is derived at lean-trim time from each
+    // image's ocr_text (see lean_scan_note), so nothing to attach here.
+
     // Mark processed in-run + record in cross-run history.
     if !card.note_id.is_empty() {
         ctx.mark_processed_note(&card.note_id, level, requested_media);
@@ -743,6 +797,122 @@ async fn scan_card_note(
     }
 
     entry
+}
+
+/// Max note OCR tasks in flight at once. The OCR engine serializes inference
+/// behind its own mutex, so this mainly bounds decoded-image memory and blocking
+/// threads while still letting OCR overlap the browse loop.
+const OCR_PIPELINE_CONCURRENCY: usize = 4;
+
+/// Spawn a background task that OCRs a freshly-read note's already-downloaded
+/// images, returning the enriched image array. `None` when there's nothing to
+/// OCR (no media processor, or no image has a `local_path` yet). Runs
+/// concurrently with the browse loop so OCR of note N overlaps the read +
+/// download of note N+1.
+fn spawn_note_ocr(
+    media: &Option<MediaProcessor>,
+    sem: &Arc<tokio::sync::Semaphore>,
+    entry: &Value,
+    epoch: std::time::Instant,
+) -> Option<tokio::task::JoinHandle<NoteOcrResult>> {
+    // Only fresh successful reads (they carry `ok`); cache hits carry `skipped`
+    // and already have their ocr_text.
+    if entry.get("ok").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let images = entry
+        .get("entity")
+        .and_then(|entity| entity.get("images"))
+        .and_then(Value::as_array)
+        .cloned()?;
+    let has_local = images.iter().any(|image| {
+        image
+            .get("local_path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| !path.is_empty())
+    });
+    if !has_local {
+        return None;
+    }
+    let media = media.clone()?;
+    let sem = sem.clone();
+    let mut images = images;
+    Some(tokio::spawn(async move {
+        let _permit = sem.acquire_owned().await;
+        // Measure wall start→end relative to the shared scan epoch so the perf
+        // file can show each note's OCR span on the same timeline as the browse
+        // loop (started_ms < browse_ms ⇒ that OCR ran while browsing continued).
+        let started_ms = epoch.elapsed().as_millis() as u64;
+        let predict = media.ocr_downloaded_images(&mut images).await;
+        let finished_ms = epoch.elapsed().as_millis() as u64;
+        NoteOcrResult {
+            images,
+            started_ms,
+            finished_ms,
+            predict_ms: predict.as_millis() as u64,
+        }
+    }))
+}
+
+/// A note's background OCR result plus its measured timing (ms since the scan
+/// epoch). `finished_ms - started_ms` is the note's real OCR wall (including any
+/// time blocked on the engine mutex behind other notes); `predict_ms` is the
+/// batched inference time alone.
+struct NoteOcrResult {
+    images: Vec<Value>,
+    started_ms: u64,
+    finished_ms: u64,
+    predict_ms: u64,
+}
+
+/// Per-note OCR timing collected by [`join_note_ocr`], keyed by note index.
+struct NoteOcrTiming {
+    idx: usize,
+    started_ms: u64,
+    finished_ms: u64,
+    predict_ms: u64,
+}
+
+/// Await the background OCR tasks and merge each result back into its note:
+/// replace the note's images with the OCR'd ones and re-record the now-OCR'd
+/// entity in history (so a repeat run finds the OCR in cache). Returns each
+/// note's measured OCR wall span for the perf file. Order-independent — each
+/// task is keyed by note index.
+async fn join_note_ocr(
+    notes: &mut [Value],
+    pending: Vec<(usize, tokio::task::JoinHandle<NoteOcrResult>)>,
+    history: &XhsHistoryStore,
+    level: &str,
+    include_media: bool,
+) -> Vec<NoteOcrTiming> {
+    let mut timings = Vec::new();
+    for (idx, handle) in pending {
+        let Ok(result) = handle.await else {
+            continue;
+        };
+        timings.push(NoteOcrTiming {
+            idx,
+            started_ms: result.started_ms,
+            finished_ms: result.finished_ms,
+            predict_ms: result.predict_ms,
+        });
+        let Some(note) = notes.get_mut(idx) else {
+            continue;
+        };
+        if let Some(entity) = note.get_mut("entity").and_then(Value::as_object_mut) {
+            entity.insert("image_count".into(), json!(result.images.len()));
+            entity.insert("images".into(), Value::Array(result.images));
+        }
+        // The note-level `ocr_text` array is derived at lean-trim time from the
+        // per-image ocr_text (see lean_scan_note); the recorded entity keeps just
+        // the per-image OCR.
+        if note.get("ok").and_then(Value::as_bool) == Some(true) {
+            if let Some(entity) = note.get("entity") {
+                history.record(entity, level, include_media);
+            }
+        }
+    }
+    timings
 }
 
 /// Trim a search / author_scan bundle to the shape we hand back to the
@@ -801,6 +971,9 @@ const LEAN_NOTE_FIELDS: &[&str] = &[
     "favorites",
     "comments_count",
     "top_comments",
+    // Per-note OCR summary (joined from each image's ocr_text). Only present
+    // when the scan ran with `ocr`; the per-image texts stay in the artifact.
+    "ocr_text",
 ];
 
 /// Trim one scanned-note entry to the lean shape: drop the per-entry provenance
@@ -819,7 +992,15 @@ fn lean_scan_note(note: &mut Value) {
     entry.remove("skipped");
     entry.remove("error");
     entry.remove("open");
-    let Some(entity) = entry.get_mut("entity").and_then(Value::as_object_mut) else {
+    let Some(entity) = entry.get_mut("entity") else {
+        return;
+    };
+    // Derive the lean note-level `ocr_text` array from the per-image ocr_text
+    // here — while the images array is still present — so the artifact keeps only
+    // the per-image OCR (no duplicated note-level copy) and the lean return still
+    // carries the index-aligned, cover-first OCR view after images are dropped.
+    attach_note_ocr_summary(entity);
+    let Some(entity) = entity.as_object_mut() else {
         return;
     };
     // Collapse comment objects to their text before the whitelist runs (the
@@ -835,12 +1016,179 @@ fn lean_scan_note(note: &mut Value) {
     entity.retain(|key, _| LEAN_NOTE_FIELDS.contains(&key.as_str()));
 }
 
+/// Surface OCR text on the entity as `ocr_text`: an array of one string per
+/// note image, in image order (so the cover — image 0 for an XHS image note —
+/// is first). Each entry is that image's recognized text ("" when an image has
+/// none). No-op when no image produced any text. Called only during lean
+/// trimming (see [`lean_scan_note`]) so the artifact keeps only the per-image
+/// `ocr_text`; this is the lean, index-aligned view that survives images being
+/// dropped from the returned notes.
+fn attach_note_ocr_summary(entity: &mut Value) {
+    let Some(images) = entity.get("images").and_then(Value::as_array) else {
+        return;
+    };
+    let texts: Vec<Value> = images
+        .iter()
+        .map(|image| {
+            let text = image
+                .get("ocr_text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            Value::String(text)
+        })
+        .collect();
+    let any = texts
+        .iter()
+        .any(|value| value.as_str().is_some_and(|s| !s.is_empty()));
+    if !any {
+        return;
+    }
+    if let Some(map) = entity.as_object_mut() {
+        map.insert("ocr_text".into(), Value::Array(texts));
+    }
+}
+
+/// OCR performance/debug record, written to a separate file
+/// (`statistics/ocr_perf.json` in the run dir) rather than the LLM-facing JSON
+/// artifact. OCR runs as one batched `predict` per note (fast, multi-core), so
+/// timing is per note/batch, not per image. The recognized `ocr_text` stays on
+/// the images for the LLM; only timing lives here.
+///
+/// `summary` is the key to reading the pipeline. All `*_ms` are wall time:
+///   - `ocr_predict_total_ms` — summed per-note batch inference (total OCR CPU
+///     cost).
+///   - `ocr_wall_ms` — **measured** first-OCR-start → last-OCR-end. OCR tasks
+///     share one engine (serialized), so this ≈ `ocr_predict_total_ms`; the
+///     pipeline overlaps OCR with the *browse loop*, not with other OCR.
+///   - `browse_loop_ms` — the open→read→download→close loop OCR runs behind.
+///   - `ocr_overhang_ms` — OCR still running after the browse loop ended (the
+///     part the pipeline could NOT hide).
+///   - `scan_total_ms` — whole scan wall.
+///
+/// Each note carries `predict_ms` (its batch inference), plus
+/// `ocr_started_ms`/`ocr_finished_ms`/`ocr_wall_ms` (relative to scan start) so
+/// you can see its OCR span on the same timeline as the browse loop.
+fn write_note_ocr_perf(
+    ctx: &ToolContext,
+    notes: &[Value],
+    browse_loop_ms: u64,
+    timings: &[NoteOcrTiming],
+) {
+    if timings.is_empty() {
+        return;
+    }
+    let mut note_reports: Vec<Value> = Vec::new();
+    let mut total_images: u64 = 0;
+    let mut predict_total_ms: u64 = 0;
+    for t in timings {
+        let Some(note) = notes.get(t.idx) else {
+            continue;
+        };
+        let entity = note.get("entity");
+        let note_id = entity
+            .and_then(|e| e.get("note_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let images = entity
+            .and_then(|e| e.get("images"))
+            .and_then(Value::as_array)
+            .map(|a| a.len())
+            .unwrap_or(0) as u64;
+        total_images += images;
+        predict_total_ms += t.predict_ms;
+        note_reports.push(json!({
+            "note_id": note_id,
+            "images": images,
+            "predict_ms": t.predict_ms,
+            "ocr_started_ms": t.started_ms,
+            "ocr_finished_ms": t.finished_ms,
+            "ocr_wall_ms": t.finished_ms.saturating_sub(t.started_ms),
+        }));
+    }
+    if note_reports.is_empty() {
+        return;
+    }
+
+    // Overall OCR wall = first start → last finish, measured across all notes.
+    let ocr_wall_ms = match (
+        timings.iter().map(|t| t.started_ms).min(),
+        timings.iter().map(|t| t.finished_ms).max(),
+    ) {
+        (Some(start), Some(end)) => end.saturating_sub(start),
+        _ => 0,
+    };
+    let last_finish = timings.iter().map(|t| t.finished_ms).max().unwrap_or(0);
+    let scan_total_ms = browse_loop_ms.max(last_finish);
+    let ocr_overhang_ms = last_finish.saturating_sub(browse_loop_ms);
+
+    let perf = json!({
+        "ocr": ocr_diagnostics(),
+        "summary": {
+            "images": total_images,
+            "ocr_predict_total_ms": predict_total_ms,
+            "ocr_wall_ms": ocr_wall_ms,
+            "browse_loop_ms": browse_loop_ms,
+            "ocr_overhang_ms": ocr_overhang_ms,
+            "scan_total_ms": scan_total_ms,
+        },
+        "notes": note_reports,
+    });
+    write_run_perf_file(ctx, &perf);
+}
+
+/// OCR performance record for the preview path: all card covers are OCR'd in one
+/// batch, so this records the cover count and the batch inference + wall time.
+fn write_cover_ocr_perf(
+    ctx: &ToolContext,
+    covers: usize,
+    predict: std::time::Duration,
+    wall: std::time::Duration,
+) {
+    if covers == 0 {
+        return;
+    }
+    let perf = json!({
+        "ocr": ocr_diagnostics(),
+        "summary": {
+            "covers": covers,
+            "ocr_predict_ms": predict.as_millis() as u64,
+            "ocr_wall_ms": wall.as_millis() as u64,
+        },
+    });
+    write_run_perf_file(ctx, &perf);
+}
+
+/// Write an OCR perf record to `<run_dir>/statistics/ocr_perf.json`. Unlike
+/// artifacts, this is a plain debug file under a dedicated `statistics/` subdir —
+/// not registered, so it isn't surfaced to the LLM. Best-effort: write failures
+/// are ignored (perf logging must never fail a scan).
+fn write_run_perf_file(ctx: &ToolContext, perf: &Value) {
+    let dir = ctx.run_dir.join("statistics");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    if let Ok(rendered) = serde_json::to_string_pretty(perf) {
+        let _ = std::fs::write(dir.join("ocr_perf.json"), rendered);
+    }
+}
+
+/// Remove OCR timing keys from the media-timing summary so the JSON artifact's
+/// `timing.media` carries only non-OCR (download) timings; OCR timing lives in
+/// the dedicated `ocr_perf.json`.
+fn strip_ocr_timing(media_timing: &mut Value) {
+    if let Some(map) = media_timing.as_object_mut() {
+        map.retain(|key, _| !key.starts_with("ocr"));
+    }
+}
+
 /// Per-note properties that live only in the full scan artifact (dropped from
 /// the lean notes by [`lean_scan_note`]). Surfaced in the artifact pointer so
 /// the LLM knows what a `note_id` lookup can recover.
 const ARTIFACT_EXTRA_NOTE_PROPERTIES: &[&str] = &[
     "hashtags",
-    "images (index, url)",
+    "images (index, url, ocr_text, ocr_ms)",
     "image_count",
     "video",
     "type",
@@ -895,7 +1243,11 @@ fn attach_artifact_pointer(
 /// that overlaps the full-scan note shape — note_id, url, title, author, likes —
 /// plus `type` (image/video). The card's note link is exposed as `url` to match
 /// the note shape (the raw card calls it `link`).
-const LEAN_PREVIEW_CARD_FIELDS: &[&str] = &["note_id", "url", "title", "author", "likes", "type"];
+const LEAN_PREVIEW_CARD_FIELDS: &[&str] = &[
+    "note_id", "url", "title", "author", "likes", "type",
+    // Cover-image OCR text, present only when the preview ran with `ocr`.
+    "ocr_text",
+];
 
 /// Trim each `search --preview` card to [`LEAN_PREVIEW_CARD_FIELDS`], renaming
 /// `link` → `url` for parity with the full-scan note shape. The full cards stay
@@ -1036,15 +1388,17 @@ impl Tool for ReadNoteTool {
         let options = read_note_options(&input);
 
         // Cross-run dedup: short-circuit when a previous run already covers
-        // this note at the requested level + media. Only fires when note_id
-        // is known up front. Downloads are intentionally never skipped because
-        // the caller expects fresh local files in the current run dir.
+        // this note at the requested level + enrichments (vision, downloaded
+        // media, OCR). Only fires when note_id is known up front; the cached
+        // entity already carries any prior local_path / ocr_text.
         if let Some(id) = note_id.as_deref().filter(|s| !s.trim().is_empty()) {
-            if !options.download_media
-                && self
-                    .history
-                    .is_satisfied_by(id, &options.level, options.include_media)
-            {
+            if self.history.is_satisfied_by(
+                id,
+                &options.level,
+                options.include_media,
+                options.download_media,
+                options.ocr,
+            ) {
                 let entry = self.history.get(id).unwrap_or_default();
                 return Ok(json_result(&json!({
                     "ok": true,
@@ -1433,6 +1787,10 @@ pub struct SearchTool {
     /// Force media download regardless of the `download_media` input. Set by the
     /// app/TUI macro factory; the CLI/full set leaves the input in control.
     always_download_media: bool,
+    /// Force OCR (and therefore download) of every note image regardless of the
+    /// `ocr` input. Set by the app/TUI macro factory so the desktop agent always
+    /// gets OCR; the CLI/full set leaves it to the `--ocr` flag.
+    always_ocr: bool,
 }
 
 #[async_trait]
@@ -1449,6 +1807,8 @@ impl Tool for SearchTool {
          (search results + selected cards + note bodies + comments). Pass \
          `download_media=true` to download note images/videos into the run dir, \
          include local paths, and emit a stable media_manifest_path. Pass \
+         `ocr=true` to also OCR every downloaded image locally (PP-OCRv6 small) \
+         and attach a per-note ocr_text (implies download_media). Pass \
          `preview=true` for a fast cards-only pass that returns result cards \
          (titles/likes/covers) without opening any note. Defaults to 10 notes; \
          pass a larger `num_notes` to scan more (each note is opened, so latency \
@@ -1471,6 +1831,11 @@ impl Tool for SearchTool {
                 "download_media": {
                     "type": "boolean",
                     "description": "Download note images/videos into the command run_dir, include local_path fields in returned notes, and write a stable media_manifest.json surfaced by media_manifest_path. Ignored in preview mode.",
+                    "default": false
+                },
+                "ocr": {
+                    "type": "boolean",
+                    "description": "Run local OCR (PP-OCRv6 small). Full scan: OCR every downloaded note image (implies download_media); each returned note gets ocr_text as an array of per-image strings (image order, cover first). Preview: OCR each card's cover image and attach its ocr_text. Per-image ocr_text/ocr_ms and OCR diagnostics are kept in the artifact.",
                     "default": false
                 },
                 "preview": {
@@ -1500,12 +1865,31 @@ impl Tool for SearchTool {
             // the full-scan path: collect at least that many cards, scrolling
             // only if the first page holds fewer.
             let num_notes = Some(get_i64(&input, "num_notes", DEFAULT_NUM_NOTES).max(1) as usize);
+            // Warm the OCR engine off the critical path so cover OCR doesn't pay
+            // model-load latency; overlaps the search + card collection below.
+            let ocr = self.always_ocr || get_bool(&input, "ocr", false);
+            if ocr {
+                tokio::task::spawn_blocking(ocr_warm_up);
+            }
             let xhs = XhsPageRuntime::new(&self.page);
             let mut value = xhs
                 .search_notes(&query, filters.as_ref(), SEARCH_WAIT_SECONDS, num_notes)
                 .await?;
             if let Some(cards) = value.get_mut("cards") {
                 self.history.annotate_cards(cards);
+            }
+            // Preview OCR: read each result card's cover image (like a human
+            // glancing at the results page). Covers are fetched to memory and
+            // OCR'd without being saved to the run dir.
+            if ocr {
+                if let Some(cards) = value.get_mut("cards").and_then(Value::as_array_mut) {
+                    let media = MediaProcessor::for_run_dir(&ctx.run_dir, None)?;
+                    let cover_t0 = std::time::Instant::now();
+                    let predict = media.ocr_cover_images(cards, XHS_HOME_URL).await;
+                    let wall = cover_t0.elapsed();
+                    // Cover OCR timing goes to the perf file; cards keep only ocr_text.
+                    write_cover_ocr_perf(ctx, cards.len(), predict, wall);
+                }
             }
             let failed = value.get("ok").and_then(Value::as_bool) == Some(false);
             // On success, persist the full card bundle as an artifact (same as
@@ -1555,7 +1939,16 @@ impl Tool for SearchTool {
         // and pull top comments. Per-note image vision is off (it's the one
         // genuinely expensive enrichment and not needed for topic research).
         let include_media = false;
-        let download_media = self.always_download_media || get_bool(&input, "download_media", false);
+        // OCR implies download (it reads the saved files).
+        let ocr = self.always_ocr || get_bool(&input, "ocr", false);
+        let download_media =
+            ocr || self.always_download_media || get_bool(&input, "download_media", false);
+        // Warm the OCR engine off the critical path (model load + session init +
+        // graph compile) so the first note's OCR doesn't pay it; overlaps the
+        // search submit + first note open below.
+        if ocr {
+            tokio::task::spawn_blocking(ocr_warm_up);
+        }
 
         let media = media_for(
             ctx,
@@ -1601,6 +1994,7 @@ impl Tool for SearchTool {
                     "comments_per_note": TOP_COMMENTS_PER_NOTE,
                     "include_media": include_media,
                     "download_media": download_media,
+                    "ocr": ocr,
                 },
             });
             // `reason` already summarizes the failure; keep the failed scan
@@ -1632,6 +2026,13 @@ impl Tool for SearchTool {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut cursor = 0usize;
         let mut stalls = 0usize;
+        // OCR runs in the background so it overlaps the next note's read +
+        // download; tasks are joined after the browse loop.
+        let ocr_sem = Arc::new(tokio::sync::Semaphore::new(OCR_PIPELINE_CONCURRENCY));
+        let mut pending_ocr: Vec<(usize, tokio::task::JoinHandle<NoteOcrResult>)> = Vec::new();
+        // Wall-clock markers so the perf file can show how much OCR overlapped
+        // the browse loop (the pipeline benefit) vs. spilled past it.
+        let browse_t0 = std::time::Instant::now();
 
         while notes.len() < want {
             let cards = xhs.extract_search_cards().await?;
@@ -1670,16 +2071,38 @@ impl Tool for SearchTool {
                 comment_count,
                 include_media,
                 download_media,
+                ocr,
+                // Defer OCR to a background task when OCR is on, so the loop can
+                // move on to the next note's read + download immediately.
+                ocr,
             )
             .await;
             notes.push(entry);
+            let idx = notes.len() - 1;
+            if ocr {
+                if let Some(handle) = spawn_note_ocr(&media, &ocr_sem, &notes[idx], browse_t0) {
+                    pending_ocr.push((idx, handle));
+                }
+            }
             let _ = xhs.close_note(0.6).await;
         }
 
-        let media_timing = match (&media, &media_baseline) {
+        let browse_ms = browse_t0.elapsed().as_millis() as u64;
+        // Join background OCR (epoch = browse start, so the timings line up with
+        // browse_ms) and merge results back into the notes in place.
+        let ocr_timings =
+            join_note_ocr(&mut notes, pending_ocr, &self.history, level, include_media).await;
+        // Write OCR perf to a separate debug file and strip per-image ocr_ms from
+        // the notes so the JSON artifact stays LLM-facing (ocr_text only).
+        if ocr {
+            write_note_ocr_perf(ctx, &notes, browse_ms, &ocr_timings);
+        }
+
+        let mut media_timing = match (&media, &media_baseline) {
             (Some(media), Some(before)) => timing_delta(before, &media.timing().snapshot()),
             _ => json!({}),
         };
+        strip_ocr_timing(&mut media_timing);
 
         // Annotate cards in the search payload against the pre-call snapshot so
         // flags reflect "known before this scan" rather than "known after this
@@ -1720,11 +2143,14 @@ impl Tool for SearchTool {
                 "comments_per_note": TOP_COMMENTS_PER_NOTE,
                 "include_media": include_media,
                 "download_media": download_media,
+                "ocr": ocr,
             },
             "timing": {
                 "media": media_timing,
             }
         });
+        // OCR perf (model / EP / machine / per-image timing) is written to
+        // `ocr_perf.json` (see write_note_ocr_perf above), not the JSON artifact.
         if let Some((media_manifest_count, media_manifest_path, media_manifest_error)) =
             media_manifest_metadata
         {
@@ -1785,6 +2211,10 @@ pub struct AuthorScanTool {
     /// Force media download regardless of the `download_media` input. Set by the
     /// app/TUI macro factory; the CLI/full set leaves the input in control.
     always_download_media: bool,
+    /// Force OCR (and therefore download) of every note image regardless of the
+    /// `ocr` input. Set by the app/TUI macro factory; the CLI/full set leaves it
+    /// to the `--ocr` flag.
+    always_ocr: bool,
 }
 
 #[async_trait]
@@ -1800,7 +2230,9 @@ impl Tool for AuthorScanTool {
          summary cards in page order (pass `num_notes` to scroll the grid for \
          more, omit for just the first screen) → open each collected note and \
          read its body + top comments (like `search`; latency scales with the \
-         card count). Pass `preview=true` for a fast cards-only pass that \
+         card count). Pass `ocr=true` to also OCR every downloaded image locally \
+         (PP-OCRv6 small) and attach a per-note ocr_text (implies download_media). \
+         Pass `preview=true` for a fast cards-only pass that \
          returns the note cards (titles/likes/covers) without opening any note. \
          Use this for creator research — it's like `search` but scoped to one \
          author instead of a query."
@@ -1828,6 +2260,11 @@ impl Tool for AuthorScanTool {
                     "type": "boolean",
                     "description": "Download each note's images/videos into the run dir, include local_path fields, and emit a stable media_manifest_path. Ignored in preview mode.",
                     "default": false
+                },
+                "ocr": {
+                    "type": "boolean",
+                    "description": "Run local OCR (PP-OCRv6 small) on every downloaded note image, attaching per-image ocr_text in the artifact and a joined per-note ocr_text in the returned notes. Implies download_media. Ignored in preview mode.",
+                    "default": false
                 }
             },
             "required": ["author_id"]
@@ -1841,13 +2278,19 @@ impl Tool for AuthorScanTool {
             .ok_or_else(|| anyhow::anyhow!("missing author_id"))?
             .to_string();
         let preview = get_bool(&input, "preview", false);
-        // download_media only applies when notes are opened, so gate it on a
-        // full scan. Without this, a `preview=true, download_media=true` call
-        // would still spin up the media pipeline and emit media metadata even
-        // though no note is opened (the schema documents it as ignored in
-        // preview, and the CLI dispatcher gates it the same way).
-        let download_media =
-            !preview && (self.always_download_media || get_bool(&input, "download_media", false));
+        // OCR applies in both modes: a full scan OCRs every downloaded image, a
+        // preview OCRs each note card's cover. download_media only applies when
+        // notes are opened, so gate it on a full scan — without this, a
+        // `preview=true, download_media=true` call would still spin up the media
+        // pipeline and emit media metadata even though no note is opened.
+        let ocr = self.always_ocr || get_bool(&input, "ocr", false);
+        let download_media = !preview
+            && (ocr || self.always_download_media || get_bool(&input, "download_media", false));
+        // Warm the OCR engine off the critical path; overlaps opening the profile
+        // and collecting note cards below.
+        if ocr {
+            tokio::task::spawn_blocking(ocr_warm_up);
+        }
         let num_notes = input
             .get("num_notes")
             .and_then(Value::as_i64)
@@ -1921,6 +2364,11 @@ impl Tool for AuthorScanTool {
         // `preview` returns the cards only and skips this.
         let mut notes: Vec<Value> = Vec::new();
         if !preview {
+            // OCR runs in the background so it overlaps the next note's read +
+            // download; tasks are joined after the loop.
+            let ocr_sem = Arc::new(tokio::sync::Semaphore::new(OCR_PIPELINE_CONCURRENCY));
+            let mut pending_ocr: Vec<(usize, tokio::task::JoinHandle<NoteOcrResult>)> = Vec::new();
+            let browse_t0 = std::time::Instant::now();
             for card in &cards {
                 if !card.note_id.is_empty() {
                     ctx.add_search_note_ids(std::slice::from_ref(&card.note_id));
@@ -1934,17 +2382,43 @@ impl Tool for AuthorScanTool {
                     TOP_COMMENTS_PER_NOTE,
                     false,
                     download_media,
+                    ocr,
+                    ocr,
                 )
                 .await;
                 notes.push(entry);
+                let idx = notes.len() - 1;
+                if ocr {
+                    if let Some(handle) = spawn_note_ocr(&media, &ocr_sem, &notes[idx], browse_t0) {
+                        pending_ocr.push((idx, handle));
+                    }
+                }
                 let _ = xhs.close_note(0.6).await;
+            }
+            let browse_ms = browse_t0.elapsed().as_millis() as u64;
+            let ocr_timings =
+                join_note_ocr(&mut notes, pending_ocr, &self.history, "deep", false).await;
+            if ocr {
+                write_note_ocr_perf(ctx, &notes, browse_ms, &ocr_timings);
+            }
+        } else if ocr {
+            // Preview + OCR: read each note card's cover image (fetched to
+            // memory, not saved), mirroring the search preview path.
+            if let Some(cards_value) = profile_value.get_mut("note_cards").and_then(Value::as_array_mut)
+            {
+                let cover_media = MediaProcessor::for_run_dir(&ctx.run_dir, None)?;
+                let covers = cards_value.len();
+                let cover_t0 = std::time::Instant::now();
+                let predict = cover_media.ocr_cover_images(cards_value, XHS_HOME_URL).await;
+                write_cover_ocr_perf(ctx, covers, predict, cover_t0.elapsed());
             }
         }
 
-        let media_timing = match (&media, &media_baseline) {
+        let mut media_timing = match (&media, &media_baseline) {
             (Some(media), Some(before)) => timing_delta(before, &media.timing().snapshot()),
             _ => json!({}),
         };
+        strip_ocr_timing(&mut media_timing);
 
         // Build the media manifest from `notes` before they move into payload.
         let media_manifest_metadata = if download_media {
@@ -1970,9 +2444,12 @@ impl Tool for AuthorScanTool {
                 "preview": preview,
                 "comments_per_note": if preview { 0 } else { TOP_COMMENTS_PER_NOTE },
                 "download_media": download_media,
+                "ocr": ocr,
             },
             "timing": { "media": media_timing },
         });
+
+        // OCR perf is written to `ocr_perf.json` (see above), not the artifact.
 
         if let Some((count, path, error)) = media_manifest_metadata {
             if let Some(map) = payload.as_object_mut() {
