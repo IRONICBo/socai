@@ -18,6 +18,7 @@ const messages = {
   "common.or": { en: "or,", zh: "或" },
   "common.save": { en: "save", zh: "保存" },
   "common.saving": { en: "saving…", zh: "保存中…" },
+  "common.cancel": { en: "cancel", zh: "取消" },
 
   "chrome.label": { en: "chrome", zh: "chrome" },
   "chrome.connectAria": { en: "connect chrome", zh: "连接 chrome" },
@@ -97,7 +98,13 @@ const messages = {
   "agent.selectProviderAria": { en: "select agent provider", zh: "选择智能体服务商" },
   "agent.provider": { en: "provider", zh: "服务商" },
   "agent.apiKey": { en: "api key", zh: "api key" },
-  "agent.credentialConfigured": { en: "{provider} credential configured.", zh: "{provider} 凭证已配置。" },
+  "agent.credentialConfigured": { en: "{provider} api key configured.", zh: "{provider} api key 已配置。" },
+  "agent.chatgptConnected": { en: "chatgpt subscription connected.", zh: "chatgpt 订阅已连接。" },
+  "agent.updateCredential": { en: "update api key", zh: "更新 api key" },
+  "agent.replaceCredential": {
+    en: "saving replaces your current {provider} api key.",
+    zh: "保存后将替换当前的 {provider} api key。",
+  },
   "agent.modelVersion": { en: "model version", zh: "模型版本" },
   "agent.loading": { en: "loading", zh: "加载中" },
   "agent.keyNeeded": { en: "api key needed", zh: "需要 api key" },
