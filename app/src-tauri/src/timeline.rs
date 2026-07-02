@@ -268,6 +268,9 @@ pub(crate) fn live_timeline_event(
 }
 
 pub(crate) fn load_task_events(snapshot: &AgentTaskSnapshot) -> Vec<AgentTaskEventPayload> {
+    // Replays the run.json/llm/tools layout only. Runs recorded before that
+    // layout (#160, pre-2026-07) replay as just their terminal state —
+    // legacy timeline.jsonl support was deliberately dropped.
     let mut events = replay_task_events(snapshot);
     if !events.is_empty() {
         ensure_started_event(snapshot, &mut events);

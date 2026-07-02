@@ -65,6 +65,33 @@ export interface TimelineEntity {
   data: unknown;
 }
 
+/** One media item of a note (SocaiV2 design contract). media[0] === cover. */
+export interface NoteMedia {
+  kind: "image" | "video";
+  ratio?: string; // "3:4" | "1:1" | "9:16" | "16:9"
+  src?: string; // downloaded file — absolute path, or media_dir-relative
+  poster?: string; // video only — first-frame still (path)
+  dur?: string; // video only — "0:48"
+  w?: number;
+  h?: number;
+}
+
+/** A note the agent saw/cited — one canonical object per note (the registry unit). */
+export interface NoteData {
+  note_id: string;
+  url?: string;
+  title?: string;
+  excerpt?: string;
+  author?: { name?: string; handle?: string; avatar?: string };
+  posted_at?: number; // epoch ms
+  stats?: { likes?: number; collects?: number; comments?: number; shares?: number };
+  media?: NoteMedia[]; // media[0] === cover
+  media_dir?: string; // run-relative folder, when src paths are relative
+  saved?: boolean;
+  // Tolerate extra fields the archive may carry.
+  [key: string]: unknown;
+}
+
 export interface AgentTaskEventPayload {
   task_id: string;
   kind:
@@ -451,8 +478,12 @@ async function main(): Promise<void> {
   // rows append in place to preserve scroll.
   await listen<AgentTaskEventPayload>("agent_task:event", (event) => {
     if (agentPanel.appendTaskEvent(event.payload)) render();
-    // A finished task is a good, quiet moment to check for an update.
-    if (isTaskFinishedEvent(event.payload)) void maybeCheckForUpdate();
+    if (isTaskFinishedEvent(event.payload)) {
+      // A finished task is a good, quiet moment to check for an update, and the
+      // point at which its full note archive (notes.json) is on disk to render.
+      void maybeCheckForUpdate();
+      void agentPanel.loadTaskNotes(event.payload.task_id, shell());
+    }
   });
 
   let initialTasks: AgentTaskSnapshot[] = [];
@@ -483,6 +514,7 @@ async function main(): Promise<void> {
   bindGlobalDismiss();
   installUpdatePreviewHook();
   void hydrateTaskEvents(initialTasks);
+  void agentPanel.loadSelectedTaskNotes(shell());
   void maybeCheckForUpdate();
 
   const refresh = (): void => {

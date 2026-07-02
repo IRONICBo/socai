@@ -4,10 +4,12 @@
 //! filling the pane. When only one panel has content — a running task with no
 //! answer yet, or a failed task that produced only an error — it falls back to a
 //! single stacked panel. (Narrow windows fold split into a stack via CSS.)
+//!
+//! Below the body, a full-width filmstrip shows the notes the agent saw.
 
 import type { AgentTaskEventPayload } from "../main";
 import { esc } from "../lib/html";
-import { renderMarkdown } from "../lib/markdown";
+import { renderNoteAnswer, renderTimelineEmbed, setNoteRegistry } from "./notes";
 import { formatTaskCount, formatTaskTimestamp, formatTokenUsage, formatTurns, taskStatusLabel, t } from "../lib/i18n";
 import type { AgentTaskView } from "./tasks";
 
@@ -60,6 +62,10 @@ function renderTaskRows(props: SidebarProps): string {
 
 export function renderTaskDetail(task: AgentTaskView | undefined): string {
   if (!task) return renderEmptyDetail();
+
+  // Point the note UI at this task's archive; the timeline embeds and answer
+  // citations below resolve refs against it, and so does the viewer on click.
+  setNoteRegistry(task.notes, task.run_dir);
 
   const running = task.status === "running" || task.status === "queued";
   const hasTimeline = task.events.length > 0 || running;
@@ -134,7 +140,7 @@ function renderResultPanel(task: AgentTaskView): string {
     return `
       <div class="agent-outcome detail-panel">
         <p class="t-eyebrow result-label detail-panel-label">${esc(t("task.finalAnswer"))}</p>
-        <div class="result-pre result-md">${renderMarkdown(task.final_text.trim())}</div>
+        <div class="result-pre result-md note-answer">${renderNoteAnswer(task.final_text)}</div>
       </div>
     `;
   }
@@ -157,7 +163,39 @@ function renderEmptyDetail(): string {
 
 export function renderAgentEvent(ev: AgentTaskEventPayload): string {
   const glyph = eventGlyph(ev.kind);
-  return `<div class="event event-${ev.kind}"><span class="event-glyph">${glyph}</span><span class="event-text">${esc(ev.text)}</span></div>`;
+  const row = `<div class="event event-${ev.kind}"><span class="event-glyph">${glyph}</span><span class="event-text">${esc(ev.text)}</span></div>`;
+  // Embed the notes this step surfaced as rich cards beneath the row.
+  if (ev.kind === "tool_result") {
+    const embed = renderTimelineEmbed(noteRefsFromEvent(ev), "rich");
+    if (embed) return `${row}${embed}`;
+  }
+  return row;
+}
+
+// Note refs a tool_result surfaced: the design's `{type:"note", data:{ref}}`
+// entities, plus (for the current bulk `search`/`author_scan` tools) the note
+// ids nested in the xhs_search / card-grid / note entities.
+function noteRefsFromEvent(ev: AgentTaskEventPayload): string[] {
+  const refs: string[] = [];
+  const push = (v: unknown): void => {
+    if (typeof v === "string" && v && !refs.includes(v)) refs.push(v);
+  };
+  const asArray = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+  for (const entity of ev.entities ?? []) {
+    const data = (entity?.data ?? {}) as Record<string, unknown>;
+    if (entity?.type === "note") {
+      push(typeof data.ref === "string" ? data.ref : (data as { note_id?: unknown }).note_id);
+      continue;
+    }
+    push(data.note_id);
+    for (const n of asArray(data.notes)) {
+      const obj = n as { entity?: { note_id?: unknown }; note_id?: unknown };
+      push(obj?.entity?.note_id ?? obj?.note_id);
+    }
+    for (const c of asArray(data.cards)) push((c as { note_id?: unknown })?.note_id);
+    for (const c of asArray(data.note_cards)) push((c as { note_id?: unknown })?.note_id);
+  }
+  return refs;
 }
 
 // Elapsed run time: started→finished, or started→now while still running.
