@@ -720,7 +720,7 @@ fn tool_result_event(
         .map(|value| normalize_entities(name, value))
         .unwrap_or_default();
     let error = error.map(str::trim).filter(|err| !err.is_empty());
-    let (_kind, text) = format_tool_result_text(name, summary, duration_ms, error.unwrap_or(""));
+    let (_kind, text) = format_tool_result_text(name, content, duration_ms, error.unwrap_or(""));
     if let Some(error) = error {
         AgentTaskEventKind::ToolError {
             id: id.to_string(),
@@ -767,15 +767,73 @@ fn format_tool_call_text(tool: &str, input: &Value, repeat_count: u64) -> String
 
 fn format_tool_result_text(
     tool: &str,
-    summary: &str,
+    content: &Value,
     duration_ms: u64,
     error: &str,
 ) -> (&'static str, String) {
+    let duration = format_tool_duration(duration_ms);
     if !error.trim().is_empty() {
-        return ("tool_error", format!("{tool} ({duration_ms}ms): {error}"));
+        return ("tool_error", format!("{tool} ({duration}): {error}"));
     }
-    let first = summary.lines().next().unwrap_or("");
-    ("tool_result", format!("{tool} ({duration_ms}ms): {first}"))
+    let tokens = format_token_estimate(estimate_result_tokens(content));
+    ("tool_result", format!("{tool} ({duration} · {tokens})"))
+}
+
+fn format_tool_duration(duration_ms: u64) -> String {
+    let tenths = (duration_ms + 50) / 100;
+    if tenths < 10 {
+        return format!("0.{tenths}s");
+    }
+    let secs = (duration_ms + 500) / 1000;
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    format!("{}m {:02}s", secs / 60, secs % 60)
+}
+
+// No provider reports per-tool-result tokens, so estimate: ~4 ASCII chars per
+// token, ~1 token per non-ASCII (CJK) char. Image blocks carry no text here.
+fn estimate_result_tokens(content: &Value) -> u64 {
+    let mut ascii = 0u64;
+    let mut wide = 0u64;
+    let mut count = |text: &str| {
+        for ch in text.chars() {
+            if ch.is_ascii() {
+                ascii += 1;
+            } else {
+                wide += 1;
+            }
+        }
+    };
+    match content {
+        Value::Array(items) => {
+            for item in items {
+                if item.get("type").and_then(Value::as_str) != Some("text") {
+                    continue;
+                }
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    count(text);
+                }
+            }
+        }
+        Value::String(text) => count(text),
+        Value::Null => {}
+        other => count(&other.to_string()),
+    }
+    ascii / 4 + wide
+}
+
+fn format_token_estimate(tokens: u64) -> String {
+    // 9_950+ rounds to 10k under {:.1}, so switch to the integer-k format there.
+    if tokens >= 9_950 {
+        format!("~{}k tokens", (tokens + 500) / 1000)
+    } else if tokens >= 1_000 {
+        format!("~{:.1}k tokens", tokens as f64 / 1000.0)
+    } else if tokens == 1 {
+        "~1 token".into()
+    } else {
+        format!("~{tokens} tokens")
+    }
 }
 
 fn raw_tool_result_value(content: &Value) -> Option<Value> {
