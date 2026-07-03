@@ -26,6 +26,10 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # prebuilt ONNX Runtime at build time (download-binaries) + SIMD CPU kernels.
 # CPU-only by design: benchmarks showed CoreML/DirectML run PP-OCR slower, so we
 # don't compile in those execution providers.
+# Excluded on Intel macOS: ONNX Runtime 1.23+ (ort 2.0.0-rc.11+) ships no
+# x86_64-apple-darwin binaries, so the x64 half of the universal build gets a
+# stub OCR (see media/ocr.rs) instead of the real engine.
+[target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
 oar-ocr = "0.7"
 
 [dev-dependencies]

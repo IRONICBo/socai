@@ -12,24 +12,43 @@
 //! Execution is CPU-only: benchmarking PP-OCRv6 on Apple Silicon showed the
 //! CoreML EP runs ~2× slower (small dynamic OCR graphs defeat ANE/GPU offload),
 //! so we ship the ONNX Runtime CPU provider and don't compile in CoreML/DirectML.
+//!
+//! Intel macOS is the exception: ONNX Runtime 1.23+ (ort 2.0.0-rc.11+) ships no
+//! x86_64-apple-darwin build, so the x64 slice of the universal binary compiles
+//! without `oar-ocr` and uses a stub that reports every image as an OCR error —
+//! the media pipeline already treats per-image errors as "no text".
 
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 use std::path::{Path, PathBuf};
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+use std::time::Instant;
+use std::time::Duration;
 
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 use anyhow::{anyhow, Context, Result};
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 use oar_ocr::oarocr::{OAROCRBuilder, OAROCR};
 use serde_json::{json, Value};
 
 /// PP-OCRv6 tiny models + dict, baked into the binary. Paths are relative to
 /// this source file (`core/src/media/ocr.rs` → `core/assets/ocr/`).
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 const DET_ONNX: &[u8] = include_bytes!("../../assets/ocr/ppocrv6_tiny_det.onnx");
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 const REC_ONNX: &[u8] = include_bytes!("../../assets/ocr/ppocrv6_tiny_rec.onnx");
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 const REC_DICT: &[u8] = include_bytes!("../../assets/ocr/ppocrv6_tiny_rec_dict.txt");
 
 /// Human-readable model identity, surfaced in OCR diagnostics.
 pub const MODEL_NAME: &str = "PP-OCRv6_tiny (det+rec, ONNX)";
 
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const OCR_UNAVAILABLE: &str =
+    "ocr unavailable on intel macs: onnx runtime has no x86_64-apple-darwin build";
+
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 static ENGINE: OnceLock<std::result::Result<Mutex<OAROCR>, String>> = OnceLock::new();
 
 /// Run OCR on a batch of already-decoded image byte blobs, tagged with a caller
@@ -41,6 +60,7 @@ static ENGINE: OnceLock<std::result::Result<Mutex<OAROCR>, String>> = OnceLock::
 /// note/batch instead. Decode/engine/predict failures are returned per item as
 /// `Err(message)` and never panic. Designed to be called from inside
 /// `tokio::task::spawn_blocking`.
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 pub fn ocr_images_bytes(items: Vec<(usize, Vec<u8>)>) -> OcrBatch {
     let mut out: Vec<(usize, std::result::Result<String, String>)> = Vec::new();
     let mut idxs: Vec<usize> = Vec::new();
@@ -127,10 +147,29 @@ pub struct OcrBatch {
     pub predict: Duration,
 }
 
+/// Stub for Intel macOS (no ONNX Runtime build for x86_64-apple-darwin):
+/// every image comes back as a per-item error, same shape the real engine uses
+/// for decode/engine failures, so callers need no special casing.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub fn ocr_images_bytes(items: Vec<(usize, Vec<u8>)>) -> OcrBatch {
+    OcrBatch {
+        results: items
+            .into_iter()
+            .map(|(idx, _)| (idx, Err(OCR_UNAVAILABLE.to_string())))
+            .collect(),
+        predict: Duration::ZERO,
+    }
+}
+
+/// Stub for Intel macOS: nothing to warm up.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub fn warm_up() {}
+
 /// Build the OCR engine and run one tiny prediction so the model load + ORT
 /// session init + graph compilation happen off the critical path. Safe to call
 /// from `spawn_blocking` at the start of an OCR run; the global engine is built
 /// once, so a later real OCR reuses it. Best-effort: errors are ignored.
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 pub fn warm_up() {
     let Ok(engine) = engine() else {
         return;
@@ -149,10 +188,14 @@ pub fn warm_up() {
 /// written into the LLM-facing JSON artifact.
 pub fn diagnostics() -> Value {
     let machine = crate::util::machine::machine_info();
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    let (runtime, execution_provider) = ("onnxruntime (ort 2.0.0-rc.12)", "cpu");
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    let (runtime, execution_provider) = (OCR_UNAVAILABLE, "none");
     json!({
         "model": MODEL_NAME,
-        "runtime": "onnxruntime (ort 2.0.0-rc.12)",
-        "execution_provider": "cpu",
+        "runtime": runtime,
+        "execution_provider": execution_provider,
         // Debug builds run OCR ~7-8× slower than release; surface it so a slow
         // perf record is obviously attributable to an unoptimized build.
         "build": if cfg!(debug_assertions) { "debug" } else { "release" },
@@ -167,6 +210,7 @@ pub fn diagnostics() -> Value {
 }
 
 /// Lazily build (once) and return the process-global OCR pipeline.
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 fn engine() -> std::result::Result<&'static Mutex<OAROCR>, String> {
     ENGINE
         .get_or_init(|| build_engine().map_err(|err| format!("{err:#}")))
@@ -174,6 +218,7 @@ fn engine() -> std::result::Result<&'static Mutex<OAROCR>, String> {
         .map_err(|err| err.clone())
 }
 
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 fn build_engine() -> Result<Mutex<OAROCR>> {
     let dir = model_cache_dir()?;
     std::fs::create_dir_all(&dir)
@@ -196,6 +241,7 @@ fn build_engine() -> Result<Mutex<OAROCR>> {
 /// Per-user cache dir for the extracted model files, e.g.
 /// `~/Library/Caches/socai/ocr` on macOS. Versioned by the model set so a
 /// future model swap writes a fresh directory instead of reusing stale bytes.
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 fn model_cache_dir() -> Result<PathBuf> {
     let base = dirs::cache_dir().ok_or_else(|| anyhow!("no user cache dir available"))?;
     Ok(base.join("socai").join("ocr").join("ppocrv6-tiny-v1"))
@@ -204,6 +250,7 @@ fn model_cache_dir() -> Result<PathBuf> {
 /// Write an embedded asset to `dir/name` if it's missing or a different size.
 /// Returns the path. Size check is a cheap "already extracted" guard — the
 /// bytes are immutable, baked into the binary.
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 fn write_asset(dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf> {
     let path = dir.join(name);
     let needs_write = match std::fs::metadata(&path) {
@@ -217,7 +264,7 @@ fn write_asset(dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf> {
     Ok(path)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(all(target_os = "macos", target_arch = "x86_64"))))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
