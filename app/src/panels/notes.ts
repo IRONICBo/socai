@@ -84,8 +84,10 @@ function kindIcon(note: NoteData): string {
 }
 
 // ── media frame ─────────────────────────────────────────────────────
-// Universal 3:4 frame. Images fill (cover). A 9:16 video is pillarboxed inside.
-// `gallery` renders a real <video controls>; elsewhere video shows poster+play.
+// Cards/thumbs/dots: universal 3:4 frame — images fill (cover), a 9:16 video
+// is pillarboxed inside. `gallery` is full-bleed: the gallery frame adopts the
+// media's own ratio (see frameRatio), so a real <video controls> spans the
+// frame's full width and the native timeline scrubber has room to render.
 type MediaVariant = "cover" | "thumb" | "dot" | "gallery";
 function mediaFrame(note: NoteData, m: NoteMedia, variant: MediaVariant, count = 0): string {
   const decorative = variant === "thumb" || variant === "dot";
@@ -97,11 +99,11 @@ function mediaFrame(note: NoteData, m: NoteMedia, variant: MediaVariant, count =
       const inner = videoUrl
         ? `<video class="note-media__img" controls preload="metadata"${posterUrl ? ` poster="${esc(posterUrl)}"` : ""} src="${esc(videoUrl)}"></video>`
         : `${posterImg}<span class="note-media__play">${IC.play()}</span>`;
-      return `<span class="note-media note-media--pillarbox" data-kind="video"><span class="note-media__inner">${inner}</span></span>`;
+      return `<span class="note-media" data-kind="video">${inner}</span>`;
     }
     return `<span class="note-media note-media--pillarbox" data-kind="video"><span class="note-media__inner">${posterImg}${
       decorative ? "" : `<span class="note-media__play">${IC.play()}</span>`
-    }${m.dur && !decorative ? `<span class="note-media__dur t-mono">${esc(m.dur)}</span>` : ""}</span></span>`;
+    }${m.dur && !decorative ? `<span class="note-media__dur">${esc(m.dur)}</span>` : ""}</span></span>`;
   }
   const url = assetUrl(note, m.src);
   // gallery slides are pre-rendered hidden — lazy would defer them to first
@@ -109,7 +111,7 @@ function mediaFrame(note: NoteData, m: NoteMedia, variant: MediaVariant, count =
   const img = url
     ? `<img class="note-media__img" src="${esc(url)}" alt=""${variant === "gallery" ? "" : ` loading="lazy"`} />`
     : `<span class="note-media--placeholder" style="position:absolute;inset:0"></span>`;
-  const badge = count > 1 && !decorative ? `<span class="note-media__count t-mono">${IC.stack()}${count}</span>` : "";
+  const badge = count > 1 && !decorative ? `<span class="note-media__count">${IC.stack()}${count}</span>` : "";
   return `<span class="note-media" data-kind="image">${img}${badge}</span>`;
 }
 
@@ -130,6 +132,9 @@ function avatar(note: NoteData, cls = ""): string {
 }
 
 // ── rich card (the timeline embed unit + answer sources) ────────────
+// The carousel corner belongs to the `1/2` idx chip alone — the ▣-count badge
+// (same corner, same pill) is for static covers only; stacking both reads as
+// a broken chip. Rich covers carousel, compact covers stay static (design).
 function coverInner(note: NoteData, idx: number): string {
   const media = note.media && note.media.length ? note.media : [coverOf(note)];
   const i = Math.max(0, Math.min(idx, media.length - 1));
@@ -137,16 +142,20 @@ function coverInner(note: NoteData, idx: number): string {
   const nav = multi
     ? `<button type="button" class="note-card__nav note-card__nav--prev" data-note-nav="-1" aria-label="previous image">${IC.chevL()}</button>` +
       `<button type="button" class="note-card__nav note-card__nav--next" data-note-nav="1" aria-label="next image">${IC.chevR()}</button>` +
-      `<span class="note-card__idx t-mono">${i + 1}/${media.length}</span>`
+      `<span class="note-card__idx">${i + 1}/${media.length}</span>`
     : "";
-  return mediaFrame(note, media[i], "cover", media.length) + nav;
+  return mediaFrame(note, media[i], "cover") + nav;
 }
 function renderCard(note: NoteData, density: "rich" | "compact" = "rich"): string {
   const title = esc(note.title || "");
   const name = esc((note.author && note.author.name) || "");
+  const cover =
+    density === "rich"
+      ? `<div class="note-card__cover" data-note-cover="${esc(note.note_id)}" data-idx="0">${coverInner(note, 0)}</div>`
+      : `<div class="note-card__cover">${mediaFrame(note, coverOf(note), "cover", (note.media || []).length)}</div>`;
   return `
     <div class="note-card" data-density="${density}" data-note-open="${esc(note.note_id)}" role="button" tabindex="0" title="${title}">
-      <div class="note-card__cover" data-note-cover="${esc(note.note_id)}" data-idx="0">${coverInner(note, 0)}</div>
+      ${cover}
       <div class="note-card__body">
         <div class="note-card__title">${title}</div>
         ${statsRow(note)}
@@ -218,12 +227,20 @@ export function renderNoteAnswer(src: string): string {
 // All slides render up front; navigation only toggles `hidden`. Keeping the
 // DOM alive preserves decoded images and video state, so switching never
 // flashes the way an innerHTML re-render does.
+// Each frame hugs its own media's ratio (core stamps "9:16" on videos, "3:4"
+// on images) rather than the cards' universal 3:4 — no gray pillarbox bars,
+// and a video's native controls get the full frame width.
+function frameRatio(m: NoteMedia): string {
+  const parsed = /^(\d+)\s*:\s*(\d+)$/.exec(m.ratio || "");
+  if (parsed) return `${parsed[1]} / ${parsed[2]}`;
+  return m.kind === "video" ? "9 / 16" : "3 / 4";
+}
 function galleryStage(note: NoteData, idx: number): string {
   const media = note.media && note.media.length ? note.media : [coverOf(note)];
   const i = Math.max(0, Math.min(idx, media.length - 1));
   const multi = media.length > 1;
   const frames = media
-    .map((m, j) => `<div class="note-gallery__frame"${j === i ? "" : " hidden"}>${mediaFrame(note, m, "gallery")}</div>`)
+    .map((m, j) => `<div class="note-gallery__frame" style="aspect-ratio: ${frameRatio(m)}"${j === i ? "" : " hidden"}>${mediaFrame(note, m, "gallery")}</div>`)
     .join("");
   const nav = multi
     ? `<button type="button" class="note-gallery__nav note-gallery__nav--prev" data-gallery-nav="-1"${i === 0 ? " disabled" : ""} aria-label="previous">${IC.chevL()}</button>` +
