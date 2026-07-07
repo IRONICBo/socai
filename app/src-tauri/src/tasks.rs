@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
-use socai_core::agent::{mark_agent_run_status, Session};
+use socai_core::agent::{mark_agent_run_status, Conversation};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::AbortHandle;
 
@@ -44,9 +44,14 @@ pub struct AgentTaskSnapshot {
     // Hydrated from `<run_dir>/report.md` for API responses; not persisted in tasks.json.
     pub(crate) final_text: Option<String>,
     pub(crate) error: Option<String>,
-    pub(crate) turns: Option<u32>,
+    pub(crate) steps: Option<u32>,
     pub(crate) input_tokens: Option<u64>,
     pub(crate) output_tokens: Option<u64>,
+    // The text driving the in-flight/most recent run — distinct from `task`,
+    // which stays the thread's original title across replies. Not persisted
+    // to tasks.json (Option fields default to None on load, which is the
+    // right fallback for a run interrupted across an app restart).
+    pub(crate) current_message: Option<String>,
 }
 
 impl Default for AgentTaskRegistry {
@@ -69,9 +74,10 @@ impl Default for AgentTaskRegistry {
                 if let (Some(session_dir), Some(run_dir)) =
                     (task.session_dir.as_deref(), task.run_dir.as_deref())
                 {
-                    if let Ok(mut session) = Session::load(session_dir) {
-                        session.record_run(
-                            &task.task,
+                    if let Ok(mut conversation) = Conversation::load(session_dir) {
+                        let user_text = task.current_message.as_deref().unwrap_or(&task.task);
+                        conversation.record_run(
+                            user_text,
                             "[task interrupted: app was closed before this task finished]",
                             &PathBuf::from(run_dir),
                             "interrupted",
@@ -111,6 +117,7 @@ impl AgentTaskRegistry {
         let task_id = format!("task-{}-{}", now_ms(), guard.next_seq);
         let snapshot = AgentTaskSnapshot {
             task_id,
+            current_message: Some(task.clone()),
             task,
             provider,
             model,
@@ -124,7 +131,7 @@ impl AgentTaskRegistry {
             target_id: None,
             final_text: None,
             error: None,
-            turns: None,
+            steps: None,
             input_tokens: None,
             output_tokens: None,
         };
@@ -297,7 +304,7 @@ impl AgentTaskRegistry {
         };
 
         let _timeline_guard = timeline_lock.lock().await;
-        let sequence = self.next_timeline_sequence(task_id).await;
+        let sequence = self.next_timeline_sequence(task_id, &snapshot).await;
         Some(timeline::live_timeline_event(
             &snapshot,
             payload,
@@ -306,12 +313,28 @@ impl AgentTaskRegistry {
         ))
     }
 
-    async fn next_timeline_sequence(&self, task_id: &str) -> u64 {
+    /// Next live sequence for a task's timeline. The counter is in-memory
+    /// only, while the frontend dedupes/merges events on `task_id:sequence` —
+    /// so after an app restart a fresh counter would reuse the sequences the
+    /// replayed history already occupies, and a follow-up's live rows would
+    /// overwrite earlier turns' rows in place. Seed a missing counter past
+    /// the current replay length instead. The disk read happens at most once
+    /// per task per process, under this task's timeline lock.
+    async fn next_timeline_sequence(&self, task_id: &str, snapshot: &AgentTaskSnapshot) -> u64 {
+        let seeded = {
+            let guard = self.inner.lock().await;
+            guard.timeline_next_seq.contains_key(task_id)
+        };
+        let seed = if seeded {
+            1
+        } else {
+            timeline::load_task_events(snapshot).len() as u64 + 1
+        };
         let mut guard = self.inner.lock().await;
         let next = guard
             .timeline_next_seq
             .entry(task_id.to_string())
-            .or_insert(1);
+            .or_insert(seed);
         let sequence = *next;
         *next = sequence.saturating_add(1);
         sequence
@@ -376,8 +399,10 @@ fn hydrate_task_snapshot(mut snapshot: AgentTaskSnapshot) -> AgentTaskSnapshot {
             if let Ok(run) = serde_json::from_str::<Value>(&text) {
                 snapshot.run_id = run.get("id").and_then(Value::as_str).map(str::to_string);
                 snapshot.error = run.get("error").and_then(Value::as_str).map(str::to_string);
-                snapshot.turns = run
-                    .get("turns")
+                // Pre-rename runs (< #190) recorded the step count as "turns".
+                snapshot.steps = run
+                    .get("steps")
+                    .or_else(|| run.get("turns"))
                     .and_then(Value::as_u64)
                     .map(|value| value as u32);
                 snapshot.input_tokens = run.pointer("/usage/input_tokens").and_then(Value::as_u64);

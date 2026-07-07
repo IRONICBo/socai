@@ -4,9 +4,10 @@ use crate::timeline::{agent_event_to_timeline, AgentTaskEventKind, AgentTaskEven
 use anyhow::Result;
 use serde_json::{json, Map, Value};
 use socai_core::agent::{
-    catalog_models_for, configured_default_model_for, configured_default_provider, make_run_dir,
-    mark_agent_run_status, provider_credential_kind, resolve_provider, save_default_model,
-    AgentEvent, CredentialKind, ModelCatalogEntry, Provider, Session,
+    catalog_models_for, configured_default_model_for, configured_default_provider,
+    desktop_agent_tools, make_run_dir, mark_agent_run_status, provider_credential_kind,
+    resolve_provider, save_default_model, AgentEvent, Conversation, CredentialKind,
+    ModelCatalogEntry, Provider,
 };
 use socai_core::runtime::{
     create_llm_provider_for, ensure_llm_provider_configured_for,
@@ -19,10 +20,15 @@ use socai_core::telemetry::tool_call::{summarize_tool_args, summarize_tool_resul
 use std::io::{BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
-const TAURI_AGENT_PREAMBLE: &str = "You are running inside the socai desktop app.";
+const TAURI_AGENT_PREAMBLE: &str =
+    "You are running inside the socai desktop app as a conversational, multi-turn agent. \
+     Besides the Xiaohongshu site tools you have local environment tools, confined to \
+     socai's data directories (run artifacts, session records): `read_file` (read text, \
+     or view image/screenshot artifacts) and `bash` (run shell commands, scoped to those \
+     same directories, to write files, list/grep artifacts, etc.). Maintain continuity \
+     with earlier turns in this chat.";
 
 // Appended AFTER the site playbook so it sits at the tail of the system
 // prompt — the position models weight most (prepended into the preamble,
@@ -87,12 +93,6 @@ async fn require_connected(runtime: &SocaiRuntime) -> Result<(), String> {
     }
 }
 
-async fn close_page(page: Arc<RuntimePageSession>) {
-    if let Ok(page) = Arc::try_unwrap(page) {
-        let _ = page.close().await;
-    }
-}
-
 async fn label_controlled_page(page: &RuntimePageSession, label: &str) {
     let prefix = format!("◼ socai · {}", title_safe(label));
     let Ok(prefix_json) = serde_json::to_string(&prefix) else {
@@ -138,7 +138,7 @@ fn title_safe(value: &str) -> String {
 pub struct AgentRunOutcome {
     run_id: String,
     run_dir: String,
-    turns: u32,
+    steps: u32,
     final_text: String,
     input_tokens: u64,
     output_tokens: u64,
@@ -365,12 +365,15 @@ pub async fn agent_task_start(
     ensure_llm_provider_configured_for(provider.as_deref(), model.as_deref())
         .map_err(|e| format!("{e:#}"))?;
 
+    // One conversation = one folder under the runs root, named after the
+    // first task; each turn's run dir nests inside it (turn-01_…, turn-02_…).
     let site_id = app_site().map(|site| site.id).unwrap_or("agent");
-    let run_dir = make_run_dir(&format!("{site_id} {task_text}"));
-    let _ = std::fs::create_dir_all(&run_dir);
-    let session = Session::new(model.clone())
+    let conversation_dir = make_run_dir(&format!("{site_id} {task_text}"));
+    let conversation = Conversation::create_at(&conversation_dir, model.clone())
         .map_err(|err| format!("failed to create desktop conversation session for task: {err}"))?;
-    let session_dir = session.dir.display().to_string();
+    let run_dir = conversation.next_turn_dir(&task_text);
+    let _ = std::fs::create_dir_all(&run_dir);
+    let session_dir = conversation.dir.display().to_string();
     let registry = tasks.inner().clone();
     let snapshot = registry
         .create(
@@ -422,6 +425,108 @@ pub async fn agent_task_start(
     Ok(snapshot)
 }
 
+/// Continue an existing task's conversation with a follow-up message. The
+/// task must be terminal (not queued/running) — replies are serialized, same
+/// as new tasks, via `MAX_CONCURRENT_AGENT_TASKS`. Keeps the same `task_id`
+/// and `session_dir` (so the whole thread's history stays attached to one
+/// sidebar entry) but starts a fresh run dir for this turn.
+#[tauri::command]
+pub async fn agent_task_reply(
+    app: AppHandle,
+    runtime: State<'_, SocaiRuntime>,
+    tasks: State<'_, AgentTaskRegistry>,
+    telemetry: State<'_, DesktopTelemetry>,
+    task_id: String,
+    message: String,
+) -> Result<AgentTaskSnapshot, String> {
+    require_connected(&runtime).await?;
+    let message_text = message.trim().to_string();
+    if message_text.is_empty() {
+        return Err("message is empty".into());
+    }
+    let registry = tasks.inner().clone();
+    let existing = registry
+        .get(&task_id)
+        .await
+        .ok_or_else(|| format!("unknown task: {task_id}"))?;
+    if matches!(existing.status.as_str(), "queued" | "running") {
+        return Err("task is still running — wait for it to finish before replying".into());
+    }
+    let Some(session_dir) = existing.session_dir.as_deref() else {
+        return Err("task has no conversation to continue".into());
+    };
+    let provider = existing.provider.clone();
+    let model = existing.model.clone();
+    ensure_llm_provider_configured_for(provider.as_deref(), model.as_deref())
+        .map_err(|e| format!("{e:#}"))?;
+
+    // This turn's run dir nests inside the conversation dir. Tasks created
+    // before nesting have their session dir under ~/.socai/sessions; their
+    // new turns nest there too, which the timeline and delete paths handle
+    // the same way.
+    let conversation = Conversation::load(session_dir)
+        .map_err(|err| format!("failed to load conversation for task: {err}"))?;
+    let run_dir = conversation.next_turn_dir(&message_text);
+    let _ = std::fs::create_dir_all(&run_dir);
+
+    let snapshot = registry
+        .update(&task_id, |snapshot| {
+            snapshot.status = "queued".into();
+            snapshot.started_at = None;
+            snapshot.finished_at = None;
+            snapshot.run_id = None;
+            snapshot.run_dir = Some(run_dir.display().to_string());
+            snapshot.target_id = None;
+            snapshot.final_text = None;
+            snapshot.error = None;
+            snapshot.steps = None;
+            snapshot.input_tokens = None;
+            snapshot.output_tokens = None;
+            snapshot.current_message = Some(message_text.clone());
+        })
+        .await
+        .ok_or_else(|| format!("unknown task: {task_id}"))?;
+
+    let runtime = runtime.inner().clone();
+    let telemetry = telemetry.inner().clone();
+    let task_id_for_spawn = task_id.clone();
+    let app_for_task = app.clone();
+    let registry_for_task = registry.clone();
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
+    let join = tokio::spawn(async move {
+        if start_rx.await.is_err() {
+            return;
+        }
+        run_agent_task_background(
+            app_for_task,
+            registry_for_task,
+            runtime,
+            task_id_for_spawn,
+            message_text,
+            provider,
+            model,
+            run_dir,
+            telemetry,
+        )
+        .await;
+    });
+    if let Some(handle) = tasks.set_abort_handle(&task_id, join.abort_handle()).await {
+        handle.abort();
+    } else {
+        emit_task_event(
+            &app,
+            tasks.inner(),
+            &task_id,
+            "queued",
+            "reply queued".into(),
+            Some(snapshot.clone()),
+        )
+        .await;
+        let _ = start_tx.send(());
+    }
+    Ok(snapshot)
+}
+
 #[tauri::command]
 pub async fn agent_task_list(
     tasks: State<'_, AgentTaskRegistry>,
@@ -451,10 +556,13 @@ pub async fn agent_task_events(
         .ok_or_else(|| format!("unknown task: {task_id}"))
 }
 
-/// Notes the agent saw during a run — full content + resolved local media,
-/// read from `<run_dir>/notes.json`. Empty when the run recorded none (or has
-/// not scanned yet). Powers the desktop app's embedded rich-note cards; works
-/// live (run_dir is set at task creation) and on history reload.
+/// Notes the agent saw across the task's whole conversation — full content +
+/// resolved local media, aggregated from every run's `notes.json` (oldest
+/// first, re-reads overwrite in place) so earlier turns' citations keep
+/// resolving after a follow-up. Media paths are absolutized against each
+/// note's own run dir, since one registry now spans several run dirs. Powers
+/// the desktop app's embedded rich-note cards; works live (run_dir is set at
+/// task creation) and on history reload.
 #[tauri::command]
 pub async fn agent_task_notes(
     tasks: State<'_, AgentTaskRegistry>,
@@ -464,12 +572,59 @@ pub async fn agent_task_notes(
         .get(&task_id)
         .await
         .ok_or_else(|| format!("unknown task: {task_id}"))?;
-    let Some(run_dir) = snapshot.run_dir else {
-        return Ok(Vec::new());
+    let mut order: Vec<String> = Vec::new();
+    let mut by_id: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    for (run_dir, _) in crate::timeline::conversation_run_dirs(&snapshot) {
+        for mut note in socai_core::agent::note_store::load_notes(&run_dir) {
+            absolutize_note_media(&mut note, &run_dir);
+            let Some(id) = note
+                .get("note_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            if !by_id.contains_key(&id) {
+                order.push(id.clone());
+            }
+            by_id.insert(id, note);
+        }
+    }
+    Ok(order
+        .into_iter()
+        .filter_map(|id| by_id.remove(&id))
+        .collect())
+}
+
+/// Rewrite a note's run-dir-relative media paths (`media[].src`/`poster`,
+/// resolved via `media_dir`) to absolute paths, so notes from different runs
+/// can share one frontend registry.
+fn absolutize_note_media(note: &mut Value, run_dir: &std::path::Path) {
+    let media_dir = note
+        .get("media_dir")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let base = if media_dir.is_empty() {
+        run_dir.to_path_buf()
+    } else {
+        run_dir.join(&media_dir)
     };
-    Ok(socai_core::agent::note_store::load_notes(
-        std::path::Path::new(&run_dir),
-    ))
+    let Some(media) = note.get_mut("media").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for item in media {
+        for key in ["src", "poster"] {
+            let Some(value) = item.get(key).and_then(Value::as_str) else {
+                continue;
+            };
+            if value.is_empty() || std::path::Path::new(value).is_absolute() {
+                continue;
+            }
+            item[key] = json!(base.join(value).to_string_lossy());
+        }
+    }
 }
 
 #[tauri::command]
@@ -503,7 +658,7 @@ pub async fn agent_task_cancel(
                 "run_id": snapshot.run_id.clone(),
                 "model": snapshot.model.clone(),
                 "outcome": "cancelled",
-                "turns": snapshot.turns,
+                "steps": snapshot.steps,
                 "input_tokens": snapshot.input_tokens,
                 "output_tokens": snapshot.output_tokens,
                 "duration_ms": duration_ms(snapshot.started_at, snapshot.finished_at),
@@ -522,9 +677,12 @@ pub async fn agent_task_cancel(
     Ok(snapshot)
 }
 
-/// Remove a task from history and delete its on-disk artifacts: the run dir
-/// (run.json, report.md, notes.json, media) and the conversation session dir.
-/// Active tasks must be cancelled first; the registry enforces that.
+/// Remove a task from history and delete its on-disk artifacts: every run dir
+/// the conversation recorded (run.json, report.md, notes.json, media), the
+/// latest run dir, and the conversation session dir. With the nested layout,
+/// removing the session dir covers the turns inside it; the explicit run-dir
+/// list also cleans up conversations whose turns predate nesting. Active
+/// tasks must be cancelled first; the registry enforces that.
 #[tauri::command]
 pub async fn agent_task_delete(
     tasks: State<'_, AgentTaskRegistry>,
@@ -532,7 +690,19 @@ pub async fn agent_task_delete(
     task_id: String,
 ) -> Result<(), String> {
     let snapshot = tasks.delete(&task_id).await?;
-    for dir in [&snapshot.run_dir, &snapshot.session_dir].into_iter().flatten() {
+    let mut dirs: Vec<String> = Vec::new();
+    if let Some(session_dir) = &snapshot.session_dir {
+        if let Ok(conversation) = Conversation::load(session_dir) {
+            dirs.extend(conversation.runs.iter().map(|run| run.run_dir.clone()));
+        }
+        dirs.push(session_dir.clone());
+    }
+    if let Some(run_dir) = &snapshot.run_dir {
+        dirs.push(run_dir.clone());
+    }
+    dirs.sort();
+    dirs.dedup();
+    for dir in &dirs {
         if let Err(err) = std::fs::remove_dir_all(dir) {
             if err.kind() != std::io::ErrorKind::NotFound {
                 eprintln!("failed to delete task artifacts at {dir}: {err}");
@@ -619,7 +789,7 @@ async fn run_agent_task_background(
         }),
     );
 
-    let result = run_agent_task_on_fresh_page(
+    let result = run_agent_task_on_shared_page(
         app.clone(),
         task_id.clone(),
         runtime,
@@ -646,7 +816,7 @@ async fn run_agent_task_background(
                     // Final answer is hydrated from run_dir/report.md; tasks.json stays an index.
                     snapshot.final_text = None;
                     snapshot.error = None;
-                    snapshot.turns = Some(outcome.turns);
+                    snapshot.steps = Some(outcome.steps);
                     snapshot.input_tokens = Some(outcome.input_tokens);
                     snapshot.output_tokens = Some(outcome.output_tokens);
                 })
@@ -661,7 +831,7 @@ async fn run_agent_task_background(
                         "provider": provider.clone(),
                         "model": model.clone(),
                         "outcome": "completed",
-                        "turns": outcome.turns,
+                        "steps": outcome.steps,
                         "input_tokens": outcome.input_tokens,
                         "output_tokens": outcome.output_tokens,
                         "duration_ms": duration_ms(snapshot.started_at, snapshot.finished_at),
@@ -727,14 +897,15 @@ fn record_desktop_session(snapshot: &AgentTaskSnapshot, assistant: &str, status:
     let Some(run_dir) = snapshot.run_dir.as_deref() else {
         return;
     };
-    let Ok(mut session) = Session::load(session_dir) else {
+    let Ok(mut conversation) = Conversation::load(session_dir) else {
         return;
     };
-    session.record_run(&snapshot.task, assistant, &PathBuf::from(run_dir), status);
+    let user_text = snapshot.current_message.as_deref().unwrap_or(&snapshot.task);
+    conversation.record_run(user_text, assistant, &PathBuf::from(run_dir), status);
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_agent_task_on_fresh_page(
+async fn run_agent_task_on_shared_page(
     app: AppHandle,
     task_id: String,
     runtime: SocaiRuntime,
@@ -750,25 +921,35 @@ async fn run_agent_task_on_fresh_page(
     if task.is_empty() {
         anyhow::bail!("task is empty");
     }
-    let session_id = if let Some(registry) = &registry {
+    let session_dir = if let Some(registry) = &registry {
         registry
             .get(&task_id)
             .await
             .and_then(|snapshot| snapshot.session_dir)
-            .and_then(|dir| {
-                PathBuf::from(dir)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(str::to_string)
-            })
     } else {
         None
     };
+    // Prior runs in this conversation, so a reply can continue it — empty for
+    // a brand-new conversation's first run.
+    let conversation = session_dir.as_deref().and_then(|dir| Conversation::load(dir).ok());
+    let seed_messages = conversation
+        .as_ref()
+        .map(|c| c.chat_messages())
+        .unwrap_or_default();
+    let session_id = conversation.as_ref().map(|c| c.id.clone());
+    let context_note = conversation
+        .as_ref()
+        .map(|c| c.context_note())
+        .unwrap_or_default();
 
     ensure_llm_provider_configured_for(provider, model)?;
     let llm_provider = create_llm_provider_for(provider, model)?;
     let site = app_site()?;
-    let page = Arc::new(runtime.create_page(site.home_url).await?);
+    // Reused across every task/reply for the life of the browser connection —
+    // matches the TUI's ensure_site_page, so a follow-up continues on the
+    // same tab instead of navigating a fresh one from scratch. The runtime
+    // detects and replaces it if the user closed the tab externally.
+    let page = runtime.ensure_site_page(site.id, site.home_url).await?;
     let target_id = page.target_id().to_string();
     label_controlled_page(&page, &title_label).await;
     if let Some(registry) = &registry {
@@ -791,20 +972,23 @@ async fn run_agent_task_on_fresh_page(
     }
     let outcome = async {
         let agent_tools = site.default_agent_tools.unwrap_or(site.agent_tools);
-        let tools = agent_tools(page.clone(), llm_provider.clone()).await?;
+        let mut tools = agent_tools(page.clone(), llm_provider.clone()).await?;
+        tools.extend(desktop_agent_tools());
         let (tx, rx) = tokio::sync::broadcast::channel::<AgentEvent>(256);
         let pump = pump_agent_task_events(app, registry.clone(), task_id.clone(), telemetry, rx);
 
         let agent_instructions = site
             .default_agent_instructions
             .unwrap_or(site.agent_instructions);
+        let preamble = format!("{TAURI_AGENT_PREAMBLE}\n\n{context_note}");
         let config = AgentRunConfig {
             extra_instructions: format!(
                 "{}{}",
-                agent_instructions(TAURI_AGENT_PREAMBLE),
+                agent_instructions(&preamble),
                 TAURI_CITATION_RULES
             ),
             enabled_sites: vec![site.id.to_string()],
+            seed_messages,
             run_dir,
             session_id,
             ..AgentRunConfig::default()
@@ -816,7 +1000,7 @@ async fn run_agent_task_on_fresh_page(
         Ok::<AgentRunOutcome, anyhow::Error>(AgentRunOutcome {
             run_id: outcome.run_id,
             run_dir: outcome.run_dir.display().to_string(),
-            turns: outcome.turns,
+            steps: outcome.steps,
             final_text: outcome.final_text,
             input_tokens: outcome.total_input_tokens,
             output_tokens: outcome.total_output_tokens,
@@ -830,7 +1014,6 @@ async fn run_agent_task_on_fresh_page(
             })
             .await;
     }
-    close_page(page).await;
     outcome
 }
 
@@ -862,7 +1045,7 @@ fn pump_agent_task_events(
                 }
                 AgentEvent::ToolResult {
                     name,
-                    turn,
+                    step,
                     sequence,
                     input,
                     content,
@@ -874,7 +1057,7 @@ fn pump_agent_task_events(
                     props.insert("task_id".into(), json!(task_id.clone()));
                     props.insert("run_id".into(), json!(run_id.clone()));
                     props.insert("tool_name".into(), json!(name));
-                    props.insert("turn".into(), json!(turn));
+                    props.insert("step".into(), json!(step));
                     props.insert("sequence".into(), json!(sequence));
                     props.insert("duration_ms".into(), json!(tool_duration_ms));
                     props.insert("ok".into(), json!(error.is_none()));

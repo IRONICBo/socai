@@ -3,7 +3,7 @@
 //! Each fact has one owner:
 //! - `run.json` owns agent-run metadata and aggregate usage.
 //! - `llm/NNN.request.json` and `llm/NNN.response.json` own exact LLM I/O.
-//! - `tools/turn-NNN-call-NN-name/tool.json` owns tool input and lifecycle.
+//! - `tools/step-NNN-call-NN-name/tool.json` owns tool input and lifecycle.
 //! - tool `output.json` owns the raw tool result.
 //! - standalone tool `tool.json` additionally owns its input because there is
 //!   no parent LLM response.
@@ -184,7 +184,29 @@ impl AgentRunRecorder {
         write_json_atomic(
             &self.run_dir.join(format!("llm/{step:03}.response.json")),
             &value,
-        )
+        )?;
+        // Keep running usage/step totals in run.json so the desktop app can
+        // show them live mid-run; `finish` overwrites with the final figures.
+        {
+            let mut manifest = self.manifest.lock().expect("poisoned");
+            let input = manifest
+                .pointer("/usage/input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                + response.input_tokens;
+            let output = manifest
+                .pointer("/usage/output_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                + response.output_tokens;
+            manifest["usage"] = json!({
+                "input_tokens": input,
+                "output_tokens": output,
+            });
+            manifest["steps"] = json!(step);
+            write_json_atomic(&self.manifest_path, &manifest)?;
+        }
+        Ok(())
     }
 
     pub fn record_llm_error(
@@ -205,13 +227,13 @@ impl AgentRunRecorder {
 
     pub fn start_tool_call(
         &self,
-        turn: u32,
+        step: u32,
         sequence: u32,
         tool_name: &str,
         input: &Value,
     ) -> std::io::Result<ToolCallRecorder> {
         let dir = self.run_dir.join("tools").join(format!(
-            "turn-{turn:03}-call-{sequence:02}-{}",
+            "step-{step:03}-call-{sequence:02}-{}",
             safe_component(tool_name, "tool")
         ));
         ToolCallRecorder::start_agent(dir, tool_name, input)
@@ -220,7 +242,7 @@ impl AgentRunRecorder {
     pub fn finish(
         &self,
         status: &str,
-        turns: u32,
+        steps: u32,
         input_tokens: u64,
         output_tokens: u64,
         error: Option<&str>,
@@ -228,7 +250,7 @@ impl AgentRunRecorder {
         let mut manifest = self.manifest.lock().expect("poisoned");
         manifest["status"] = json!(status);
         manifest["duration_ms"] = json!(self.started.elapsed().as_millis() as u64);
-        manifest["turns"] = json!(turns);
+        manifest["steps"] = json!(steps);
         manifest["usage"] = json!({
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,

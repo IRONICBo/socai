@@ -1121,12 +1121,99 @@ body.has-paper > * { position: relative; z-index: 1; }
 }
 .event-glyph { color: var(--fg-soft); }
 .event-text { white-space: pre-wrap; word-break: break-word; }
-.event-turn { color: var(--fg-soft); margin-top: var(--sp-1); }
+.event-step { color: var(--fg-soft); margin-top: var(--sp-1); }
 .event-reasoning .event-text { color: var(--fg-soft); }
 .event-tool_call .event-text { color: var(--fg-muted); }
 .event-tool_error .event-glyph,
 .event-api_error .event-glyph { color: var(--status-error-fg); }
 .event-done .event-glyph { color: var(--ink-0); }
+
+/* ── Run groups (one per reply) + reply composer ──────────────────
+   A task's timeline can span several runs once replies land — each run's
+   "started" event becomes a message boundary instead of a generic row. */
+.run-group {
+  padding-top: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+.run-group:first-child { padding-top: 0; margin-top: 0; }
+.run-group + .run-group { border-top: var(--hairline); }
+/* The user's message renders as a right-aligned filled bubble so it reads as
+   "you said this" at a glance instead of blending into the agent's event
+   rows. Filled vs hollow is the design system's emphasis axis — the one
+   non-hairline signal available in monochrome. */
+.run-message {
+  margin-bottom: var(--sp-3);
+  text-align: right;
+}
+.run-message__label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  margin-bottom: 3px;
+}
+.run-message__text {
+  display: inline-block;
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  max-width: 88%;
+  background: var(--ink-0);
+  color: var(--canvas);
+  border-radius: var(--r-4);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-align: left;
+}
+/* An earlier run's final answer, rendered rich inside its group (the latest
+   run's answer lives in the answer panel instead). */
+.run-answer {
+  margin-top: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: var(--hairline);
+  border-radius: var(--r-4);
+  background: var(--surface);
+  font-size: 13px;
+}
+.task-reply-form { flex: none; margin-top: var(--sp-2); }
+.task-reply-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0 0;
+}
+.task-reply-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+  border: var(--hairline);
+  border-radius: var(--r-4);
+  background: var(--surface);
+  padding: var(--sp-2);
+}
+.task-reply-input {
+  flex: 1;
+  min-width: 0;
+  min-height: 20px;
+  max-height: 120px;
+  resize: none;
+  border: 0;
+  background: transparent;
+  padding: var(--sp-1) var(--sp-2);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.task-reply-input::placeholder { color: var(--fg-faint); }
+.task-reply-input:focus { outline: none; }
+.task-reply-input:disabled { color: var(--fg-soft); cursor: not-allowed; }
+.task-reply-send { flex: none; }
+.task-reply-error { padding: var(--sp-1) var(--sp-1) 0; }
 
 /* ── Final-answer reference (timeline terminal) ────────────────────
    From the SocaiV2 handoff. The timeline's last item no longer repeats the

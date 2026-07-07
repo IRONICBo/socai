@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use socai_core::agent::AgentEvent;
+use socai_core::agent::{AgentEvent, Conversation, Run};
 
 use crate::tasks::{now_ms, AgentTaskSnapshot};
 
@@ -41,22 +41,22 @@ pub(crate) enum AgentTaskEventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_id: Option<String>,
     },
-    Turn {
-        turn: u32,
+    Step {
+        step: u32,
         text: String,
     },
     Assistant {
-        turn: u32,
+        step: u32,
         text: String,
     },
     Reasoning {
-        turn: u32,
+        step: u32,
         text: String,
     },
     ToolCall {
         id: String,
-        turn: u32,
-        sequence_in_turn: u32,
+        step: u32,
+        sequence_in_step: u32,
         name: String,
         label: String,
         args: Value,
@@ -65,8 +65,8 @@ pub(crate) enum AgentTaskEventKind {
     },
     ToolResult {
         id: String,
-        turn: u32,
-        sequence_in_turn: u32,
+        step: u32,
+        sequence_in_step: u32,
         name: String,
         label: String,
         args: Value,
@@ -83,8 +83,8 @@ pub(crate) enum AgentTaskEventKind {
     },
     ToolError {
         id: String,
-        turn: u32,
-        sequence_in_turn: u32,
+        step: u32,
+        sequence_in_step: u32,
         name: String,
         label: String,
         args: Value,
@@ -99,14 +99,14 @@ pub(crate) enum AgentTaskEventKind {
         text: String,
     },
     ApiError {
-        turn: u32,
+        step: u32,
         message: String,
         text: String,
     },
     Done {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
-        turns: u32,
+        steps: u32,
         text: String,
     },
     Completed {
@@ -157,7 +157,7 @@ impl AgentTaskEventKind {
             Self::Running { .. } => "running",
             Self::Started { .. } => "started",
             Self::Tab { .. } => "tab",
-            Self::Turn { .. } => "turn",
+            Self::Step { .. } => "step",
             Self::Assistant { .. } => "assistant",
             Self::Reasoning { .. } => "reasoning",
             Self::ToolCall { .. } => "tool_call",
@@ -181,16 +181,16 @@ impl AgentTaskEventKind {
                 text,
                 target_id: None,
             },
-            "turn" => Self::Turn {
-                turn: first_number(&text).unwrap_or_default(),
+            "step" => Self::Step {
+                step: first_number(&text).unwrap_or_default(),
                 text,
             },
-            "assistant" => Self::Assistant { turn: 0, text },
-            "reasoning" => Self::Reasoning { turn: 0, text },
+            "assistant" => Self::Assistant { step: 0, text },
+            "reasoning" => Self::Reasoning { step: 0, text },
             "tool_call" => Self::ToolCall {
                 id: String::new(),
-                turn: 0,
-                sequence_in_turn: 0,
+                step: 0,
+                sequence_in_step: 0,
                 name: "tool".into(),
                 label: "tool".into(),
                 args: Value::Null,
@@ -199,8 +199,8 @@ impl AgentTaskEventKind {
             },
             "tool_result" => Self::ToolResult {
                 id: String::new(),
-                turn: 0,
-                sequence_in_turn: 0,
+                step: 0,
+                sequence_in_step: 0,
                 name: "tool".into(),
                 label: "tool".into(),
                 args: Value::Null,
@@ -214,8 +214,8 @@ impl AgentTaskEventKind {
             },
             "tool_error" => Self::ToolError {
                 id: String::new(),
-                turn: 0,
-                sequence_in_turn: 0,
+                step: 0,
+                sequence_in_step: 0,
                 name: "tool".into(),
                 label: "tool".into(),
                 args: Value::Null,
@@ -228,13 +228,13 @@ impl AgentTaskEventKind {
                 text,
             },
             "api_error" => Self::ApiError {
-                turn: 0,
+                step: 0,
                 message: text.clone(),
                 text,
             },
             "done" => Self::Done {
                 run_id: None,
-                turns: first_number(&text).unwrap_or_default(),
+                steps: first_number(&text).unwrap_or_default(),
                 text,
             },
             "completed" => Self::Completed { text },
@@ -247,7 +247,7 @@ impl AgentTaskEventKind {
                 model: String::new(),
                 text,
             },
-            _ => Self::Assistant { turn: 0, text },
+            _ => Self::Assistant { step: 0, text },
         }
     }
 }
@@ -271,7 +271,46 @@ pub(crate) fn load_task_events(snapshot: &AgentTaskSnapshot) -> Vec<AgentTaskEve
     // Replays the run.json/llm/tools layout only. Runs recorded before that
     // layout (#160, pre-2026-07) replay as just their terminal state —
     // legacy timeline.jsonl support was deliberately dropped.
-    let mut events = replay_task_events(snapshot);
+    //
+    // A task's conversation can span multiple runs (replies continue it), so
+    // this concatenates every run's replay in order — each run's own
+    // "started" event (task/model) is the boundary the frontend renders as a
+    // new message in the thread.
+    let mut events = Vec::new();
+    let runs = conversation_run_dirs(snapshot);
+    let last_index = runs.len().saturating_sub(1);
+    for (index, (run_dir, record)) in runs.iter().enumerate() {
+        let replayed = replay_run_events(snapshot, run_dir);
+        if replayed.is_empty() {
+            // A run cancelled before it wrote run.json still has a recorded
+            // user message; synthesize its boundary so it doesn't vanish.
+            if let Some(record) = record {
+                events.push(replay_event(
+                    snapshot,
+                    AgentTaskEventKind::Started {
+                        run_id: String::new(),
+                        task: record.user.clone(),
+                        model: snapshot
+                            .model
+                            .clone()
+                            .unwrap_or_else(|| "unknown model".into()),
+                        text: started_event_text_fields(&record.user, None, "unknown model"),
+                    },
+                ));
+            }
+        } else {
+            events.extend(replayed);
+        }
+        // Non-final runs get their terminal marker from the conversation
+        // record (the snapshot's status only describes the latest run).
+        if index != last_index {
+            if let Some(record) = record {
+                if let Some(marker) = run_status_marker(&record.status) {
+                    events.push(replay_event(snapshot, marker));
+                }
+            }
+        }
+    }
     if !events.is_empty() {
         ensure_started_event(snapshot, &mut events);
         reindex_replay_events(snapshot, &mut events);
@@ -279,6 +318,53 @@ pub(crate) fn load_task_events(snapshot: &AgentTaskSnapshot) -> Vec<AgentTaskEve
     append_terminal_snapshot_events(snapshot, &mut events);
     events.sort_by(compare_events);
     events
+}
+
+/// Every run dir belonging to this task's conversation, oldest first (with
+/// its conversation record when it has one): the conversation's recorded
+/// runs, plus the current run dir when it isn't in that list yet (still
+/// in-flight, or finished just before this read — see the ordering note on
+/// `record_desktop_session`'s callers). Shared with the notes aggregator.
+pub(crate) fn conversation_run_dirs(snapshot: &AgentTaskSnapshot) -> Vec<(PathBuf, Option<Run>)> {
+    let mut dirs: Vec<(PathBuf, Option<Run>)> = Vec::new();
+    if let Some(session_dir) = snapshot.session_dir.as_deref() {
+        if let Ok(conversation) = Conversation::load(session_dir) {
+            dirs.extend(
+                conversation
+                    .runs
+                    .iter()
+                    .map(|run| (PathBuf::from(&run.run_dir), Some(run.clone()))),
+            );
+        }
+    }
+    if let Some(run_dir) = snapshot
+        .run_dir
+        .as_deref()
+        .filter(|dir| !dir.trim().is_empty())
+    {
+        let run_dir = PathBuf::from(run_dir);
+        if !dirs.iter().any(|(dir, _)| dir == &run_dir) {
+            dirs.push((run_dir, None));
+        }
+    }
+    dirs
+}
+
+/// Terminal timeline marker for a non-final run, from its conversation
+/// record status. Completed runs already replay a `done` event.
+fn run_status_marker(status: &str) -> Option<AgentTaskEventKind> {
+    match status {
+        "failed" => Some(AgentTaskEventKind::Failed {
+            text: "task failed".into(),
+        }),
+        "cancelled" => Some(AgentTaskEventKind::Cancelled {
+            text: "task cancelled".into(),
+        }),
+        "interrupted" => Some(AgentTaskEventKind::Interrupted {
+            text: "task interrupted".into(),
+        }),
+        _ => None,
+    }
 }
 
 pub(crate) fn agent_event_to_timeline(event: &AgentEvent) -> AgentTaskEventKind {
@@ -293,29 +379,29 @@ pub(crate) fn agent_event_to_timeline(event: &AgentEvent) -> AgentTaskEventKind 
             model: model.clone(),
             text: started_event_text_fields(task, Some(run_id), model),
         },
-        AgentEvent::Turn { turn } => AgentTaskEventKind::Turn {
-            turn: *turn,
-            text: format!("turn {turn}"),
+        AgentEvent::Step { step } => AgentTaskEventKind::Step {
+            step: *step,
+            text: String::new(),
         },
-        AgentEvent::AssistantText { turn, text } => AgentTaskEventKind::Assistant {
-            turn: *turn,
+        AgentEvent::AssistantText { step, text } => AgentTaskEventKind::Assistant {
+            step: *step,
             text: truncate_event_text(text),
         },
-        AgentEvent::Reasoning { turn, text } => AgentTaskEventKind::Reasoning {
-            turn: *turn,
+        AgentEvent::Reasoning { step, text } => AgentTaskEventKind::Reasoning {
+            step: *step,
             text: truncate_event_text(text),
         },
         AgentEvent::ToolCall {
             id,
-            turn,
+            step,
             sequence,
             name,
             input,
             repeat_count,
-        } => tool_call_event(id, *turn, *sequence, name, input, *repeat_count),
+        } => tool_call_event(id, *step, *sequence, name, input, *repeat_count),
         AgentEvent::ToolResult {
             id,
-            turn,
+            step,
             sequence,
             name,
             input,
@@ -325,7 +411,7 @@ pub(crate) fn agent_event_to_timeline(event: &AgentEvent) -> AgentTaskEventKind 
             error,
         } => tool_result_event(
             id,
-            *turn,
+            *step,
             *sequence,
             name,
             input,
@@ -335,15 +421,15 @@ pub(crate) fn agent_event_to_timeline(event: &AgentEvent) -> AgentTaskEventKind 
             content,
             None,
         ),
-        AgentEvent::ApiError { turn, message } => AgentTaskEventKind::ApiError {
-            turn: *turn,
+        AgentEvent::ApiError { step, message } => AgentTaskEventKind::ApiError {
+            step: *step,
             message: message.clone(),
-            text: format!("turn {turn}: {message}"),
+            text: message.clone(),
         },
-        AgentEvent::Done { run_id, turns, .. } => AgentTaskEventKind::Done {
+        AgentEvent::Done { run_id, steps, .. } => AgentTaskEventKind::Done {
             run_id: Some(run_id.clone()),
-            turns: *turns,
-            text: format!("done in {turns} turns"),
+            steps: *steps,
+            text: "done".to_string(),
         },
     }
 }
@@ -371,15 +457,7 @@ pub(crate) fn user_label(name: &str) -> String {
     .into()
 }
 
-fn replay_task_events(snapshot: &AgentTaskSnapshot) -> Vec<AgentTaskEventPayload> {
-    let Some(run_dir) = snapshot
-        .run_dir
-        .as_ref()
-        .filter(|dir| !dir.trim().is_empty())
-    else {
-        return Vec::new();
-    };
-    let run_dir = PathBuf::from(run_dir);
+fn replay_run_events(snapshot: &AgentTaskSnapshot, run_dir: &Path) -> Vec<AgentTaskEventPayload> {
     let Some(run) = read_json(&run_dir.join("run.json")) else {
         return Vec::new();
     };
@@ -408,16 +486,16 @@ fn replay_task_events(snapshot: &AgentTaskSnapshot) -> Vec<AgentTaskEventPayload
         },
     ));
 
-    let mut last_turn = None;
-    for (turn, response) in llm_responses(&run_dir) {
-        push_turn_event(snapshot, &mut events, &mut last_turn, turn);
+    let mut last_step = None;
+    for (step, response) in llm_responses(run_dir) {
+        push_step_event(snapshot, &mut events, &mut last_step, step);
         if let Some(error) = response.get("error").and_then(Value::as_str) {
             events.push(replay_event(
                 snapshot,
                 AgentTaskEventKind::ApiError {
-                    turn,
+                    step,
                     message: error.to_string(),
-                    text: format!("turn {turn}: {error}"),
+                    text: error.to_string(),
                 },
             ));
             continue;
@@ -430,7 +508,7 @@ fn replay_task_events(snapshot: &AgentTaskSnapshot) -> Vec<AgentTaskEventPayload
             events.push(replay_event(
                 snapshot,
                 AgentTaskEventKind::Reasoning {
-                    turn,
+                    step,
                     text: truncate_event_text(reasoning),
                 },
             ));
@@ -441,7 +519,7 @@ fn replay_task_events(snapshot: &AgentTaskSnapshot) -> Vec<AgentTaskEventPayload
                     events.push(replay_event(
                         snapshot,
                         AgentTaskEventKind::Assistant {
-                            turn,
+                            step,
                             text: truncate_event_text(text),
                         },
                     ));
@@ -460,10 +538,22 @@ fn replay_task_events(snapshot: &AgentTaskSnapshot) -> Vec<AgentTaskEventPayload
                 .get("id")
                 .and_then(Value::as_str)
                 .unwrap_or("tool-call");
-            let tool_rel = format!(
-                "tools/turn-{turn:03}-call-{sequence:02}-{}",
-                safe_component(name, "tool")
-            );
+            // Pre-rename runs (< #190) recorded tool dirs as `turn-…`.
+            let tool_rel = ["step", "turn"]
+                .iter()
+                .map(|prefix| {
+                    format!(
+                        "tools/{prefix}-{step:03}-call-{sequence:02}-{}",
+                        safe_component(name, "tool")
+                    )
+                })
+                .find(|rel| run_dir.join(rel).is_dir())
+                .unwrap_or_else(|| {
+                    format!(
+                        "tools/step-{step:03}-call-{sequence:02}-{}",
+                        safe_component(name, "tool")
+                    )
+                });
             let tool_dir = run_dir.join(&tool_rel);
             let manifest = read_json(&tool_dir.join("tool.json")).unwrap_or(Value::Null);
             let input = manifest
@@ -472,7 +562,7 @@ fn replay_task_events(snapshot: &AgentTaskSnapshot) -> Vec<AgentTaskEventPayload
                 .unwrap_or(&Value::Null);
             events.push(replay_event(
                 snapshot,
-                tool_call_event(id, turn, sequence, name, input, 0),
+                tool_call_event(id, step, sequence, name, input, 0),
             ));
             let output = read_json(&tool_dir.join("output.json")).unwrap_or(Value::Null);
             let error = manifest.get("error").and_then(Value::as_str);
@@ -485,7 +575,7 @@ fn replay_task_events(snapshot: &AgentTaskSnapshot) -> Vec<AgentTaskEventPayload
                 snapshot,
                 tool_result_event(
                     id,
-                    turn,
+                    step,
                     sequence,
                     name,
                     input,
@@ -498,14 +588,19 @@ fn replay_task_events(snapshot: &AgentTaskSnapshot) -> Vec<AgentTaskEventPayload
             ));
         }
     }
-    let turns = run.get("turns").and_then(Value::as_u64).unwrap_or_default() as u32;
+    // Pre-rename runs (< #190) recorded the step count as "turns".
+    let steps = run
+        .get("steps")
+        .or_else(|| run.get("turns"))
+        .and_then(Value::as_u64)
+        .unwrap_or_default() as u32;
     if run.get("status").and_then(Value::as_str) == Some("completed") {
         events.push(replay_event(
             snapshot,
             AgentTaskEventKind::Done {
                 run_id: Some(run_id.to_string()),
-                turns,
-                text: format!("done in {turns} turns"),
+                steps,
+                text: "done".to_string(),
             },
         ));
     }
@@ -519,17 +614,13 @@ fn append_terminal_snapshot_events(
     match snapshot.status.as_str() {
         "completed" => {
             if !events.iter().any(|event| event.kind() == "done") {
-                let text = snapshot
-                    .turns
-                    .map(|turns| format!("done in {turns} turns"))
-                    .unwrap_or_else(|| "done".into());
                 push_snapshot_event(
                     snapshot,
                     events,
                     AgentTaskEventKind::Done {
                         run_id: snapshot.run_id.clone(),
-                        turns: snapshot.turns.unwrap_or_default(),
-                        text,
+                        steps: snapshot.steps.unwrap_or_default(),
+                        text: "done".into(),
                     },
                 );
             }
@@ -637,21 +728,21 @@ fn replay_event(
     }
 }
 
-fn push_turn_event(
+fn push_step_event(
     snapshot: &AgentTaskSnapshot,
     events: &mut Vec<AgentTaskEventPayload>,
-    last_turn: &mut Option<u32>,
-    turn: u32,
+    last_step: &mut Option<u32>,
+    step: u32,
 ) {
-    if turn == 0 || *last_turn == Some(turn) {
+    if step == 0 || *last_step == Some(step) {
         return;
     }
-    *last_turn = Some(turn);
+    *last_step = Some(step);
     events.push(replay_event(
         snapshot,
-        AgentTaskEventKind::Turn {
-            turn,
-            text: format!("turn {turn}"),
+        AgentTaskEventKind::Step {
+            step,
+            text: String::new(),
         },
     ));
 }
@@ -678,7 +769,7 @@ fn started_event_text_fields(task: &str, run_id: Option<&str>, model: &str) -> S
 
 fn tool_call_event(
     id: &str,
-    turn: u32,
+    step: u32,
     sequence: u32,
     name: &str,
     input: &Value,
@@ -686,8 +777,8 @@ fn tool_call_event(
 ) -> AgentTaskEventKind {
     AgentTaskEventKind::ToolCall {
         id: id.to_string(),
-        turn,
-        sequence_in_turn: sequence,
+        step,
+        sequence_in_step: sequence,
         name: name.to_string(),
         label: user_label(name),
         args: input.clone(),
@@ -698,7 +789,7 @@ fn tool_call_event(
 
 fn tool_result_event(
     id: &str,
-    turn: u32,
+    step: u32,
     sequence: u32,
     name: &str,
     input: &Value,
@@ -720,12 +811,25 @@ fn tool_result_event(
         .map(|value| normalize_entities(name, value))
         .unwrap_or_default();
     let error = error.map(str::trim).filter(|err| !err.is_empty());
-    let (_kind, text) = format_tool_result_text(name, content, duration_ms, error.unwrap_or(""));
+    // A tool that ran but reported failure (`ok: false`, e.g. a search that
+    // never reached a result page) carries no dispatcher error — surface its
+    // `reason` as the row's error so the timeline doesn't render it like a
+    // quiet success.
+    let error = error.map(str::to_string).or_else(|| {
+        (!ok).then(|| {
+            raw.as_ref()
+                .and_then(|value| value.get("reason"))
+                .and_then(Value::as_str)
+                .unwrap_or("tool reported failure")
+                .to_string()
+        })
+    });
+    let (_kind, text) = format_tool_result_text(name, content, duration_ms, error.as_deref().unwrap_or(""));
     if let Some(error) = error {
         AgentTaskEventKind::ToolError {
             id: id.to_string(),
-            turn,
-            sequence_in_turn: sequence,
+            step,
+            sequence_in_step: sequence,
             name: name.to_string(),
             label: user_label(name),
             args: input.clone(),
@@ -740,8 +844,8 @@ fn tool_result_event(
     } else {
         AgentTaskEventKind::ToolResult {
             id: id.to_string(),
-            turn,
-            sequence_in_turn: sequence,
+            step,
+            sequence_in_step: sequence,
             name: name.to_string(),
             label: user_label(name),
             args: input.clone(),

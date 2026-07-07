@@ -106,7 +106,7 @@ pub fn run() {
                                         "run_id": snapshot.run_id.clone(),
                                         "model": snapshot.model.clone(),
                                         "outcome": "interrupted",
-                                        "turns": snapshot.turns,
+                                        "steps": snapshot.steps,
                                         "input_tokens": snapshot.input_tokens,
                                         "output_tokens": snapshot.output_tokens,
                                         "duration_ms": duration_ms(
@@ -152,6 +152,7 @@ pub fn run() {
             commands::agent_open_codex_login,
             commands::agent_save_api_key,
             commands::agent_task_start,
+            commands::agent_task_reply,
             commands::agent_task_list,
             commands::agent_task_get,
             commands::agent_task_events,

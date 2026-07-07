@@ -15,7 +15,7 @@
 import type { AgentTaskEventPayload } from "../main";
 import { esc } from "../lib/html";
 import { renderNoteAnswer, renderTimelineEmbed, setNoteRegistry } from "./notes";
-import { formatSourceCount, formatTaskCount, formatTaskTimestamp, formatTokenUsage, formatTurns, taskStatusLabel, t } from "../lib/i18n";
+import { formatSourceCount, formatTaskCount, formatTaskTimestamp, formatTokenUsage, taskStatusLabel, t } from "../lib/i18n";
 import type { AgentTaskView } from "./tasks";
 
 export interface SidebarProps {
@@ -23,6 +23,13 @@ export interface SidebarProps {
   selectedTaskId: string | null;
   /** True while the compose view is showing — no row should read as selected. */
   composing: boolean;
+}
+
+export interface ReplyComposerProps {
+  draft: string;
+  submitting: boolean;
+  error: string;
+  connected: boolean;
 }
 
 export function renderSidebar(props: SidebarProps): string {
@@ -84,7 +91,7 @@ function renderTaskRows(props: SidebarProps): string {
     .join("");
 }
 
-export function renderTaskDetail(task: AgentTaskView | undefined): string {
+export function renderTaskDetail(task: AgentTaskView | undefined, replyProps: ReplyComposerProps): string {
   if (!task) return renderEmptyDetail();
 
   // Point the note UI at this task's archive; the timeline embeds and answer
@@ -96,11 +103,17 @@ export function renderTaskDetail(task: AgentTaskView | undefined): string {
   const hasResult = !!task.final_text || !!task.error;
   const bothPanels = hasTimeline && hasResult;
 
+  // A running/queued task can't take a reply yet — it already owns the one
+  // agent slot (MAX_CONCURRENT_AGENT_TASKS). Once it lands, the composer lets
+  // the thread continue instead of starting a fresh, context-less task. It
+  // sits under the timeline (the conversation itself), not under the answer.
+  const reply = running ? "" : renderReplyComposer(task, replyProps);
+
   let body: string;
   if (bothPanels) {
     body = `
       <div class="detail-split">
-        <div class="detail-col">${renderTimelinePanel(task)}</div>
+        <div class="detail-col">${renderTimelinePanel(task)}${reply}</div>
         <div class="detail-col">${renderResultPanel(task)}</div>
       </div>
     `;
@@ -108,6 +121,7 @@ export function renderTaskDetail(task: AgentTaskView | undefined): string {
     body = `
       <div class="detail-body detail-body--stacked">
         ${hasTimeline ? renderTimelinePanel(task) : ""}
+        ${reply}
         ${hasResult ? renderResultPanel(task) : ""}
         ${!hasTimeline && !hasResult ? `<p class="t-small placeholder">${esc(t("task.noTimeline"))}</p>` : ""}
       </div>
@@ -117,21 +131,58 @@ export function renderTaskDetail(task: AgentTaskView | undefined): string {
   return `${renderDetailHead(task, running)}${body}`;
 }
 
-function renderDetailHead(task: AgentTaskView, running: boolean): string {
+function renderReplyComposer(task: AgentTaskView, props: ReplyComposerProps): string {
+  const runDisabled = props.submitting || !props.draft.trim() || !props.connected;
+  // Sending a follow-up needs the browser, same as starting a task — but the
+  // detail view has no compose-style connect overlay, so without this hint a
+  // dropped connection just reads as a mysteriously gray send button.
+  const connectHint = props.connected ? "" : `
+      <p class="t-small subtle task-reply-hint">
+        ${esc(t("task.replyConnectHint"))}
+        <button id="reply-chrome-connect" type="button" class="btn-ghost btn-compact">${esc(t("chrome.connectCta"))}</button>
+      </p>`;
+  return `
+    <form id="task-reply-form" class="task-reply-form" data-reply-task="${esc(task.task_id)}">
+      <div class="task-reply-row">
+        <textarea
+          id="task-reply-input"
+          class="task-reply-input"
+          rows="1"
+          placeholder="${esc(t("task.replyPlaceholder"))}"
+          ${props.submitting ? "disabled" : ""}
+        >${esc(props.draft)}</textarea>
+        <button id="task-reply-submit" type="submit" class="btn-primary btn-compact task-reply-send" ${runDisabled ? "disabled" : ""}>
+          ${props.submitting ? esc(t("task.replySending")) : esc(t("task.replySend"))}
+        </button>
+      </div>
+      ${connectHint}
+      ${props.error ? `<p class="t-small result-error task-reply-error">${esc(props.error)}</p>` : ""}
+    </form>
+  `;
+}
+
+// The detail head's meta line. Exported so the live poll in tasks.ts can
+// refresh it in place while a run is active (tokens/steps stream into
+// run.json mid-run; duration ticks) without a full re-render.
+export function renderTaskMetaItems(task: AgentTaskView): string {
+  const running = task.status === "running" || task.status === "queued";
   const time = formatTaskTimestamp(task.started_at ?? task.created_at);
   const duration = formatDuration(task);
   const tokens = task.input_tokens !== null && task.output_tokens !== null
     ? formatTokenUsage(task.input_tokens, task.output_tokens)
     : "";
   const dotClass = running ? "badge-dot-ink badge-dot-pulse" : "badge-dot-hollow";
-  const items = [
+  return [
     `<span class="task-meta-item task-meta-status"><i class="badge-dot ${dotClass}" aria-hidden="true"></i>${esc(taskStatusLabel(task.status))}</span>`,
     time ? `<span class="task-meta-item">${esc(time)}</span>` : "",
     duration ? `<span class="task-meta-item">${esc(duration)}</span>` : "",
     task.model ? `<span class="task-meta-item t-mono">${esc(task.model)}</span>` : "",
-    task.turns !== null && task.turns !== undefined ? `<span class="task-meta-item">${esc(formatTurns(task.turns))}</span>` : "",
     tokens ? `<span class="task-meta-item">${esc(tokens)}</span>` : "",
   ].join("");
+}
+
+function renderDetailHead(task: AgentTaskView, running: boolean): string {
+  const items = renderTaskMetaItems(task);
   return `
     <div class="task-detail-head">
       <div class="task-detail-headinfo">
@@ -151,10 +202,7 @@ function renderTimelinePanel(task: AgentTaskView): string {
   const hasEvents = task.events.length > 0;
   const duplicateIndex = finalAnswerEventIndex(task);
   const rows = hasEvents
-    ? task.events
-        .filter((_, index) => index !== duplicateIndex)
-        .map(renderAgentEvent)
-        .join("")
+    ? renderRunGroups(task, duplicateIndex)
     : `<p class="t-small placeholder" data-events-placeholder>${esc(t("task.waitingForEvents"))}</p>`;
   const answerRef = task.final_text ? renderFinalAnswerRef(task) : "";
   return `
@@ -163,6 +211,77 @@ function renderTimelinePanel(task: AgentTaskView): string {
       <div class="event-stream" data-agent-events="${esc(task.task_id)}">${rows}${answerRef}</div>
     </div>
   `;
+}
+
+// A task's conversation can span several runs (replies continue it, each a
+// fresh agent run — see socai-core's Conversation). A live run's stream opens
+// with "queued"; a replayed run opens directly with "started" — so a new
+// group begins on either boundary (but a "started" that follows its own run's
+// "queued" stays in that group). Each reply then reads as its own "you asked
+// / agent did" block instead of one undifferentiated stream.
+function renderRunGroups(task: AgentTaskView, duplicateIndex: number): string {
+  const groups: AgentTaskEventPayload[][] = [];
+  task.events.forEach((ev, index) => {
+    if (index === duplicateIndex) return;
+    if (startsNewRunGroup(ev, groups[groups.length - 1])) {
+      groups.push([]);
+    }
+    groups[groups.length - 1].push(ev);
+  });
+  return groups
+    .map((events, index) => renderRunGroup(events, index === groups.length - 1))
+    .join("");
+}
+
+function startsNewRunGroup(
+  ev: AgentTaskEventPayload,
+  currentGroup: AgentTaskEventPayload[] | undefined,
+): boolean {
+  if (!currentGroup) return true;
+  if (ev.kind === "queued") return true;
+  return ev.kind === "started" && currentGroup.some((e) => e.kind === "started");
+}
+
+// The "you" message opening a run group. Shared with the live event appender
+// in tasks.ts so a streamed follow-up renders the same block a full render
+// rebuilds from the started event.
+export function renderRunMessage(userText: string): string {
+  return `<div class="run-message">
+       <span class="run-message__label">${esc(t("task.you"))}</span>
+       <p class="run-message__text">${esc(userText)}</p>
+     </div>`;
+}
+
+// A run group: the user's message (from the run's started event), the event
+// rows, and — for completed earlier runs — that run's answer rendered rich
+// (markdown + note citations) instead of an escaped assistant row. The last
+// group's answer lives in the answer panel; its duplicate assistant event was
+// already dropped upstream and the stream ends with the reference card.
+function renderRunGroup(events: AgentTaskEventPayload[], isLast: boolean): string {
+  const startedIndex = events.findIndex((ev) => ev.kind === "started");
+  const userText = startedIndex >= 0 ? events[startedIndex].task ?? "" : "";
+  const message = userText ? renderRunMessage(userText) : "";
+  const body = events.filter((_, index) => index !== startedIndex);
+
+  let answer = "";
+  if (!isLast && body.some((ev) => ev.kind === "done")) {
+    let answerIndex = -1;
+    for (let index = body.length - 1; index >= 0; index -= 1) {
+      if (body[index].kind === "assistant") {
+        answerIndex = index;
+        break;
+      }
+    }
+    if (answerIndex >= 0) {
+      let text = body[answerIndex].text;
+      if (text.endsWith(EVENT_TRUNCATION_SUFFIX)) {
+        text = text.slice(0, -EVENT_TRUNCATION_SUFFIX.length);
+      }
+      answer = `<div class="run-answer result-md note-answer">${renderNoteAnswer(text)}</div>`;
+      body.splice(answerIndex, 1);
+    }
+  }
+  return `<div class="run-group">${message}${body.map(renderAgentEvent).join("")}${answer}</div>`;
 }
 
 // The shell caps event text at 8k chars and marks the cut with this suffix.
@@ -325,7 +444,7 @@ function eventGlyph(kind: AgentTaskEventPayload["kind"]): string {
     case "running": return "●";
     case "started": return "▸";
     case "tab": return "□";
-    case "turn": return "──";
+    case "step": return "──";
     case "assistant": return " ";
     case "reasoning": return "·";
     case "tool_call": return "→";
