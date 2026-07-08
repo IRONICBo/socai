@@ -26,11 +26,11 @@ use crate::sites::runner::{
     get_bool, get_f64, get_i64, get_str, json_result, run_tool_command, trimmed_required, PageHook,
     ToolCommand,
 };
+use crate::sites::xhs::entities::{parse_posted_at_ms, parse_stat_count};
 use crate::sites::xhs::media_manifest::{
     ensure_entity_note_id, search_media_manifest, write_media_manifest_file,
 };
 use crate::sites::xhs::page::XHS_SEARCH_FILTERS;
-use crate::sites::xhs::entities::{parse_posted_at_ms, parse_stat_count};
 use crate::sites::xhs::{
     ReadNoteOptions, XhsAuthorProfile, XhsHistoryStore, XhsNoteCard, XhsPageRuntime, XHS_HOME_URL,
 };
@@ -62,6 +62,7 @@ pub fn xhs_tools_with_llm_provider(
     llm_provider: Option<Arc<dyn LlmProvider>>,
 ) -> Vec<Arc<dyn Tool>> {
     let history = Arc::new(XhsHistoryStore::open_default());
+    let pro = crate::cloud::pro_activated();
     vec![
         Arc::new(ExtractSearchCardsTool {
             page: page.clone(),
@@ -75,11 +76,13 @@ pub fn xhs_tools_with_llm_provider(
             page: page.clone(),
             llm_provider: llm_provider.clone(),
             history: history.clone(),
+            pro,
         }),
         Arc::new(ExtractNoteTool {
             page: page.clone(),
             llm_provider: llm_provider.clone(),
             history: history.clone(),
+            pro,
         }),
         Arc::new(ExtractCommentsTool { page: page.clone() }),
         Arc::new(ScrollInNoteTool { page: page.clone() }),
@@ -91,12 +94,14 @@ pub fn xhs_tools_with_llm_provider(
             history: history.clone(),
             always_download_media: false,
             always_ocr: false,
+            pro,
         }),
         Arc::new(AuthorScanTool {
             page: page.clone(),
             history,
             always_download_media: false,
             always_ocr: false,
+            pro,
         }),
         Arc::new(WaitForLoginTool { page: page.clone() }),
         Arc::new(PageStateTool { page }),
@@ -108,6 +113,7 @@ pub fn xhs_macro_tools_with_llm_provider(
     llm_provider: Option<Arc<dyn LlmProvider>>,
 ) -> Vec<Arc<dyn Tool>> {
     let history = Arc::new(XhsHistoryStore::open_default());
+    let pro = crate::cloud::pro_activated();
     // The app/TUI agent interface always downloads note media so the offline
     // files are on hand for deeper analysis, and always OCRs every image; the
     // CLI keeps its --download-media / --ocr opt-ins via the full tool set above.
@@ -118,12 +124,14 @@ pub fn xhs_macro_tools_with_llm_provider(
             history: history.clone(),
             always_download_media: true,
             always_ocr: true,
+            pro,
         }) as Arc<dyn Tool>,
         Arc::new(AuthorScanTool {
             page: page.clone(),
             history,
             always_download_media: true,
             always_ocr: true,
+            pro,
         }),
         Arc::new(WaitForLoginTool { page }),
     ]
@@ -233,6 +241,15 @@ pub static XHS_SITE: SiteSpec = SiteSpec {
                     kind: ArgKind::Flag,
                 },
                 CommandArg {
+                    key: "transcribe_audio",
+                    long: Some("transcribe-audio"),
+                    value_name: "TRANSCRIBE_AUDIO",
+                    help: "For opened video notes, download the video file and transcribe audio \
+                           through socai pro. Ignored with --preview.",
+                    required: false,
+                    kind: ArgKind::Flag,
+                },
+                CommandArg {
                     key: "preview",
                     long: Some("preview"),
                     value_name: "PREVIEW",
@@ -300,6 +317,15 @@ pub static XHS_SITE: SiteSpec = SiteSpec {
                     kind: ArgKind::Flag,
                 },
                 CommandArg {
+                    key: "transcribe_audio",
+                    long: Some("transcribe-audio"),
+                    value_name: "TRANSCRIBE_AUDIO",
+                    help: "For opened video notes, download the video file and transcribe audio \
+                           through socai pro. Ignored with --preview.",
+                    required: false,
+                    kind: ArgKind::Flag,
+                },
+                CommandArg {
                     key: "preview",
                     long: Some("preview"),
                     value_name: "PREVIEW",
@@ -352,6 +378,11 @@ fn run_search(
                 .get("download_media")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+        let transcribe_audio = !preview
+            && args
+                .get("transcribe_audio")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         search_command(
             page,
             "search",
@@ -361,6 +392,7 @@ fn run_search(
             num_comments,
             download_media,
             ocr,
+            transcribe_audio,
             preview,
             debug_snapshot,
             progress,
@@ -400,6 +432,11 @@ fn run_author_scan(
                 .get("download_media")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+        let transcribe_audio = !preview
+            && args
+                .get("transcribe_audio")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         author_scan_command(
             page,
             &author_id,
@@ -408,6 +445,7 @@ fn run_author_scan(
             preview,
             download_media,
             ocr,
+            transcribe_audio,
             debug_snapshot,
             progress,
         )
@@ -460,6 +498,7 @@ pub async fn search_command(
     num_comments: Option<i64>,
     download_media: bool,
     ocr: bool,
+    transcribe_audio: bool,
     preview: bool,
     debug_snapshot: bool,
     progress: Option<ToolProgressSender>,
@@ -481,6 +520,7 @@ pub async fn search_command(
             num_comments,
             download_media,
             ocr,
+            transcribe_audio,
             preview,
         )?,
         debug_snapshot,
@@ -498,13 +538,22 @@ pub async fn author_scan_command(
     preview: bool,
     download_media: bool,
     ocr: bool,
+    transcribe_audio: bool,
     debug_snapshot: bool,
     progress: Option<ToolProgressSender>,
 ) -> anyhow::Result<Value> {
     run_xhs_tool_command(
         page,
         AUTHOR_SCAN_COMMAND,
-        author_scan_input(author_id, num_notes, num_comments, preview, download_media, ocr)?,
+        author_scan_input(
+            author_id,
+            num_notes,
+            num_comments,
+            preview,
+            download_media,
+            ocr,
+            transcribe_audio,
+        )?,
         debug_snapshot,
         progress,
     )
@@ -519,6 +568,7 @@ fn search_input(
     num_comments: Option<i64>,
     download_media: bool,
     ocr: bool,
+    transcribe_audio: bool,
     preview: bool,
 ) -> anyhow::Result<Value> {
     let mut input = json!({
@@ -539,6 +589,9 @@ fn search_input(
     if ocr {
         input["ocr"] = json!(true);
     }
+    if transcribe_audio {
+        input["transcribe_audio"] = json!(true);
+    }
     if preview {
         input["preview"] = json!(true);
     }
@@ -552,6 +605,7 @@ fn author_scan_input(
     preview: bool,
     download_media: bool,
     ocr: bool,
+    transcribe_audio: bool,
 ) -> anyhow::Result<Value> {
     let mut input = json!({
         "author_id": trimmed_required(author_id, "author_id")?,
@@ -570,6 +624,9 @@ fn author_scan_input(
     }
     if ocr {
         input["ocr"] = json!(true);
+    }
+    if transcribe_audio {
+        input["transcribe_audio"] = json!(true);
     }
     Ok(input)
 }
@@ -652,15 +709,19 @@ pub async fn close_open_note(page: &PageSession) {
 }
 
 fn read_note_options(input: &Value) -> ReadNoteOptions {
+    let transcribe_audio = get_bool(input, "transcribe_audio", false);
+    let ocr = get_bool(input, "ocr", false);
+    let download_media = get_bool(input, "download_media", false) || transcribe_audio || ocr;
     ReadNoteOptions {
         // `level` is no longer a user-facing knob (body content is identical
         // across tiers; media is gated by include_media/download_media). It now
         // only feeds the cross-run history dedup key.
         level: "lite".to_string(),
         include_media: get_bool(input, "include_media", false),
-        download_media: get_bool(input, "download_media", false),
+        download_media,
         download_video_file: true,
-        ocr: get_bool(input, "ocr", false),
+        ocr,
+        transcribe_audio,
         max_images: get_i64(input, "max_images", 12).max(1) as usize,
         max_video_frames: get_i64(input, "max_video_frames", 4).max(1) as usize,
         poster_url_fallback: get_str(input, "poster_url_fallback")
@@ -670,16 +731,62 @@ fn read_note_options(input: &Value) -> ReadNoteOptions {
     }
 }
 
+/// Tool args that require an activated socai pro device. Today that's cloud
+/// ASR (`transcribe_audio`); future pro-only args just get added here.
+const PRO_ARG_KEYS: &[&str] = &["transcribe_audio"];
+
+/// Attached to a result when a non-pro call asked for a pro-only arg, so the
+/// agent can relay why instead of the whole call failing.
+const PRO_SKIP_NOTE: &str = "transcribe_audio requires socai pro; the call ran without \
+     transcription. Activate with `socai pro activate <invite_code>`.";
+
+/// Remove pro-only properties from a tool input schema so a non-pro session
+/// never shows the agent args it cannot use.
+fn strip_pro_schema(schema: &mut Value) {
+    if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        for key in PRO_ARG_KEYS {
+            props.remove(*key);
+        }
+    }
+}
+
+/// Drop pro-only args from a non-pro call's input (the schema hides them, but
+/// a stale conversation or hallucinated arg can still carry one). Returns
+/// whether any was actually requested, so the caller can attach
+/// [`PRO_SKIP_NOTE`] to its result.
+fn strip_pro_input(input: &mut Value) -> bool {
+    let Some(obj) = input.as_object_mut() else {
+        return false;
+    };
+    let mut requested = false;
+    for key in PRO_ARG_KEYS {
+        requested |= obj
+            .remove(*key)
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+    }
+    requested
+}
+
+fn attach_pro_skip_note(payload: &mut Value, skipped: bool) {
+    if !skipped {
+        return;
+    }
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("transcribe_audio_skipped".into(), json!(PRO_SKIP_NOTE));
+    }
+}
+
 fn media_for(
     ctx: &ToolContext,
     llm_provider: Option<Arc<dyn LlmProvider>>,
     include_media: bool,
+    transcribe_audio: bool,
 ) -> anyhow::Result<Option<MediaProcessor>> {
-    if include_media {
-        Ok(Some(MediaProcessor::for_run_dir(
-            ctx.output_dir(),
-            llm_provider,
-        )?))
+    if include_media || transcribe_audio {
+        let mut media = MediaProcessor::for_run_dir(ctx.output_dir(), llm_provider)?;
+        media.set_cloud_asr(transcribe_audio);
+        Ok(Some(media))
     } else {
         Ok(None)
     }
@@ -901,6 +1008,7 @@ async fn scan_card_note(
     // and is the download requirement checked against cross-run history.
     download_media_requested: bool,
     ocr: bool,
+    transcribe_audio: bool,
     // When true, images are downloaded inline but OCR is left to the caller (run
     // in a background task so it overlaps the next note's read+download). The
     // dedup check still uses the real `ocr` flag, so a cache hit returns the
@@ -918,7 +1026,15 @@ async fn scan_card_note(
         return recorded_skip_entry(card, "already_processed", history, ctx, level);
     }
     if !card.note_id.is_empty()
-        && history.is_satisfied_by(&card.note_id, level, requested_media, download_media_requested, ocr, comment_count)
+        && history.is_satisfied_by(
+            &card.note_id,
+            level,
+            requested_media,
+            download_media_requested,
+            ocr,
+            transcribe_audio,
+            comment_count,
+        )
         // Only short-circuit when we actually have the cached entity to return;
         // a pre-upgrade entry without one is re-read so it backfills the cache
         // instead of degrading to a bare card.
@@ -945,6 +1061,12 @@ async fn scan_card_note(
                 include_media,
                 download_media,
                 download_video_file: download_media_requested,
+                // Scans never transcribe inline: the caller runs cloud ASR in a
+                // background task (spawn_note_transcribe) so it overlaps the
+                // next note's read + download. The dedup check above still uses
+                // the real `transcribe_audio` flag, so a cache hit returns the
+                // already-transcribed entity.
+                transcribe_audio: false,
                 // Inline OCR only when not deferred; otherwise just download and
                 // let the caller OCR in the background.
                 ocr: ocr && !defer_ocr,
@@ -957,10 +1079,7 @@ async fn scan_card_note(
             },
         )
         .await;
-    scan_perf.insert(
-        "read_ms".into(),
-        json!(t_read.elapsed().as_millis() as u64),
-    );
+    scan_perf.insert("read_ms".into(), json!(t_read.elapsed().as_millis() as u64));
     let mut entry = match read_result {
         Ok(payload) => {
             if let Some(perf) = payload.get("perf").and_then(Value::as_object) {
@@ -1008,7 +1127,9 @@ async fn scan_card_note(
     // Scans always include comments — there is no longer a level gate.
     if comment_count > 0 {
         let t_comments = std::time::Instant::now();
-        let comments_result = xhs.load_comments(comment_count, COMMENT_LOAD_TIMEOUT_S).await;
+        let comments_result = xhs
+            .load_comments(comment_count, COMMENT_LOAD_TIMEOUT_S)
+            .await;
         scan_perf.insert(
             "comments_ms".into(),
             json!(t_comments.elapsed().as_millis() as u64),
@@ -1174,7 +1295,10 @@ fn harvest_note_perf(
     close_ms: u64,
     total_ms: u64,
 ) -> Value {
-    let mut record = match entry.as_object_mut().and_then(|map| map.remove("scan_perf")) {
+    let mut record = match entry
+        .as_object_mut()
+        .and_then(|map| map.remove("scan_perf"))
+    {
         Some(Value::Object(map)) => map,
         _ => serde_json::Map::new(),
     };
@@ -1240,6 +1364,124 @@ async fn join_note_ocr(
         }
     }
     timings
+}
+
+/// Max cloud ASR tasks in flight at once. Transcription is network-bound
+/// (upload + provider poll), so this bounds concurrent load on socai-server
+/// while still letting note N's transcription overlap the read + download of
+/// note N+1.
+const ASR_PIPELINE_CONCURRENCY: usize = 2;
+
+/// Spawn a background task that transcribes a freshly-read video note's
+/// already-downloaded video file through cloud ASR. `None` when there's
+/// nothing to transcribe (not a fresh successful read, no media processor, no
+/// downloaded video, or the cached entity already carries a transcript).
+fn spawn_note_transcribe(
+    media: &Option<MediaProcessor>,
+    sem: &Arc<tokio::sync::Semaphore>,
+    entry: &Value,
+    epoch: std::time::Instant,
+) -> Option<tokio::task::JoinHandle<NoteTranscribeResult>> {
+    // Only fresh successful reads (they carry `ok`); cache hits carry `skipped`
+    // and already have their transcript.
+    if entry.get("ok").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let video = entry.get("entity")?.get("video")?;
+    let has_local = video
+        .get("local_path")
+        .and_then(Value::as_str)
+        .is_some_and(|path| !path.trim().is_empty());
+    let has_transcript = video
+        .get("transcript")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty());
+    if !has_local || has_transcript {
+        return None;
+    }
+    let media = media.clone()?;
+    let sem = sem.clone();
+    let mut video = video.clone();
+    Some(tokio::spawn(async move {
+        let _permit = sem.acquire_owned().await;
+        let started_ms = epoch.elapsed().as_millis() as u64;
+        media.transcribe_downloaded_video(&mut video).await;
+        let finished_ms = epoch.elapsed().as_millis() as u64;
+        NoteTranscribeResult {
+            video,
+            started_ms,
+            finished_ms,
+        }
+    }))
+}
+
+/// A note's background transcription result plus its wall span (ms since the
+/// scan epoch). The video object carries `transcript` / `transcript_error` /
+/// `transcript_ms` as attached by [`MediaProcessor::transcribe_downloaded_video`].
+struct NoteTranscribeResult {
+    video: Value,
+    started_ms: u64,
+    finished_ms: u64,
+}
+
+/// Await the background transcription tasks and merge each result back into
+/// its note. Only the transcript fields are copied over (the OCR pipeline may
+/// have merged `poster_ocr` into the live video object in the meantime, so
+/// replacing the whole object would clobber it). Re-records history (marking
+/// the note transcribed) and refreshes the app note archive record so the
+/// desktop card carries the transcript. Timings land in the matching
+/// `note_perfs` records for the scan perf file.
+#[allow(clippy::too_many_arguments)]
+async fn join_note_transcribe(
+    notes: &mut [Value],
+    pending: Vec<(usize, tokio::task::JoinHandle<NoteTranscribeResult>)>,
+    note_perfs: &mut [Value],
+    history: &XhsHistoryStore,
+    ctx: &ToolContext,
+    level: &str,
+    include_media: bool,
+) {
+    for (idx, handle) in pending {
+        let Ok(result) = handle.await else {
+            continue;
+        };
+        let Some(note) = notes.get_mut(idx) else {
+            continue;
+        };
+        if let Some(video) = note
+            .get_mut("entity")
+            .and_then(|entity| entity.get_mut("video"))
+            .and_then(Value::as_object_mut)
+        {
+            for key in ["transcript", "transcript_error", "transcript_ms"] {
+                if let Some(value) = result.video.get(key) {
+                    video.insert(key.into(), value.clone());
+                }
+            }
+        }
+        if note.get("ok").and_then(Value::as_bool) == Some(true) {
+            if let Some(entity) = note.get("entity") {
+                history.record(entity, level, include_media);
+            }
+            // Refresh the archived record (built before the transcript existed)
+            // so the desktop app's note card shows the transcript.
+            if let Some((note_id, record)) = build_note_record(note, ctx, level) {
+                ctx.record_note(&note_id, record);
+            }
+        }
+        if let Some(record) = note_perfs
+            .iter_mut()
+            .find(|perf| perf.get("idx").and_then(Value::as_u64) == Some(idx as u64))
+            .and_then(Value::as_object_mut)
+        {
+            record.insert(
+                "transcribe_audio_ms".into(),
+                json!(result.finished_ms.saturating_sub(result.started_ms)),
+            );
+            record.insert("transcribe_started_ms".into(), json!(result.started_ms));
+            record.insert("transcribe_finished_ms".into(), json!(result.finished_ms));
+        }
+    }
 }
 
 /// Build the archived note record from a freshly-read scan entry
@@ -1310,6 +1552,17 @@ pub fn note_data_record(
         }
     }
     record.insert("stats".into(), Value::Object(stats));
+    // Video audio transcript (cloud ASR), so the app's note viewer can show
+    // the spoken content alongside the media.
+    if let Some(transcript) = entity
+        .get("video")
+        .and_then(|video| video.get("transcript"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        record.insert("transcript".into(), Value::String(transcript.to_string()));
+    }
     record.insert("media".into(), Value::Array(media.clone()));
     record.insert("media_dir".into(), Value::String(String::new()));
     record.insert("saved".into(), Value::Bool(!media.is_empty()));
@@ -1556,6 +1809,9 @@ const LEAN_NOTE_FIELDS: &[&str] = &[
     // Per-note OCR summary (joined from each image's ocr_text). Only present
     // when the scan ran with `ocr`; the per-image texts stay in the artifact.
     "ocr_text",
+    // Video audio transcript from cloud ASR. The full video object stays in the
+    // artifact; this keeps the usable text in the compact result.
+    "audio_transcript",
 ];
 
 /// Collapse one full comment object to its lean form: `null` when it has no text,
@@ -1609,6 +1865,7 @@ fn lean_scan_note(note: &mut Value) {
     // the per-image OCR (no duplicated note-level copy) and the lean return still
     // carries the index-aligned, cover-first OCR view after images are dropped.
     attach_note_ocr_summary(entity);
+    attach_note_audio_transcript(entity);
     let Some(entity) = entity.as_object_mut() else {
         return;
     };
@@ -1618,13 +1875,26 @@ fn lean_scan_note(note: &mut Value) {
     // the thread structure. The full objects (usernames, likes, times) stay in
     // the run artifact.
     if let Some(comments) = entity.get_mut("top_comments").and_then(Value::as_array_mut) {
-        let lean: Vec<Value> = comments
-            .iter()
-            .filter_map(lean_comment)
-            .collect();
+        let lean: Vec<Value> = comments.iter().filter_map(lean_comment).collect();
         entity.insert("top_comments".into(), Value::Array(lean));
     }
     entity.retain(|key, _| LEAN_NOTE_FIELDS.contains(&key.as_str()));
+}
+
+fn attach_note_audio_transcript(entity: &mut Value) {
+    let Some(transcript) = entity
+        .get("video")
+        .and_then(|video| video.get("transcript"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(|text| truncate(text, 6000))
+    else {
+        return;
+    };
+    if let Some(map) = entity.as_object_mut() {
+        map.insert("audio_transcript".into(), Value::String(transcript));
+    }
 }
 
 /// Surface OCR text on the entity as `ocr_text`: an array of one string per
@@ -1674,6 +1944,7 @@ const SCAN_PHASE_KEYS: &[&str] = &[
     "enrich_ms",
     "download_ms",
     "ocr_inline_ms",
+    "transcribe_audio_ms",
     "comments_ms",
     "close_ms",
 ];
@@ -1687,7 +1958,8 @@ const SCAN_PHASE_KEYS: &[&str] = &[
 /// the first card click opened the overlay or a retry was needed),
 /// `extract_ms`, `download_ms`, `comments_ms`, `close_ms`, `read_ms`
 /// (open+extract+download combined, as measured around the whole read), and
-/// `total_ms` — plus, when OCR ran for it, `predict_ms` and
+/// `total_ms` — plus, when video transcript ran for it,
+/// `transcribe_audio_ms`, and when OCR ran for it, `predict_ms` and
 /// `ocr_started_ms`/`ocr_finished_ms`/`ocr_wall_ms` on the same timeline.
 /// Cache hits are marked `cached` and carry only the loop-level markers.
 ///
@@ -1724,8 +1996,7 @@ fn write_scan_perf(
     let mut cached_count: u64 = 0;
     let mut open_retries: u64 = 0;
     let mut notes_total_ms: u64 = 0;
-    let mut phase_totals: std::collections::BTreeMap<&str, u64> =
-        std::collections::BTreeMap::new();
+    let mut phase_totals: std::collections::BTreeMap<&str, u64> = std::collections::BTreeMap::new();
     for perf in note_perfs {
         let Some(record) = perf.as_object() else {
             continue;
@@ -1781,7 +2052,14 @@ fn write_scan_perf(
         _ => 0,
     };
     let last_finish = ocr_timings.iter().map(|t| t.finished_ms).max().unwrap_or(0);
-    let scan_total_ms = browse_loop_ms.max(last_finish);
+    // Background transcription may outlive both the browse loop and OCR; its
+    // per-note spans were merged into `note_perfs` by join_note_transcribe.
+    let transcribe_last_finish = note_perfs
+        .iter()
+        .filter_map(|perf| perf.get("transcribe_finished_ms").and_then(Value::as_u64))
+        .max()
+        .unwrap_or(0);
+    let scan_total_ms = browse_loop_ms.max(last_finish).max(transcribe_last_finish);
     let ocr_overhang_ms = last_finish.saturating_sub(browse_loop_ms);
 
     let mut summary = serde_json::Map::new();
@@ -1800,6 +2078,12 @@ fn write_scan_perf(
         summary.insert("ocr_predict_total_ms".into(), json!(predict_total_ms));
         summary.insert("ocr_wall_ms".into(), json!(ocr_wall_ms));
         summary.insert("ocr_overhang_ms".into(), json!(ocr_overhang_ms));
+    }
+    if transcribe_last_finish > 0 {
+        summary.insert(
+            "transcribe_overhang_ms".into(),
+            json!(transcribe_last_finish.saturating_sub(browse_loop_ms)),
+        );
     }
 
     let mut perf = serde_json::Map::new();
@@ -2021,6 +2305,9 @@ pub struct ReadNoteTool {
     page: Arc<PageSession>,
     llm_provider: Option<Arc<dyn LlmProvider>>,
     history: Arc<XhsHistoryStore>,
+    /// socai pro activated on this device; when false, pro-only args
+    /// ([`PRO_ARG_KEYS`]) are hidden from the schema and skipped at runtime.
+    pro: bool,
 }
 
 #[async_trait]
@@ -2037,7 +2324,7 @@ impl Tool for ReadNoteTool {
     }
 
     fn input_schema(&self) -> Value {
-        json!({
+        let mut schema = json!({
             "type": "object",
             "properties": {
                 "note_id": { "type": "string" },
@@ -2045,13 +2332,19 @@ impl Tool for ReadNoteTool {
                 "wait_seconds": { "type": "number", "default": 6.0 },
                 "include_media": { "type": "boolean", "default": false },
                 "download_media": { "type": "boolean", "default": false },
+                "transcribe_audio": { "type": "boolean", "default": false },
                 "max_images": { "type": "integer", "default": 12, "minimum": 1 },
                 "max_video_frames": { "type": "integer", "default": 4, "minimum": 1 }
             }
-        })
+        });
+        if !self.pro {
+            strip_pro_schema(&mut schema);
+        }
+        schema
     }
 
-    async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn call(&self, mut input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let pro_skipped = !self.pro && strip_pro_input(&mut input);
         let note_id = get_str(&input, "note_id").map(str::to_string);
         let index = input
             .get("index")
@@ -2071,6 +2364,7 @@ impl Tool for ReadNoteTool {
                 options.include_media,
                 options.download_media,
                 options.ocr,
+                options.transcribe_audio,
                 TOP_COMMENTS_PER_NOTE,
             ) {
                 let entry = self.history.get(id).unwrap_or_default();
@@ -2093,6 +2387,7 @@ impl Tool for ReadNoteTool {
                 ctx,
                 self.llm_provider.clone(),
                 options.include_media || options.download_media,
+                options.transcribe_audio,
             )?,
         );
         let mut value = xhs
@@ -2128,6 +2423,7 @@ impl Tool for ReadNoteTool {
         if let Some(perf) = value.as_object_mut().and_then(|map| map.remove("perf")) {
             write_run_perf_file(ctx, "read.json", &json!({ "read": perf }));
         }
+        attach_pro_skip_note(&mut value, pro_skipped);
         Ok(json_result(&value))
     }
 }
@@ -2137,6 +2433,8 @@ pub struct ExtractNoteTool {
     page: Arc<PageSession>,
     llm_provider: Option<Arc<dyn LlmProvider>>,
     history: Arc<XhsHistoryStore>,
+    /// See [`ReadNoteTool::pro`].
+    pro: bool,
 }
 
 #[async_trait]
@@ -2152,19 +2450,25 @@ impl Tool for ExtractNoteTool {
     }
 
     fn input_schema(&self) -> Value {
-        json!({
+        let mut schema = json!({
             "type": "object",
             "properties": {
                 "wait_seconds": { "type": "number", "default": 8.0 },
                 "include_media": { "type": "boolean", "default": false },
                 "download_media": { "type": "boolean", "default": false },
+                "transcribe_audio": { "type": "boolean", "default": false },
                 "max_images": { "type": "integer", "default": 12, "minimum": 1 },
                 "max_video_frames": { "type": "integer", "default": 4, "minimum": 1 }
             }
-        })
+        });
+        if !self.pro {
+            strip_pro_schema(&mut schema);
+        }
+        schema
     }
 
-    async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn call(&self, mut input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let pro_skipped = !self.pro && strip_pro_input(&mut input);
         let wait_seconds = get_f64(&input, "wait_seconds", 8.0);
         let options = read_note_options(&input);
         let xhs = XhsPageRuntime::new_with_media(
@@ -2173,6 +2477,7 @@ impl Tool for ExtractNoteTool {
                 ctx,
                 self.llm_provider.clone(),
                 options.include_media || options.download_media,
+                options.transcribe_audio,
             )?,
         );
         let note = xhs
@@ -2184,6 +2489,7 @@ impl Tool for ExtractNoteTool {
         attach_top_comments(&xhs, &mut value).await;
         self.history
             .record(&value, &options.level, options.include_media);
+        attach_pro_skip_note(&mut value, pro_skipped);
         Ok(json_result(&value))
     }
 }
@@ -2303,8 +2609,7 @@ impl Tool for WaitForLoginTool {
 
         let timeout = get_i64(&input, "timeout_seconds", WAIT_FOR_LOGIN_DEFAULT_SECS)
             .clamp(10, WAIT_FOR_LOGIN_MAX_SECS);
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(timeout as u64);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout as u64);
         loop {
             if xhs.is_logged_in().await.unwrap_or(false) {
                 return Ok(json_result(&json!({
@@ -2556,6 +2861,8 @@ pub struct SearchTool {
     /// `ocr` input. Set by the app/TUI macro factory so the desktop agent always
     /// gets OCR; the CLI/full set leaves it to the `--ocr` flag.
     always_ocr: bool,
+    /// See [`ReadNoteTool::pro`].
+    pro: bool,
 }
 
 fn effective_macro_input(
@@ -2578,8 +2885,12 @@ fn effective_macro_input(
     if preview {
         if let Some(object) = effective.as_object_mut() {
             object.remove("download_media");
+            object.remove("transcribe_audio");
         }
-    } else if always_download_media || get_bool(&effective, "download_media", false) {
+    } else if always_download_media
+        || get_bool(&effective, "download_media", false)
+        || get_bool(&effective, "transcribe_audio", false)
+    {
         // Explicit downloads only — OCR alone downloads just what it reads
         // (images / video poster), so it must not force `download_media` here.
         effective["download_media"] = json!(true);
@@ -2613,7 +2924,7 @@ impl Tool for SearchTool {
     }
 
     fn input_schema(&self) -> Value {
-        json!({
+        let mut schema = json!({
             "type": "object",
             "properties": {
                 "query": { "type": "string" },
@@ -2640,6 +2951,11 @@ impl Tool for SearchTool {
                     "description": "Run local OCR (PP-OCRv6 small). Full scan: OCR each opened note — every carousel image, or a video note's cover — downloading what it reads (video files still require download_media); each returned note gets ocr_text as an array of per-image strings (image order, cover first). Preview: OCR each card's cover image and attach its ocr_text. Per-image ocr_text/ocr_ms and OCR diagnostics are kept in the artifact.",
                     "default": false
                 },
+                "transcribe_audio": {
+                    "type": "boolean",
+                    "description": "For opened video notes, download the video file and transcribe audio through socai pro. Ignored in preview mode.",
+                    "default": false
+                },
                 "preview": {
                     "type": "boolean",
                     "description": "Fast cards-only mode: return result cards (titles/likes/covers) without opening notes or reading bodies/comments. Off by default (full scan).",
@@ -2647,7 +2963,11 @@ impl Tool for SearchTool {
                 }
             },
             "required": ["query"]
-        })
+        });
+        if !self.pro {
+            strip_pro_schema(&mut schema);
+        }
+        schema
     }
 
     fn effective_input(&self, input: &Value) -> Value {
@@ -2659,7 +2979,8 @@ impl Tool for SearchTool {
         )
     }
 
-    async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn call(&self, mut input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let pro_skipped = !self.pro && strip_pro_input(&mut input);
         let query = get_str(&input, "query")
             .ok_or_else(|| anyhow::anyhow!("missing query"))?
             .to_string();
@@ -2785,9 +3106,11 @@ impl Tool for SearchTool {
         // genuinely expensive enrichment and not needed for topic research).
         let include_media = false;
         let ocr = self.always_ocr || get_bool(&input, "ocr", false);
+        let transcribe_audio = get_bool(&input, "transcribe_audio", false);
         // Explicit request: download everything, video files included.
-        let download_media_requested =
-            self.always_download_media || get_bool(&input, "download_media", false);
+        let download_media_requested = self.always_download_media
+            || get_bool(&input, "download_media", false)
+            || transcribe_audio;
         // OCR still implies downloading what it reads (carousel images, video
         // posters) — but only an explicit request fetches video files.
         let download_media = ocr || download_media_requested;
@@ -2802,6 +3125,7 @@ impl Tool for SearchTool {
             ctx,
             self.llm_provider.clone(),
             include_media || download_media,
+            transcribe_audio,
         )?;
         let media_baseline: Option<TimingSnapshot> = media.as_ref().map(|m| m.timing().snapshot());
         let xhs = XhsPageRuntime::new_with_media(&self.page, media.clone());
@@ -2874,10 +3198,13 @@ impl Tool for SearchTool {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut cursor = 0usize;
         let mut stalls = 0usize;
-        // OCR runs in the background so it overlaps the next note's read +
-        // download; tasks are joined after the browse loop.
+        // OCR and cloud ASR run in the background so they overlap the next
+        // note's read + download; tasks are joined after the browse loop.
         let ocr_sem = Arc::new(tokio::sync::Semaphore::new(OCR_PIPELINE_CONCURRENCY));
         let mut pending_ocr: Vec<(usize, tokio::task::JoinHandle<NoteOcrResult>)> = Vec::new();
+        let asr_sem = Arc::new(tokio::sync::Semaphore::new(ASR_PIPELINE_CONCURRENCY));
+        let mut pending_transcribe: Vec<(usize, tokio::task::JoinHandle<NoteTranscribeResult>)> =
+            Vec::new();
         let mut note_perfs: Vec<Value> = Vec::new();
         let scan_progress = ScanProgress::new(ctx, want);
         // Wall-clock markers so the perf file can show how much OCR overlapped
@@ -2927,6 +3254,7 @@ impl Tool for SearchTool {
                 download_media,
                 download_media_requested,
                 ocr,
+                transcribe_audio,
                 // Defer OCR to a background task when OCR is on, so the loop can
                 // move on to the next note's read + download immediately.
                 ocr,
@@ -2949,6 +3277,13 @@ impl Tool for SearchTool {
                     scan_progress.ocr_completed(item_index, title.clone());
                 }
             }
+            if transcribe_audio {
+                if let Some(handle) =
+                    spawn_note_transcribe(&media, &asr_sem, &notes[idx], browse_t0)
+                {
+                    pending_transcribe.push((idx, handle));
+                }
+            }
             let t_close = std::time::Instant::now();
             let _ = xhs.close_note(0.6).await;
             let close_ms = t_close.elapsed().as_millis() as u64;
@@ -2969,6 +3304,18 @@ impl Tool for SearchTool {
         // browse_ms) and merge results back into the notes in place.
         let ocr_timings =
             join_note_ocr(&mut notes, pending_ocr, &self.history, level, include_media).await;
+        // Join background ASR after OCR: both pipelines write into the video
+        // object, and the transcribe join copies only its own fields.
+        join_note_transcribe(
+            &mut notes,
+            pending_transcribe,
+            &mut note_perfs,
+            &self.history,
+            ctx,
+            level,
+            include_media,
+        )
+        .await;
         // Write the scan perf record (per-note phase timing + OCR pipeline) to a
         // separate debug file; the JSON artifact stays LLM-facing.
         write_scan_perf(ctx, &notes, browse_ms, &ocr_timings, &note_perfs);
@@ -3020,6 +3367,7 @@ impl Tool for SearchTool {
                 "include_media": include_media,
                 "download_media": download_media,
                 "ocr": ocr,
+                "transcribe_audio": transcribe_audio,
             },
             "timing": {
                 "media": media_timing,
@@ -3077,6 +3425,7 @@ impl Tool for SearchTool {
         // agent/CLI output stays small, then point at the artifact for the rest.
         lean_scan_payload(&mut payload);
         attach_artifact_pointer(&mut payload, artifact_path, ARTIFACT_EXTRA_NOTE_PROPERTIES);
+        attach_pro_skip_note(&mut payload, pro_skipped);
         Ok(json_result(&payload))
     }
 }
@@ -3100,6 +3449,8 @@ pub struct AuthorScanTool {
     /// `ocr` input. Set by the app/TUI macro factory; the CLI/full set leaves it
     /// to the `--ocr` flag.
     always_ocr: bool,
+    /// See [`ReadNoteTool::pro`].
+    pro: bool,
 }
 
 #[async_trait]
@@ -3126,7 +3477,7 @@ impl Tool for AuthorScanTool {
     }
 
     fn input_schema(&self) -> Value {
-        json!({
+        let mut schema = json!({
             "type": "object",
             "properties": {
                 "author_id": {
@@ -3158,17 +3509,27 @@ impl Tool for AuthorScanTool {
                     "type": "boolean",
                     "description": "Run local OCR (PP-OCRv6 small) on each opened note — every carousel image, or a video note's cover — attaching per-image ocr_text in the artifact and a joined per-note ocr_text in the returned notes. Downloads what it reads on its own; video files still require download_media. In preview mode, OCRs each note card's cover instead.",
                     "default": false
+                },
+                "transcribe_audio": {
+                    "type": "boolean",
+                    "description": "For opened video notes, download the video file and transcribe audio through socai pro. Ignored in preview mode.",
+                    "default": false
                 }
             },
             "required": ["author_id"]
-        })
+        });
+        if !self.pro {
+            strip_pro_schema(&mut schema);
+        }
+        schema
     }
 
     fn effective_input(&self, input: &Value) -> Value {
         effective_macro_input(input, None, self.always_download_media, self.always_ocr)
     }
 
-    async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn call(&self, mut input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let pro_skipped = !self.pro && strip_pro_input(&mut input);
         let author_id = get_str(&input, "author_id")
             .map(str::trim)
             .filter(|id| !id.is_empty())
@@ -3181,11 +3542,15 @@ impl Tool for AuthorScanTool {
         // `preview=true, download_media=true` call would still spin up the media
         // pipeline and emit media metadata even though no note is opened.
         let ocr = self.always_ocr || get_bool(&input, "ocr", false);
+        let transcribe_audio = !preview
+            && get_bool(&input, "transcribe_audio", false);
         // Explicit request: download everything, video files included. OCR
         // still implies downloading what it reads (carousel images, video
         // posters) — but only an explicit request fetches video files.
         let download_media_requested = !preview
-            && (self.always_download_media || get_bool(&input, "download_media", false));
+            && (self.always_download_media
+                || get_bool(&input, "download_media", false)
+                || transcribe_audio);
         let download_media = !preview && (ocr || download_media_requested);
         // Warm the OCR engine off the critical path; overlaps opening the profile
         // and collecting note cards below.
@@ -3201,7 +3566,7 @@ impl Tool for AuthorScanTool {
 
         // Media processor only needed when downloading note media (no vision,
         // so no LLM provider required).
-        let media = media_for(ctx, None, download_media)?;
+        let media = media_for(ctx, None, download_media, transcribe_audio)?;
         let media_baseline: Option<TimingSnapshot> = media.as_ref().map(|m| m.timing().snapshot());
         let xhs = XhsPageRuntime::new_with_media(&self.page, media.clone());
         // Snapshot history before reading so card annotations reflect "known
@@ -3264,10 +3629,15 @@ impl Tool for AuthorScanTool {
         // `preview` returns the cards only and skips this.
         let mut notes: Vec<Value> = Vec::new();
         if !preview {
-            // OCR runs in the background so it overlaps the next note's read +
-            // download; tasks are joined after the loop.
+            // OCR and cloud ASR run in the background so they overlap the next
+            // note's read + download; tasks are joined after the loop.
             let ocr_sem = Arc::new(tokio::sync::Semaphore::new(OCR_PIPELINE_CONCURRENCY));
             let mut pending_ocr: Vec<(usize, tokio::task::JoinHandle<NoteOcrResult>)> = Vec::new();
+            let asr_sem = Arc::new(tokio::sync::Semaphore::new(ASR_PIPELINE_CONCURRENCY));
+            let mut pending_transcribe: Vec<(
+                usize,
+                tokio::task::JoinHandle<NoteTranscribeResult>,
+            )> = Vec::new();
             let mut note_perfs: Vec<Value> = Vec::new();
             let scan_progress = ScanProgress::new(ctx, cards.len());
             let browse_t0 = std::time::Instant::now();
@@ -3290,6 +3660,7 @@ impl Tool for AuthorScanTool {
                     download_media,
                     download_media_requested,
                     ocr,
+                    transcribe_audio,
                     ocr,
                 )
                 .await;
@@ -3310,6 +3681,13 @@ impl Tool for AuthorScanTool {
                         scan_progress.ocr_completed(item_index, title.clone());
                     }
                 }
+                if transcribe_audio {
+                    if let Some(handle) =
+                        spawn_note_transcribe(&media, &asr_sem, &notes[idx], browse_t0)
+                    {
+                        pending_transcribe.push((idx, handle));
+                    }
+                }
                 let t_close = std::time::Instant::now();
                 let _ = xhs.close_note(0.6).await;
                 let close_ms = t_close.elapsed().as_millis() as u64;
@@ -3328,6 +3706,16 @@ impl Tool for AuthorScanTool {
             let browse_ms = browse_t0.elapsed().as_millis() as u64;
             let ocr_timings =
                 join_note_ocr(&mut notes, pending_ocr, &self.history, "deep", false).await;
+            join_note_transcribe(
+                &mut notes,
+                pending_transcribe,
+                &mut note_perfs,
+                &self.history,
+                ctx,
+                "deep",
+                false,
+            )
+            .await;
             write_scan_perf(ctx, &notes, browse_ms, &ocr_timings, &note_perfs);
             if ocr {
                 scan_progress.finish_ocr(notes.len());
@@ -3398,6 +3786,7 @@ impl Tool for AuthorScanTool {
                 "comments_per_note": if preview { 0 } else { comment_count },
                 "download_media": download_media,
                 "ocr": ocr,
+                "transcribe_audio": transcribe_audio,
             },
             "timing": { "media": media_timing },
         });
@@ -3439,6 +3828,7 @@ impl Tool for AuthorScanTool {
         // agent/CLI output stays small, then point at the artifact for the rest.
         lean_scan_payload(&mut payload);
         attach_artifact_pointer(&mut payload, artifact_path, ARTIFACT_EXTRA_NOTE_PROPERTIES);
+        attach_pro_skip_note(&mut payload, pro_skipped);
         Ok(json_result(&payload))
     }
 }
@@ -3532,5 +3922,33 @@ mod tests {
     fn search_command_includes_run_metadata() {
         assert!(SEARCH_COMMAND.include_run_metadata);
         assert!(!AUTHOR_SCAN_COMMAND.include_run_metadata);
+    }
+
+    #[test]
+    fn strip_pro_schema_hides_pro_args() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "transcribe_audio": { "type": "boolean" }
+            }
+        });
+        strip_pro_schema(&mut schema);
+        assert!(schema["properties"].get("transcribe_audio").is_none());
+        assert!(schema["properties"].get("query").is_some());
+    }
+
+    #[test]
+    fn strip_pro_input_drops_args_and_reports_requests() {
+        let mut input = json!({ "query": "咖啡", "transcribe_audio": true });
+        assert!(strip_pro_input(&mut input));
+        assert!(input.get("transcribe_audio").is_none());
+        assert_eq!(input["query"], json!("咖啡"));
+
+        // Not requested (absent or false) → no skip note owed.
+        let mut plain = json!({ "query": "咖啡" });
+        assert!(!strip_pro_input(&mut plain));
+        let mut off = json!({ "query": "咖啡", "transcribe_audio": false });
+        assert!(!strip_pro_input(&mut off));
     }
 }
