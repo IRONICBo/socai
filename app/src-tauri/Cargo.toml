@@ -1,6 +1,6 @@
 [package]
 name = "socai_app"
-version = "0.4.7"
+version = "0.4.8"
 description = "socai desktop app"
 edition = "2021"
 
