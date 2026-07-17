@@ -47,6 +47,11 @@ const SEARCH_WAIT_SECONDS: f64 = 2.0;
 /// (one extra JS read, no extra navigation), so every note read includes them.
 const TOP_COMMENTS_PER_NOTE: i64 = 8;
 
+/// Default comment depth for the agent's composite search tools. Keep this
+/// lower than the CLI's top-level default so multi-note agent runs spend less
+/// context and latency on comment threads.
+const AGENT_TOP_COMMENTS_PER_NOTE: i64 = 5;
+
 /// XHS macro-agent playbook for the single app/TUI agent interface. Embedded
 /// at compile time so the agent prompt always carries the latest copy.
 pub const XHS_KNOWLEDGE: &str = include_str!("knowledge.md");
@@ -1988,15 +1993,17 @@ fn attach_note_audio_transcript(entity: &mut Value) {
     }
 }
 
-/// Surface OCR text on the entity as `ocr_text`: an array of one string per
-/// OCR'd image, cover-first. For an image note that's the carousel in image
-/// order (image 0 is the cover); for a video note it's the poster's OCR (the
-/// poster is the cover, and the only OCR surface). Each entry is that image's
-/// recognized text ("" when an image has none). No-op when nothing produced
-/// any text. Called only during lean trimming (see [`lean_scan_note`]) so the
-/// artifact keeps only the per-image / poster OCR; this is the lean,
-/// index-aligned view that survives images and video being dropped from the
-/// returned notes.
+/// Number of cover-first image OCR entries kept per note in the LLM-facing
+/// lean result. The scan and its artifact still retain OCR for every image.
+const LEAN_NOTE_OCR_MAX_IMAGES: usize = 2;
+
+/// Surface OCR text on the entity as `ocr_text`: up to two cover-first OCR'd
+/// image strings. For an image note these are the first carousel images; for a
+/// video note it's the poster's OCR (the cover, and the only OCR surface).
+/// Each entry is that image's recognized text ("" when an image has none).
+/// No-op when nothing produced any text. Called only during lean trimming (see
+/// [`lean_scan_note`]) so the artifact retains the complete per-image / poster
+/// OCR while the returned result stays bounded.
 fn attach_note_ocr_summary(entity: &mut Value) {
     let mut texts: Vec<Value> = Vec::new();
     if let Some(poster) = entity
@@ -2007,7 +2014,8 @@ fn attach_note_ocr_summary(entity: &mut Value) {
         texts.push(Value::String(truncate(poster, 1200)));
     }
     if let Some(images) = entity.get("images").and_then(Value::as_array) {
-        texts.extend(images.iter().map(|image| {
+        let remaining = LEAN_NOTE_OCR_MAX_IMAGES.saturating_sub(texts.len());
+        texts.extend(images.iter().take(remaining).map(|image| {
             let text = image
                 .get("ocr_text")
                 .and_then(Value::as_str)
@@ -3031,7 +3039,7 @@ impl Tool for SearchTool {
                 "num_comments": {
                     "type": "integer",
                     "description": "Comments to load per note. Scrolls the comment area and expands reply threads to reach this many; replies count toward the total. Higher values add latency per note. Ignored in preview mode.",
-                    "default": TOP_COMMENTS_PER_NOTE,
+                    "default": AGENT_TOP_COMMENTS_PER_NOTE,
                     "minimum": 0
                 },
                 "download_media": {
@@ -3041,7 +3049,7 @@ impl Tool for SearchTool {
                 },
                 "ocr": {
                     "type": "boolean",
-                    "description": "Run local OCR (PP-OCRv6 small). Full scan: OCR each opened note — every carousel image, or a video note's cover — downloading what it reads (video files still require download_media); each returned note gets ocr_text as an array of per-image strings (image order, cover first). Preview: OCR each card's cover image and attach its ocr_text. Per-image ocr_text/ocr_ms and OCR diagnostics are kept in the artifact.",
+                    "description": "Run local OCR (PP-OCRv6 small). Full scan: OCR each opened note — every carousel image, or a video note's cover — downloading what it reads (video files still require download_media); returned notes expose OCR for at most their first two cover-first images. Preview: OCR each card's cover image and attach its ocr_text. Full per-image ocr_text/ocr_ms and OCR diagnostics are kept in the artifact.",
                     "default": false
                 },
                 "transcribe_audio": {
@@ -3256,7 +3264,7 @@ impl Tool for SearchTool {
                 "sampling": {
                     "num_notes": num_notes,
                     "selected": 0,
-                    "comments_per_note": TOP_COMMENTS_PER_NOTE,
+                    "comments_per_note": AGENT_TOP_COMMENTS_PER_NOTE,
                     "include_media": include_media,
                     "download_media": download_media,
                     "ocr": ocr,
@@ -3277,7 +3285,7 @@ impl Tool for SearchTool {
         // Every sampled note is read with the same extraction level (body +
         // top comments).
         let level = "deep";
-        let comment_count = get_i64(&input, "num_comments", TOP_COMMENTS_PER_NOTE).max(0);
+        let comment_count = get_i64(&input, "num_comments", AGENT_TOP_COMMENTS_PER_NOTE).max(0);
         let want = num_notes.max(1) as usize;
 
         // Read top-to-bottom: pull cards from the results state (which only
@@ -3585,7 +3593,7 @@ impl Tool for AuthorScanTool {
                 "num_comments": {
                     "type": "integer",
                     "description": "Comments to load per note. Scrolls the comment area and expands reply threads to reach this many; replies count toward the total. Higher values add latency per note. Ignored in preview mode.",
-                    "default": TOP_COMMENTS_PER_NOTE,
+                    "default": AGENT_TOP_COMMENTS_PER_NOTE,
                     "minimum": 0
                 },
                 "preview": {
@@ -3600,7 +3608,7 @@ impl Tool for AuthorScanTool {
                 },
                 "ocr": {
                     "type": "boolean",
-                    "description": "Run local OCR (PP-OCRv6 small) on each opened note — every carousel image, or a video note's cover — attaching per-image ocr_text in the artifact and a joined per-note ocr_text in the returned notes. Downloads what it reads on its own; video files still require download_media. In preview mode, OCRs each note card's cover instead.",
+                    "description": "Run local OCR (PP-OCRv6 small) on each opened note — every carousel image, or a video note's cover — retaining per-image ocr_text in the artifact and returning at most the first two cover-first image texts per note. Downloads what it reads on its own; video files still require download_media. In preview mode, OCRs each note card's cover instead.",
                     "default": false
                 },
                 "transcribe_audio": {
@@ -3655,7 +3663,7 @@ impl Tool for AuthorScanTool {
             .and_then(Value::as_i64)
             .filter(|n| *n > 0)
             .map(|n| n as usize);
-        let comment_count = get_i64(&input, "num_comments", TOP_COMMENTS_PER_NOTE).max(0);
+        let comment_count = get_i64(&input, "num_comments", AGENT_TOP_COMMENTS_PER_NOTE).max(0);
 
         // Media processor only needed when downloading note media (no vision,
         // so no LLM provider required).
