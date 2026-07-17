@@ -21,12 +21,13 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
+use crate::agent::api_errors::is_transient_api_error;
 use crate::agent::compaction::{compress_text_maybe_json, TOOL_RESULT_TEXT_MAX_CHARS};
 use crate::agent::llm::{
     Backend, Block, LLMResponse, Message, StopReason, TokenUsage, ToolCall, ToolResultContent,
@@ -133,6 +134,12 @@ pub struct AgentOutcome {
     pub steps: u32,
     pub final_text: String,
     pub usage: TokenUsage,
+    /// Terminal error that ended the run early: an unretryable LLM API
+    /// error, repeated max-token truncation, or a failed forced summary.
+    /// When set, run.json and the trace already carry status "failed", and
+    /// `final_text` is best-effort — an error placeholder, or partial output
+    /// from earlier steps — so callers must not report the run as completed.
+    pub error: Option<String>,
 }
 
 pub async fn run_agent(
@@ -234,9 +241,15 @@ pub async fn run_agent_with_events(
         run_recorder.record_llm_request(step, &request_payload)?;
 
         let llm_started = Instant::now();
-        let response: LLMResponse = match backend
-            .send(&system, &request_messages, &schemas, options.max_tokens)
-            .await
+        let response: LLMResponse = match send_with_retry(
+            &backend,
+            &system,
+            &request_messages,
+            &schemas,
+            options.max_tokens,
+            step,
+        )
+        .await
         {
             Ok(response) => {
                 let duration_ms = llm_started.elapsed().as_millis() as u64;
@@ -481,7 +494,7 @@ pub async fn run_agent_with_events(
         messages.push(Message::user_blocks(tool_result_blocks));
     }
 
-    if !completed && step >= options.max_steps {
+    if !completed && terminal_error.is_none() && step >= options.max_steps {
         info!(step, "reached max_steps, forcing final summary");
         messages.push(Message::user(format!(
             "You have reached the maximum of {} tool-using steps. Do not call any \
@@ -502,9 +515,15 @@ pub async fn run_agent_with_events(
             backend.request_payload(&last_system, &request_messages, &[], options.max_tokens)?;
         run_recorder.record_llm_request(step + 1, &request_payload)?;
         let llm_started = Instant::now();
-        match backend
-            .send(&last_system, &request_messages, &[], options.max_tokens)
-            .await
+        match send_with_retry(
+            &backend,
+            &last_system,
+            &request_messages,
+            &[],
+            options.max_tokens,
+            step + 1,
+        )
+        .await
         {
             Ok(response) => {
                 let duration_ms = llm_started.elapsed().as_millis() as u64;
@@ -553,14 +572,18 @@ pub async fn run_agent_with_events(
         }
     }
 
-    emit(
-        &events,
-        AgentEvent::Done {
-            run_id: run_id.clone(),
-            steps: step,
-            final_text: final_text.clone(),
-        },
-    );
+    // Failed runs already signalled ApiError; a Done event on top would give
+    // subscribers contradictory success ("✓ done") and failure signals.
+    if terminal_error.is_none() {
+        emit(
+            &events,
+            AgentEvent::Done {
+                run_id: run_id.clone(),
+                steps: step,
+                final_text: final_text.clone(),
+            },
+        );
+    }
 
     let enriched_report = report_with_artifacts(&final_text, Some(&run_state));
     let _ = std::fs::write(run_dir.join("report.md"), &enriched_report);
@@ -579,10 +602,53 @@ pub async fn run_agent_with_events(
         steps: step,
         final_text,
         usage,
+        error: terminal_error,
     })
 }
 
 // ---------- small private helpers (not core logic, kept here for locality) ----------
+
+/// Backoff schedule for transient chat failures. Two retries keeps the worst
+/// case bounded: a fully dead network adds at most two extra request
+/// timeouts before the run fails.
+const CHAT_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(6)];
+
+/// `backend.send` with retries for transient failures (network transport
+/// errors, 408/429/5xx) — a multi-minute run should not die on one dropped
+/// packet. Permanent errors (auth, billing, bad request) surface on the
+/// first attempt.
+async fn send_with_retry(
+    backend: &Arc<dyn Backend>,
+    system: &str,
+    messages: &[Message],
+    schemas: &[ToolSchema],
+    max_tokens: u32,
+    step: u32,
+) -> anyhow::Result<LLMResponse> {
+    let mut attempt = 0usize;
+    loop {
+        match backend.send(system, messages, schemas, max_tokens).await {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                let Some(delay) = CHAT_RETRY_DELAYS.get(attempt).copied() else {
+                    return Err(error);
+                };
+                if !is_transient_api_error(&error) {
+                    return Err(error);
+                }
+                attempt += 1;
+                warn!(
+                    step,
+                    attempt,
+                    delay_secs = delay.as_secs(),
+                    error = %format!("{error:#}"),
+                    "transient LLM error; retrying"
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
 
 fn new_run_id() -> String {
     use chrono::Utc;
