@@ -7,7 +7,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
 import { applyLanguageToDocument, formatTabs, t } from "./lib/i18n";
-import { authMenu } from "./panels/auth";
 import { agentPanel } from "./panels/tasks";
 import { settingsMenu } from "./panels/settings";
 
@@ -198,7 +197,6 @@ function render(): void {
             <span class="status-capsule__divider" aria-hidden="true"></span>
             ${agentPanel.renderHeader()}
           </div>
-          ${authMenu.render()}
           ${settingsMenu.render(state)}
         </div>
       </header>
@@ -212,12 +210,7 @@ function render(): void {
   bindUpdateChip();
   bindSidebarToggle();
   agentPanel.bindHeader(state);
-  authMenu.bind(
-    state,
-    () => { settingsMenu.closePopover(); },
-    settingsMenu.loadConfig,
-  );
-  settingsMenu.bind(state, () => { authMenu.closePopover(); });
+  settingsMenu.bind(state);
   agentPanel.bind(state);
 }
 
@@ -496,9 +489,6 @@ function bindGlobalDismiss(): void {
     if (settingsMenu.isOpen() && !eventPathHasClass(event, "settings-menu") && settingsMenu.closePopover()) {
       changed = true;
     }
-    if (authMenu.isOpen() && !eventPathHasClass(event, "auth-menu") && authMenu.closePopover()) {
-      changed = true;
-    }
     if (restartWarn && !eventPathHasClass(event, "update-chip-wrap")) {
       restartWarn = false;
       changed = true;
@@ -600,7 +590,7 @@ async function main(): Promise<void> {
   } catch (e) {
     console.error("getVersion failed:", e);
   }
-  await Promise.all([settingsMenu.loadConfig(), authMenu.loadSession()]);
+  await settingsMenu.loadConfig();
   render();
   bindGlobalDismiss();
   bindExternalLinks();
