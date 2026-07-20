@@ -163,6 +163,10 @@ pub fn run() {
             commands::config_set,
             commands::config_unset,
             commands::pro_activate,
+            commands::auth_session,
+            commands::auth_sms_send,
+            commands::auth_sms_verify,
+            commands::auth_logout,
         ])
         .build(tauri::generate_context!())
         .expect("error while building socai")
