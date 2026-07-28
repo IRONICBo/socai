@@ -5,15 +5,27 @@ use serde_json::{json, Value};
 use tracing::{debug, warn};
 
 use crate::cdp::connection::{
-    page_list_from, BrowserEvent, Cdp, CdpState, ChromeConnectOptions, ChromeProfile,
-    StatusPayload, TargetInfo,
+    page_list_from, BrowserEvent, BrowserOwner, Cdp, CdpState, ChromeConnectOptions, ChromeProfile,
+    RemoteSession, StatusPayload, TargetInfo,
 };
 use crate::cdp::endpoint::{self, Endpoint};
-use crate::cdp::launch::{self, ChromeProcess};
+use crate::cdp::launch;
 use crate::cdp::raw_client::RawCdpClient;
 
 const MAX_ATTEMPTS: u8 = 3;
 const ATTEMPT_DELAY: Duration = Duration::from_millis(500);
+/// Wall-clock ceiling for a whole connect (every attempt, plus the delays
+/// between them). Must stay below `runtime::engine::CONNECT_TIMEOUT` so this
+/// task reaches a terminal state — releasing anything it acquired — before the
+/// waiter there stops polling. Nothing cancels this task when the waiter
+/// returns, so without the ceiling a late attempt could mint a hosted session
+/// for a caller that already reported a timeout.
+const CONNECT_BUDGET: Duration = Duration::from_secs(85);
+/// Ceiling for the browser-websocket handshake plus the two inventory
+/// commands. The handshake has no timeout of its own and each command can wait
+/// `raw_client::COMMAND_TIMEOUT`, so without this one unresponsive endpoint
+/// would swallow the whole `CONNECT_BUDGET` and leave no room to retry.
+const INVENTORY_TIMEOUT: Duration = Duration::from_secs(20);
 const TARGET_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const TARGET_POLL_FAILURES: u8 = 3;
 
@@ -23,12 +35,23 @@ struct ConnectInventory {
     browser_client: RawCdpClient,
 }
 
-/// A resolved remote-debugging endpoint plus, for managed mode, the chrome
-/// process socai launched. The process guard is threaded into the `Connected`
-/// state so it lives exactly as long as the connection.
+/// A resolved remote-debugging endpoint plus whatever browser resource socai
+/// owns behind it (a launched chrome process, a minted remote session, or
+/// nothing for plain attaches). The owner guard is threaded into the
+/// `Connected` state so it lives exactly as long as the connection.
 struct OpenEndpoint {
     endpoint: Endpoint,
-    chrome_process: Option<ChromeProcess>,
+    owner: BrowserOwner,
+}
+
+/// How one connect attempt ended. `Cancelled` means the connection state was
+/// replaced from outside while the attempt was in flight — an explicit
+/// `disconnect()` — which must never be retried: retrying would resurrect a
+/// browser the user asked to release, and for a hosted profile it would mint
+/// (and bill for) a fresh session.
+enum ConnectAttempt {
+    Connected,
+    Cancelled,
 }
 
 impl Cdp {
@@ -73,6 +96,15 @@ impl Cdp {
 }
 
 async fn run_connect(cdp: Cdp, options: Option<ChromeConnectOptions>) {
+    // Exactly one connect loop at a time. The state check below is a filter,
+    // not a claim: two callers (a UI connect button pressed twice, say) can
+    // both observe `Disconnected` before either transitions, and both would
+    // then open their own browser — two hosted sessions on a remote profile.
+    let connect_lock = cdp.connect_lock();
+    let Ok(_connect_guard) = connect_lock.try_lock() else {
+        debug!("connect already in progress; ignoring duplicate request");
+        return;
+    };
     {
         let state = cdp.state();
         let guard = state.lock().await;
@@ -81,13 +113,27 @@ async fn run_connect(cdp: Cdp, options: Option<ChromeConnectOptions>) {
         }
     }
 
+    // One budget for all attempts, so this task always settles into a terminal
+    // state before the runtime's waiter stops polling. Per-phase timeouts alone
+    // could not promise that: their worst case multiplies by MAX_ATTEMPTS, and
+    // nothing cancels this task when the waiter returns — a late attempt would
+    // then mint a hosted session for a caller that already gave up.
+    let deadline = tokio::time::Instant::now() + CONNECT_BUDGET;
     for attempt in 1..=MAX_ATTEMPTS {
-        if !transition_if_eligible(&cdp, CdpState::Connecting { attempt }).await {
+        if !begin_connect_attempt(&cdp, attempt, attempt == 1).await {
             return;
         }
-        match try_connect_once(&cdp, options.clone()).await {
-            Ok(()) => return,
-            Err(err) => {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, try_connect_once(&cdp, options.clone())).await {
+            Ok(Ok(ConnectAttempt::Connected)) => return,
+            // Someone replaced the state while we were connecting (an explicit
+            // disconnect). Leave their state alone and stop: another attempt
+            // would undo the disconnect and re-mint a hosted session.
+            Ok(Ok(ConnectAttempt::Cancelled)) => {
+                debug!("connect attempt cancelled by an external state change");
+                return;
+            }
+            Ok(Err(err)) => {
                 warn!(attempt, error = %err, "cdp connect attempt failed");
                 if attempt == MAX_ATTEMPTS {
                     transition_unconditional(
@@ -101,17 +147,51 @@ async fn run_connect(cdp: Cdp, options: Option<ChromeConnectOptions>) {
                 }
                 tokio::time::sleep(ATTEMPT_DELAY).await;
             }
+            // Budget gone. Dropping the attempt future released whatever it had
+            // acquired, including a just-minted hosted session.
+            Err(_) => {
+                warn!(attempt, "cdp connect budget exhausted");
+                if !is_connected(&cdp).await {
+                    transition_unconditional(
+                        &cdp,
+                        CdpState::Disconnected {
+                            reason: format!(
+                                "browser did not connect within {}s",
+                                CONNECT_BUDGET.as_secs()
+                            ),
+                        },
+                    )
+                    .await;
+                }
+                return;
+            }
         }
     }
 }
 
-async fn try_connect_once(cdp: &Cdp, options: Option<ChromeConnectOptions>) -> anyhow::Result<()> {
-    let OpenEndpoint {
-        endpoint,
-        chrome_process,
-    } = open_endpoint(options).await?;
+async fn is_connected(cdp: &Cdp) -> bool {
+    matches!(&*cdp.state().lock().await, CdpState::Connected { .. })
+}
 
-    let inventory = connect_inventory(&endpoint).await?;
+async fn try_connect_once(
+    cdp: &Cdp,
+    options: Option<ChromeConnectOptions>,
+) -> anyhow::Result<ConnectAttempt> {
+    let OpenEndpoint { endpoint, owner } = open_endpoint(options).await?;
+
+    let inventory =
+        match tokio::time::timeout(INVENTORY_TIMEOUT, connect_inventory(&endpoint)).await {
+            Ok(result) => result.map_err(|err| redact_endpoint_in_error(&endpoint, err))?,
+            // Dropping `owner` on the way out releases a hosted session that was
+            // minted for a browser websocket which never answered.
+            Err(_) => {
+                anyhow::bail!(
+                    "browser websocket {} did not respond within {}s",
+                    endpoint.display_ws_url(),
+                    INVENTORY_TIMEOUT.as_secs()
+                )
+            }
+        };
     let monitor_task = spawn_target_poll_loop(cdp.clone(), inventory.browser_client.clone());
 
     {
@@ -119,9 +199,11 @@ async fn try_connect_once(cdp: &Cdp, options: Option<ChromeConnectOptions>) -> a
         let mut guard = state.lock().await;
         if !guard.is_connecting() {
             monitor_task.abort();
-            // Dropping `chrome_process` here kills a just-launched managed chrome
-            // if the connect was cancelled mid-flight.
-            return Err(anyhow::anyhow!("connect cancelled"));
+            // Dropping `owner` here kills a just-launched managed chrome (or
+            // releases a just-minted remote session) if the connect was
+            // cancelled mid-flight. Reported as an outcome, not an error, so
+            // the caller stops instead of retrying over the new state.
+            return Ok(ConnectAttempt::Cancelled);
         }
         *guard = CdpState::Connected {
             endpoint,
@@ -129,7 +211,7 @@ async fn try_connect_once(cdp: &Cdp, options: Option<ChromeConnectOptions>) -> a
             browser_version: inventory.browser_version,
             targets: inventory.targets,
             monitor_task,
-            chrome_process,
+            owner,
         };
         let payload: StatusPayload = (&*guard).into();
         cdp.emit(BrowserEvent::StatusChanged(payload));
@@ -142,7 +224,7 @@ async fn try_connect_once(cdp: &Cdp, options: Option<ChromeConnectOptions>) -> a
     let initial_pages = cdp.pages().await;
     cdp.emit(BrowserEvent::TargetsChanged(initial_pages));
 
-    Ok(())
+    Ok(ConnectAttempt::Connected)
 }
 
 /// Resolve the remote-debugging endpoint for this connect attempt, honoring the
@@ -156,9 +238,15 @@ async fn open_endpoint(options: Option<ChromeConnectOptions>) -> anyhow::Result<
 
     if !matches!(options.profile, ChromeProfile::Managed) {
         if let Some(endpoint) = endpoint::resolve_explicit_endpoint(None, None).await? {
+            // An explicit override may well point at a hosted browser, but
+            // socai neither minted nor owns it: no release on drop, and it is
+            // not tagged `remote` (the user set that endpoint up and can reach
+            // its own live view, so the normal login protocol applies).
+            // Credential redaction is keyed on URL shape, so it still covers
+            // this case — see `Endpoint::display_ws_url`.
             return Ok(OpenEndpoint {
                 endpoint,
-                chrome_process: None,
+                owner: BrowserOwner::None,
             });
         }
     }
@@ -166,6 +254,7 @@ async fn open_endpoint(options: Option<ChromeConnectOptions>) -> anyhow::Result<
     match options.profile {
         ChromeProfile::Managed => open_managed_endpoint(&options).await,
         ChromeProfile::Existing => open_existing_endpoint().await,
+        ChromeProfile::Remote => open_remote_endpoint().await,
         ChromeProfile::Auto => match open_managed_endpoint(&options).await {
             Ok(open) => Ok(open),
             Err(managed_err) => {
@@ -180,6 +269,47 @@ async fn open_endpoint(options: Option<ChromeConnectOptions>) -> anyhow::Result<
     }
 }
 
+/// Mint a remote hosted browser session via socai-server and treat its
+/// connect URL as the endpoint. Gated on socai pro activation up front: the
+/// error becomes the `Disconnected` reason verbatim, and gating pre-mint
+/// avoids burning the connect retries on doomed server calls.
+async fn open_remote_endpoint() -> anyhow::Result<OpenEndpoint> {
+    if !crate::cloud::pro_activated() {
+        anyhow::bail!(
+            "socai remote browser requires socai pro — run `socai pro activate <invite_code>`, \
+             or switch back with `socai config set chrome.profile existing`."
+        );
+    }
+    let session = crate::cloud::create_browser_session().await?;
+    Ok(OpenEndpoint {
+        endpoint: Endpoint {
+            source: endpoint::REMOTE_SOURCE.into(),
+            browser_ws_url: session.connect_url,
+            http_version_url: None,
+            version: None,
+            managed: false,
+            user_data_dir: None,
+        },
+        owner: BrowserOwner::Remote(RemoteSession {
+            session_id: session.session_id,
+        }),
+    })
+}
+
+/// Rewrite a credential-bearing connect URL out of a connect failure. The
+/// websocket layer puts the URL it dialed into its error context, and
+/// `run_connect` sends that text to both tracing and the `Disconnected`
+/// reason — for a hosted endpoint that URL is a live browser-control
+/// credential. The chain is flattened so the sanitized text survives the
+/// outermost-message-only handling downstream.
+fn redact_endpoint_in_error(endpoint: &Endpoint, err: anyhow::Error) -> anyhow::Error {
+    let display = endpoint.display_ws_url();
+    if display == endpoint.browser_ws_url {
+        return err;
+    }
+    anyhow::anyhow!(format!("{err:#}").replace(&endpoint.browser_ws_url, &display))
+}
+
 async fn open_existing_endpoint() -> anyhow::Result<OpenEndpoint> {
     let endpoint = endpoint::discover_running_chrome_endpoint()
         .await?
@@ -192,7 +322,7 @@ async fn open_existing_endpoint() -> anyhow::Result<OpenEndpoint> {
         })?;
     Ok(OpenEndpoint {
         endpoint,
-        chrome_process: None,
+        owner: BrowserOwner::None,
     })
 }
 
@@ -212,7 +342,7 @@ async fn open_managed_endpoint(options: &ChromeConnectOptions) -> anyhow::Result
         if reachable(&endpoint).await {
             return Ok(OpenEndpoint {
                 endpoint,
-                chrome_process: None,
+                owner: BrowserOwner::None,
             });
         }
         warn!(
@@ -224,7 +354,7 @@ async fn open_managed_endpoint(options: &ChromeConnectOptions) -> anyhow::Result
     let (endpoint, chrome_process) = launch::launch_managed_chrome(&user_data_dir).await?;
     Ok(OpenEndpoint {
         endpoint,
-        chrome_process: Some(chrome_process),
+        owner: BrowserOwner::Local(chrome_process),
     })
 }
 
@@ -266,17 +396,28 @@ async fn on_connection_lost(cdp: Cdp, reason: String) {
     }
 }
 
-async fn transition_if_eligible(cdp: &Cdp, new: CdpState) -> bool {
+/// Move into `Connecting` for one attempt, returning whether the attempt may
+/// proceed. The first attempt starts from `Disconnected`; a retry may only
+/// continue from the `Connecting` state the previous attempt left behind. That
+/// asymmetry is what keeps an explicit `disconnect()` during the retry delay
+/// from being resurrected into a fresh connection (and, for a hosted profile,
+/// a fresh billed session).
+///
+/// `Connecting` can be trusted to be *our own* attempt because `run_connect`
+/// holds `Cdp::connect_lock` for the whole loop, so no second loop exists to
+/// have left it there.
+async fn begin_connect_attempt(cdp: &Cdp, attempt: u8, first: bool) -> bool {
     let state = cdp.state();
     let mut guard = state.lock().await;
-    let eligible = matches!(
-        *guard,
-        CdpState::Disconnected { .. } | CdpState::Connecting { .. }
-    );
+    let eligible = match *guard {
+        CdpState::Connecting { .. } => true,
+        CdpState::Disconnected { .. } => first,
+        CdpState::Connected { .. } => false,
+    };
     if !eligible {
         return false;
     }
-    *guard = new;
+    *guard = CdpState::Connecting { attempt };
     let payload: StatusPayload = (&*guard).into();
     cdp.emit(BrowserEvent::StatusChanged(payload));
     true

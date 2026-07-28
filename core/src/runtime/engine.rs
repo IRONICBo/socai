@@ -18,6 +18,10 @@ use tokio::time::{sleep, Instant};
 
 use super::BrowserStatus;
 
+/// How long a caller waits for a connect. Keep this above
+/// `cdp::lifecycle::CONNECT_BUDGET` so the connect task always settles first:
+/// the waiter cannot cancel it, and a task still running past this point could
+/// acquire a browser (or mint a hosted session) nobody is waiting for.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Shared in-process runtime handle for one entrypoint. Tauri, TUI, and the
@@ -171,6 +175,7 @@ impl Default for SocaiRuntime {
 fn browser_status_matches_options(status: &StatusPayload, options: &ChromeConnectOptions) -> bool {
     let StatusPayload::Connected {
         managed,
+        remote,
         user_data_dir,
         ..
     } = status
@@ -179,7 +184,7 @@ fn browser_status_matches_options(status: &StatusPayload, options: &ChromeConnec
     };
 
     match options.profile {
-        ChromeProfile::Existing => !managed,
+        ChromeProfile::Existing => !managed && !remote,
         ChromeProfile::Managed => {
             if !managed {
                 return false;
@@ -192,7 +197,13 @@ fn browser_status_matches_options(status: &StatusPayload, options: &ChromeConnec
                 None => true,
             }
         }
-        ChromeProfile::Auto => true,
+        // An explicit SOCAI_CDP_* override connected under `remote` reports
+        // `remote: false` (socai didn't mint it); that combination is a debug
+        // facility and this options-matching path currently has no callers.
+        ChromeProfile::Remote => *remote,
+        // Auto resolves to managed or existing — never a hosted browser — so
+        // a remote connection satisfies neither and must be torn down.
+        ChromeProfile::Auto => !remote,
     }
 }
 

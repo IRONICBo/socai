@@ -20,6 +20,9 @@ pub enum ChromeProfile {
     Managed,
     /// Try managed first, then fall back to existing-browser discovery.
     Auto,
+    /// Drive a remote hosted browser minted via socai-server (socai pro,
+    /// beta).
+    Remote,
 }
 
 impl ChromeProfile {
@@ -28,8 +31,9 @@ impl ChromeProfile {
             "existing" => Ok(Self::Existing),
             "managed" => Ok(Self::Managed),
             "auto" => Ok(Self::Auto),
+            "remote" => Ok(Self::Remote),
             other => Err(anyhow::anyhow!(
-                "invalid chrome profile {other:?}; expected existing, managed, or auto"
+                "invalid chrome profile {other:?}; expected existing, managed, auto, or remote"
             )),
         }
     }
@@ -39,6 +43,7 @@ impl ChromeProfile {
             Self::Existing => "existing",
             Self::Managed => "managed",
             Self::Auto => "auto",
+            Self::Remote => "remote",
         }
     }
 }
@@ -107,14 +112,47 @@ pub enum CdpState {
         browser_version: String,
         targets: HashMap<String, TargetInfo>,
         monitor_task: tokio::task::AbortHandle,
-        /// Managed chrome process socai launched, if any. Held here so it is
-        /// killed on drop — disconnect, reconnect, or daemon shutdown all
-        /// replace this state and tear the browser down, mirroring the old
-        /// chromiumoxide `Browser` drop semantics. `None` when we attached to an
-        /// already-running browser (the user's existing profile, or a managed
-        /// profile a prior socai entrypoint launched and we merely reused).
-        chrome_process: Option<ChromeProcess>,
+        /// Browser resource socai owns for this connection. Held here so it is
+        /// torn down on drop — disconnect, reconnect, or daemon shutdown all
+        /// replace this state and release the browser, mirroring the old
+        /// chromiumoxide `Browser` drop semantics.
+        owner: BrowserOwner,
     },
+}
+
+/// What socai owns behind the current connection, torn down when the
+/// `Connected` state is replaced. The variant payloads exist for their `Drop`
+/// side effects (kill the launched chrome / release the minted session).
+pub enum BrowserOwner {
+    /// Attached to a browser socai does not own (the user's existing profile,
+    /// a reused managed chrome, or an explicit endpoint) — nothing to release.
+    None,
+    /// Managed chrome process socai launched; killed on drop.
+    Local(ChromeProcess),
+    /// Remote hosted browser session socai minted via socai-server; a
+    /// best-effort release fires on drop, with the server-side session
+    /// timeout as the backstop.
+    Remote(RemoteSession),
+}
+
+pub struct RemoteSession {
+    pub session_id: String,
+}
+
+impl Drop for RemoteSession {
+    fn drop(&mut self) {
+        let session_id = std::mem::take(&mut self.session_id);
+        if session_id.is_empty() {
+            return;
+        }
+        // Outside a tokio runtime (process teardown) the release is skipped;
+        // the server-side session timeout reaps it instead.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = crate::cloud::release_browser_session(&session_id).await;
+            });
+        }
+    }
 }
 
 impl CdpState {
@@ -148,6 +186,9 @@ pub enum StatusPayload {
         page_count: usize,
         source: String,
         managed: bool,
+        /// True when socai minted this connection's browser remotely via
+        /// socai-server (chrome.profile `remote`).
+        remote: bool,
         user_data_dir: Option<String>,
     },
 }
@@ -163,13 +204,21 @@ impl From<&CdpState> for StatusPayload {
                 endpoint,
                 browser_version,
                 targets,
+                owner,
                 ..
             } => Self::Connected {
-                endpoint: endpoint.browser_ws_url.clone(),
+                // This payload crosses the Tauri IPC boundary on every status
+                // change, so a credential-bearing endpoint is redacted at the
+                // source rather than merely hidden by the UI. `display_ws_url`
+                // covers both minted sessions and credential-shaped overrides.
+                endpoint: endpoint.display_ws_url(),
                 browser_version: browser_version.clone(),
                 page_count: targets.values().filter(|t| t.r#type == "page").count(),
                 source: endpoint.source.clone(),
                 managed: endpoint.managed,
+                // Ownership, not URL shape: `remote` drives teardown/release
+                // and profile matching, so it means "socai minted this".
+                remote: matches!(owner, BrowserOwner::Remote(_)),
                 user_data_dir: endpoint.user_data_dir.clone(),
             },
         }
@@ -190,6 +239,11 @@ pub struct Cdp {
     state: Arc<Mutex<CdpState>>,
     events: broadcast::Sender<BrowserEvent>,
     owned_targets: Arc<Mutex<HashSet<String>>>,
+    /// Held for the lifetime of a connect loop so only one runs at a time.
+    /// Reading the state cannot provide that on its own: two callers can both
+    /// observe `Disconnected` before either transitions, and each would then
+    /// acquire its own browser — for a hosted profile, its own billed session.
+    connect_lock: Arc<Mutex<()>>,
 }
 
 impl Cdp {
@@ -199,6 +253,7 @@ impl Cdp {
             state: Arc::new(Mutex::new(CdpState::initial())),
             events,
             owned_targets: Arc::new(Mutex::new(HashSet::new())),
+            connect_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -220,6 +275,24 @@ impl Cdp {
     pub(crate) async fn browser_client(&self) -> Option<RawCdpClient> {
         match &*self.state.lock().await {
             CdpState::Connected { browser_client, .. } => Some(browser_client.clone()),
+            _ => None,
+        }
+    }
+
+    /// The browser websocket plus whether it belongs to a remote hosted
+    /// browser, read under one lock. Page creation must learn both together:
+    /// deriving remote-ness in a second lookup could observe a different
+    /// connection if a disconnect/reconnect lands in between.
+    pub(crate) async fn browser_client_with_mode(&self) -> Option<(RawCdpClient, bool)> {
+        match &*self.state.lock().await {
+            CdpState::Connected {
+                browser_client,
+                owner,
+                ..
+            } => Some((
+                browser_client.clone(),
+                matches!(owner, BrowserOwner::Remote(_)),
+            )),
             _ => None,
         }
     }
@@ -261,6 +334,10 @@ impl Cdp {
 
     pub(crate) fn state(&self) -> Arc<Mutex<CdpState>> {
         Arc::clone(&self.state)
+    }
+
+    pub(crate) fn connect_lock(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.connect_lock)
     }
 
     pub(crate) fn emit(&self, event: BrowserEvent) {
