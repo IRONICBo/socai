@@ -28,6 +28,21 @@ const CONNECT_BUDGET: Duration = Duration::from_secs(85);
 const INVENTORY_TIMEOUT: Duration = Duration::from_secs(20);
 const TARGET_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const TARGET_POLL_FAILURES: u8 = 3;
+/// Ceiling for the awaited remote-session release inside `disconnect()`. It
+/// bounds how long an app quit or `socai stop` can hang on a slow server;
+/// past it the server-side session timeout is the backstop.
+const RELEASE_AWAIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Ceiling for `disconnect()` waiting on an in-flight connect attempt to
+/// observe the cancellation and release whatever it minted. Sized to cover
+/// the common case (attempt at or near its post-inventory checkpoint, plus
+/// one release round trip) without letting a quit hang on a stalled
+/// handshake.
+const CONNECT_SETTLE_TIMEOUT: Duration = Duration::from_secs(8);
+/// Ceiling for the whole close-owned-tabs phase of `disconnect()`. Tab
+/// closes on a healthy browser take milliseconds; this only bites when the
+/// browser is wedged, where waiting out per-command timeouts would push the
+/// session release past the shutdown budget.
+const TARGET_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct ConnectInventory {
     targets: HashMap<String, TargetInfo>,
@@ -76,22 +91,81 @@ impl Cdp {
     }
 
     pub async fn disconnect(&self) {
-        // Close socai-owned page targets before dropping endpoint state. All
-        // target lifecycle is routed through the browser websocket so existing
-        // and managed Chrome share the same cleanup path.
-        let browser_client = self.browser_client().await;
-        for target_id in self.take_owned_targets().await {
-            if let Some(client) = browser_client.as_ref() {
-                let _ = close_target_via_browser_ws(client, &target_id).await;
+        // One teardown at a time, held across the release: a second
+        // disconnect (the idle reaper racing an app quit, say) must not
+        // return before the first caller's release has landed, or process
+        // exit aborts it. "disconnect returned" means "teardown finished".
+        let teardown_lock = self.teardown_lock();
+        let _teardown = teardown_lock.lock().await;
+        // Close socai-owned page targets before dropping endpoint state —
+        // but only for browsers that outlive this disconnect (existing and
+        // managed attach). A remote session's whole browser dies with the
+        // release, so tab cleanup there is dead work standing between
+        // shutdown and the release call. The phase is bounded as a whole:
+        // each close can stall up to `raw_client::COMMAND_TIMEOUT` against a
+        // wedged browser, and this path sits inside shutdown budgets (app
+        // quit, the daemon's SIGTERM kill grace).
+        let owned_targets = self.take_owned_targets().await;
+        if let Some((client, remote)) = self.browser_client_with_mode().await {
+            if !remote {
+                let _ = tokio::time::timeout(TARGET_CLOSE_TIMEOUT, async {
+                    for target_id in &owned_targets {
+                        let _ = close_target_via_browser_ws(&client, target_id).await;
+                    }
+                })
+                .await;
             }
         }
-        transition_unconditional(
+        let owner = transition_unconditional(
             self,
             CdpState::Disconnected {
                 reason: "user_disconnected".into(),
             },
         )
         .await;
+        release_owner_now(owner).await;
+        // A connect attempt may be mid-flight holding a freshly minted remote
+        // session that is not yet in the state swapped above. The attempt
+        // observes the swap at its next checkpoint and releases what it
+        // acquired (awaited, see `try_connect_once`); waiting on the connect
+        // lock keeps quit-path callers alive long enough for that release to
+        // land. Bounded: deep in a stalled handshake the next checkpoint can
+        // be ~INVENTORY_TIMEOUT away, and a quit must not hang that long —
+        // the server-side session timeout backstops that residual window.
+        let _ = tokio::time::timeout(CONNECT_SETTLE_TIMEOUT, self.connect_lock().lock()).await;
+    }
+}
+
+/// Tear down the browser resource behind a connection, awaiting a remote
+/// session's release instead of leaving it to the fire-and-forget `Drop`.
+/// `disconnect()` callers (daemon shutdown, app quit, idle release) are
+/// exactly the moments the process may be about to exit — a spawned release
+/// would be aborted mid-flight and the session would linger until its
+/// server-side timeout, surfacing as a TIMED_OUT session on the bill.
+async fn release_owner_now(owner: BrowserOwner) {
+    let BrowserOwner::Remote(mut session) = owner else {
+        // `Local` drops here, killing the managed chrome as before.
+        return;
+    };
+    let Some(session_id) = session.take_session_id() else {
+        return;
+    };
+    match tokio::time::timeout(
+        RELEASE_AWAIT_TIMEOUT,
+        crate::cloud::release_browser_session(&session_id),
+    )
+    .await
+    {
+        Ok(Ok(())) => debug!(session_id, "remote browser session released"),
+        Ok(Err(err)) => warn!(
+            session_id,
+            error = %err,
+            "remote browser session release failed; server-side timeout will reap it"
+        ),
+        Err(_) => warn!(
+            session_id,
+            "remote browser session release timed out; server-side timeout will reap it"
+        ),
     }
 }
 
@@ -199,10 +273,16 @@ async fn try_connect_once(
         let mut guard = state.lock().await;
         if !guard.is_connecting() {
             monitor_task.abort();
-            // Dropping `owner` here kills a just-launched managed chrome (or
-            // releases a just-minted remote session) if the connect was
-            // cancelled mid-flight. Reported as an outcome, not an error, so
-            // the caller stops instead of retrying over the new state.
+            drop(guard);
+            // The connect was cancelled mid-flight by an explicit
+            // disconnect — often the app-quit path, where a Drop-spawned
+            // release would die with the process. Release what this attempt
+            // acquired awaited (state lock dropped first: the release is an
+            // HTTP round trip and must not stall status readers); the
+            // disconnect() caller waits on the connect lock for exactly this
+            // to finish. Reported as an outcome, not an error, so the caller
+            // stops instead of retrying over the new state.
+            release_owner_now(owner).await;
             return Ok(ConnectAttempt::Cancelled);
         }
         *guard = CdpState::Connected {
@@ -280,6 +360,10 @@ async fn open_remote_endpoint() -> anyhow::Result<OpenEndpoint> {
              or switch back with `socai config set chrome.profile existing`."
         );
     }
+    // Clock the deadline from before the mint request: the server starts the
+    // session's timeout when Browserbase creates it, so measuring from after
+    // the response would overstate the remaining budget by the round trip.
+    let minted_at = std::time::Instant::now();
     let session = crate::cloud::create_browser_session().await?;
     Ok(OpenEndpoint {
         endpoint: Endpoint {
@@ -292,6 +376,7 @@ async fn open_remote_endpoint() -> anyhow::Result<OpenEndpoint> {
         },
         owner: BrowserOwner::Remote(RemoteSession {
             session_id: session.session_id,
+            deadline: minted_at + Duration::from_secs(session.timeout_seconds),
         }),
     })
 }
@@ -385,15 +470,35 @@ async fn connect_inventory(endpoint: &Endpoint) -> anyhow::Result<ConnectInvento
 }
 
 async fn on_connection_lost(cdp: Cdp, reason: String) {
+    // Same lock order as `disconnect()`: teardown lock before state lock. A
+    // shutdown racing this loss then either extracts the owner itself or
+    // blocks in disconnect() until this release has landed — without the
+    // lock it could observe an ownerless state, return early, and let
+    // process exit abort the release this task started.
+    let teardown_lock = cdp.teardown_lock();
+    let _teardown = teardown_lock.lock().await;
     let _ = cdp.take_owned_targets().await;
     let state = cdp.state();
     let mut guard = state.lock().await;
-    if matches!(*guard, CdpState::Connected { .. }) {
-        *guard = CdpState::Disconnected { reason };
-        let payload: StatusPayload = (&*guard).into();
-        cdp.emit(BrowserEvent::StatusChanged(payload));
-        cdp.emit(BrowserEvent::TargetsChanged(Vec::new()));
+    if !matches!(*guard, CdpState::Connected { .. }) {
+        return;
     }
+    let owner = match &mut *guard {
+        CdpState::Connected { owner, .. } => std::mem::replace(owner, BrowserOwner::None),
+        _ => BrowserOwner::None,
+    };
+    *guard = CdpState::Disconnected { reason };
+    let payload: StatusPayload = (&*guard).into();
+    cdp.emit(BrowserEvent::StatusChanged(payload));
+    cdp.emit(BrowserEvent::TargetsChanged(Vec::new()));
+    drop(guard);
+    // Release awaited here too (state lock dropped first). The session behind
+    // a lost connection is usually already dead — the remote timeout is the
+    // common cause — but the explicit release records the end time on the
+    // server for accounting, and closes the hole where a loss lands moments
+    // before process exit and a Drop-spawned release would die with it. This
+    // runs in the target-poll task, so it is off every shutdown path.
+    release_owner_now(owner).await;
 }
 
 /// Move into `Connecting` for one attempt, returning whether the attempt may
@@ -423,18 +528,27 @@ async fn begin_connect_attempt(cdp: &Cdp, attempt: u8, first: bool) -> bool {
     true
 }
 
-async fn transition_unconditional(cdp: &Cdp, new: CdpState) {
+/// Swap the connection state and hand back whatever browser resource the old
+/// state owned. Most callers just drop the returned owner (its `Drop` is the
+/// teardown); `disconnect()` instead releases a remote session explicitly so
+/// it can await the HTTP call.
+async fn transition_unconditional(cdp: &Cdp, new: CdpState) -> BrowserOwner {
     let state = cdp.state();
     let mut guard = state.lock().await;
     let clear_targets = matches!(*guard, CdpState::Connected { .. })
         && matches!(new, CdpState::Disconnected { .. });
     abort_monitor_if_connected(&guard);
+    let owner = match &mut *guard {
+        CdpState::Connected { owner, .. } => std::mem::replace(owner, BrowserOwner::None),
+        _ => BrowserOwner::None,
+    };
     *guard = new;
     let payload: StatusPayload = (&*guard).into();
     cdp.emit(BrowserEvent::StatusChanged(payload));
     if clear_targets {
         cdp.emit(BrowserEvent::TargetsChanged(Vec::new()));
     }
+    owner
 }
 
 fn abort_monitor_if_connected(state: &CdpState) {

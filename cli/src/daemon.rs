@@ -224,6 +224,12 @@ pub async fn run_daemon() -> Result<()> {
     fs::write(&paths.pid, std::process::id().to_string()).await?;
 
     let runtime = SocaiRuntime::new();
+    // Kept outside the DaemonState mutex for the shutdown path below: a site
+    // command holds that mutex for its whole execution (minutes for e.g.
+    // wait-for-login), and shutdown must not queue behind it — the SIGTERM
+    // kill grace is 6 seconds. The handle is a cheap Arc-backed clone of the
+    // same runtime.
+    let runtime_for_shutdown = runtime.clone();
     let telemetry = Telemetry::new(&paths.home, TelemetrySource::CliDaemon);
     let state = Arc::new(Mutex::new(DaemonState {
         runtime,
@@ -233,6 +239,8 @@ pub async fn run_daemon() -> Result<()> {
     }));
     let stop = Arc::new(Notify::new());
     let mut idle_check = tokio::time::interval(Duration::from_secs(60));
+    let terminate = terminate_signal();
+    tokio::pin!(terminate);
 
     loop {
         tokio::select! {
@@ -251,6 +259,7 @@ pub async fn run_daemon() -> Result<()> {
                     break;
                 }
             }
+            _ = &mut terminate => break,
             _ = stop.notified() => break,
         }
     }
@@ -260,8 +269,39 @@ pub async fn run_daemon() -> Result<()> {
     // after shutdown would yank the new daemon's endpoint from under it.
     cleanup_stale_ipc(&paths).await?;
     let _ = fs::remove_file(&paths.pid).await;
-    state.lock().await.shutdown().await?;
+    // Tear down directly on the runtime handle, not through the DaemonState
+    // mutex — an in-flight command may hold that mutex for minutes. Stopping
+    // means stopping: the browser is yanked from under any such command (it
+    // fails, the daemon exits), and the bounded remote-session release runs
+    // right away instead of after the command finishes. disconnect() itself
+    // sweeps socai-owned tabs (bounded, and skipped for remote sessions
+    // whose browser dies with the release) — an extra page-close pass here
+    // could stall ~30s per command against a wedged browser and eat the
+    // SIGTERM kill grace before the release starts.
+    runtime_for_shutdown.disconnect_browser().await;
     Ok(())
+}
+
+/// Resolves when the daemon receives SIGTERM; pends forever on non-unix.
+/// `kill_stale_daemons` (and a plain `kill`) send SIGTERM expecting a graceful
+/// exit — without a handler the process dies before `shutdown()`, which for a
+/// remote browser session means no release and a session that runs out its
+/// full server-side timeout.
+async fn terminate_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::future::pending::<()>().await
+    }
 }
 
 pub async fn send_or_spawn(
@@ -465,6 +505,9 @@ impl DaemonState {
         progress: Option<ToolProgressSender>,
     ) -> Result<Value> {
         let started = Instant::now();
+        // Marks browser work in flight for the whole command, so the remote
+        // idle reaper never releases the session under a running tool.
+        let _activity = self.runtime.begin_activity().await;
         let result = async {
             let debug_snapshot = debug_snapshot_flag(&args);
             // Create the session tab blank and let the command navigate itself:
@@ -530,11 +573,6 @@ impl DaemonState {
             .capture("socai_tool_call", Value::Object(props));
     }
 
-    async fn shutdown(&mut self) -> Result<()> {
-        let _ = self.runtime.close_all_site_sessions().await;
-        self.runtime.disconnect_browser().await;
-        Ok(())
-    }
 }
 
 fn base_trace_props(
@@ -896,12 +934,41 @@ pub async fn kill_lingering_helpers() -> usize {
     for pid in &pids {
         signal_pid(*pid, false);
     }
-    // Give them a moment to exit on SIGTERM, then SIGKILL any holdouts.
-    sleep(Duration::from_millis(400)).await;
+    // Wait for graceful exits before escalating. SIGTERM now routes daemons
+    // through shutdown(), which awaits the remote-session release (bounded at
+    // ~5s in the core) — so the grace window must outlast that bound, or the
+    // SIGKILL would land mid-release and the session would run out its full
+    // server-side timeout. Healthy daemons exit in well under a second, so
+    // the poll usually ends on its first iterations.
+    const KILL_GRACE: Duration = Duration::from_secs(6);
+    const KILL_POLL: Duration = Duration::from_millis(200);
+    let deadline = Instant::now() + KILL_GRACE;
+    while Instant::now() < deadline {
+        if pids.iter().all(|pid| !pid_alive(*pid)) {
+            return pids.len();
+        }
+        sleep(KILL_POLL).await;
+    }
     for pid in &pids {
-        signal_pid(*pid, true);
+        if pid_alive(*pid) {
+            signal_pid(*pid, true);
+        }
     }
     pids.len()
+}
+
+/// Whether a process still exists, probed with the null signal.
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    // Safe FFI: kill() with signal 0 checks existence without delivering
+    // anything. EPERM would also mean "exists", but socai daemons run as the
+    // caller's own user, so a plain success check suffices.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn pid_alive(_pid: u32) -> bool {
+    false
 }
 
 /// PIDs of running `socai __daemon` processes (excluding the caller).

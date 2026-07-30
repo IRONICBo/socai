@@ -129,18 +129,37 @@ pub enum BrowserOwner {
     None,
     /// Managed chrome process socai launched; killed on drop.
     Local(ChromeProcess),
-    /// Remote hosted browser session socai minted via socai-server; a
-    /// best-effort release fires on drop, with the server-side session
-    /// timeout as the backstop.
+    /// Remote hosted browser session socai minted via socai-server. Released
+    /// awaited on the disconnect/cancel paths (see `release_owner_now`);
+    /// `Drop` spawns a best-effort release for the remaining state swaps,
+    /// with the server-side session timeout as the final backstop.
     Remote(RemoteSession),
 }
 
 pub struct RemoteSession {
     pub session_id: String,
+    /// Hard end-of-life for this session: the server mints it with a fixed
+    /// timeout and Browserbase kills it at that instant no matter what the
+    /// client is doing. The runtime uses this to re-mint before starting new
+    /// work on a session that is nearly out of budget.
+    pub deadline: std::time::Instant,
+}
+
+impl RemoteSession {
+    /// Hand the session id to a caller that will release it explicitly,
+    /// leaving `Drop` a no-op. `None` if the id was already taken.
+    pub(crate) fn take_session_id(&mut self) -> Option<String> {
+        let session_id = std::mem::take(&mut self.session_id);
+        (!session_id.is_empty()).then_some(session_id)
+    }
 }
 
 impl Drop for RemoteSession {
     fn drop(&mut self) {
+        // Backstop only: `Cdp::disconnect` takes the id and awaits the release
+        // itself. This path covers remaining state swaps (connection loss,
+        // cancelled connects), where the process is staying alive and the
+        // spawned task can finish.
         let session_id = std::mem::take(&mut self.session_id);
         if session_id.is_empty() {
             return;
@@ -244,6 +263,11 @@ pub struct Cdp {
     /// observe `Disconnected` before either transitions, and each would then
     /// acquire its own browser — for a hosted profile, its own billed session.
     connect_lock: Arc<Mutex<()>>,
+    /// Serializes `disconnect()` end to end. Without it, a second disconnect
+    /// (the idle reaper racing an app quit, say) finds no owner in the state,
+    /// returns immediately, and lets process exit abort the first caller's
+    /// still-in-flight session release.
+    teardown_lock: Arc<Mutex<()>>,
 }
 
 impl Cdp {
@@ -254,6 +278,7 @@ impl Cdp {
             events,
             owned_targets: Arc::new(Mutex::new(HashSet::new())),
             connect_lock: Arc::new(Mutex::new(())),
+            teardown_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -293,6 +318,18 @@ impl Cdp {
                 browser_client.clone(),
                 matches!(owner, BrowserOwner::Remote(_)),
             )),
+            _ => None,
+        }
+    }
+
+    /// End-of-life instant of the current remote hosted session; `None` when
+    /// not connected or the browser is not a socai-minted remote session.
+    pub(crate) async fn remote_session_deadline(&self) -> Option<std::time::Instant> {
+        match &*self.state.lock().await {
+            CdpState::Connected {
+                owner: BrowserOwner::Remote(session),
+                ..
+            } => Some(session.deadline),
             _ => None,
         }
     }
@@ -338,6 +375,10 @@ impl Cdp {
 
     pub(crate) fn connect_lock(&self) -> Arc<Mutex<()>> {
         Arc::clone(&self.connect_lock)
+    }
+
+    pub(crate) fn teardown_lock(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.teardown_lock)
     }
 
     pub(crate) fn emit(&self, event: BrowserEvent) {
