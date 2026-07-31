@@ -37,6 +37,9 @@ use crate::sites::xhs::media_manifest::{
     ensure_entity_note_id, fill_entity_from_card, search_media_manifest, write_media_manifest_file,
 };
 use crate::sites::xhs::page::{LoginGate, XHS_SEARCH_FILTERS};
+use crate::sites::xhs::page_diagnostics::{
+    copy as copy_page_diagnostic, promote as promote_page_diagnostic,
+};
 use crate::sites::xhs::{
     ReadNoteOptions, XhsAuthorProfile, XhsHistoryStore, XhsNoteCard, XhsPageRuntime, XHS_HOME_URL,
 };
@@ -123,6 +126,7 @@ pub fn xhs_tools_with_llm_provider(
             pro,
         }),
         Arc::new(WaitForLoginTool { page: page.clone() }),
+        Arc::new(WaitForRateLimitTool),
         Arc::new(PageStateTool { page }),
     ]
 }
@@ -161,6 +165,7 @@ pub fn xhs_macro_tools_with_llm_provider(
             pro,
         }),
         Arc::new(WaitForLoginTool { page }),
+        Arc::new(WaitForRateLimitTool),
     ]
 }
 
@@ -1142,6 +1147,16 @@ impl ScanProgress {
 /// difference between those macros is where the cards come from, not how each
 /// note is read. Returns the per-note entry; the caller pushes it and closes
 /// the modal.
+fn recovery_blocker(value: &Value) -> Option<&'static str> {
+    ["reason", "error"]
+        .iter()
+        .find_map(|key| match value.get(*key).and_then(Value::as_str) {
+            Some("rate_limited") => Some("rate_limited"),
+            Some("login_required") => Some("login_required"),
+            _ => None,
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn scan_card_note(
     xhs: &XhsPageRuntime<'_>,
@@ -1271,16 +1286,31 @@ async fn scan_card_note(
                         map.insert("open".into(), open.clone());
                     }
                 }
+                copy_page_diagnostic(&mut entry, &payload);
             }
             entry
         }
-        Err(e) => json!({
-            "source_position": card.position,
-            "ok": false,
-            "entity": card,
-            "error": format!("{e:#}"),
-        }),
+        Err(e) => {
+            let mut entry = json!({
+                "source_position": card.position,
+                "ok": false,
+                "entity": card,
+                "error": format!("{e:#}"),
+            });
+            xhs.attach_page_failure_diagnostic(&mut entry).await;
+            entry
+        }
     };
+
+    // A rate-limit/login page is a session-level blocker, not a missing note.
+    // Avoid loading comments or touching history; the outer scan loop will stop
+    // after preserving this entry for the agent and telemetry.
+    if recovery_blocker(&entry).is_some() {
+        if let Some(map) = entry.as_object_mut() {
+            map.insert("scan_perf".into(), Value::Object(scan_perf));
+        }
+        return entry;
+    }
 
     // Pull comments separately after the body read: the list hydrates slower
     // than the body, and reaching `comment_count` may require scrolling the
@@ -2885,13 +2915,15 @@ async fn scan_direct_note(
     let open = match open {
         Ok(value) => value,
         Err(err) => {
-            return json!({
+            let mut result = json!({
                 "source_position": position,
                 "ok": false,
                 "entity": { "note_id": target.note_id },
                 "error": format!("{err:#}"),
                 "scan_perf": perf,
             });
+            xhs.attach_page_failure_diagnostic(&mut result).await;
+            return result;
         }
     };
     if !open.get("ok").and_then(Value::as_bool).unwrap_or(false) {
@@ -2934,7 +2966,7 @@ async fn scan_direct_note(
     let mut entity = match extracted {
         Ok(note) => serde_json::to_value(note).unwrap_or(Value::Null),
         Err(err) => {
-            return json!({
+            let mut result = json!({
                 "source_position": position,
                 "ok": false,
                 "entity": { "note_id": target.note_id, "url": open.get("url").cloned().unwrap_or(Value::Null) },
@@ -2942,6 +2974,8 @@ async fn scan_direct_note(
                 "open": open,
                 "scan_perf": perf,
             });
+            xhs.attach_page_failure_diagnostic(&mut result).await;
+            return result;
         }
     };
 
@@ -2950,7 +2984,7 @@ async fn scan_direct_note(
         .and_then(Value::as_str)
         .unwrap_or_default();
     if actual_id != target.note_id {
-        return json!({
+        let mut result = json!({
             "source_position": position,
             "ok": false,
             "entity": entity,
@@ -2958,6 +2992,8 @@ async fn scan_direct_note(
             "open": open,
             "scan_perf": perf,
         });
+        xhs.attach_page_failure_diagnostic(&mut result).await;
+        return result;
     }
     let has_detail = ["title", "author", "content"].iter().any(|key| {
         entity
@@ -2970,7 +3006,7 @@ async fn scan_direct_note(
         .is_some_and(|count| count > 0)
         || entity.get("type").and_then(Value::as_str) == Some("video");
     if !has_detail {
-        return json!({
+        let mut result = json!({
             "source_position": position,
             "ok": false,
             "entity": entity,
@@ -2978,6 +3014,8 @@ async fn scan_direct_note(
             "open": open,
             "scan_perf": perf,
         });
+        xhs.attach_page_failure_diagnostic(&mut result).await;
+        return result;
     }
 
     if comment_count > 0 {
@@ -3111,7 +3149,20 @@ impl Tool for GetNotesTool {
     async fn call(&self, mut input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let pro_skipped = !self.pro && strip_pro_input(&mut input);
         let targets = direct_note_refs(&input)?;
-        let login = XhsPageRuntime::new(&self.page).login_gate(true).await?;
+        let gate = XhsPageRuntime::new(&self.page);
+        let login = match gate.login_gate(true).await {
+            Ok(login) => login,
+            Err(err) => {
+                let mut payload = json!({
+                    "ok": false,
+                    "notes": [],
+                    "reason": "page_access_failed",
+                    "error": format!("{err:#}"),
+                });
+                gate.attach_page_failure_diagnostic(&mut payload).await;
+                return Ok(json_result(&payload));
+            }
+        };
         if login == LoginGate::Required {
             let mut payload = json!({
                 "ok": false,
@@ -3175,10 +3226,7 @@ impl Tool for GetNotesTool {
                 ocr,
             )
             .await;
-            let login_lost = entry
-                .get("error")
-                .and_then(Value::as_str)
-                .is_some_and(|reason| reason == "login_required");
+            let blocker = recovery_blocker(&entry);
             notes.push(entry);
             let idx = notes.len() - 1;
             if ocr {
@@ -3212,8 +3260,8 @@ impl Tool for GetNotesTool {
                 0,
                 total_ms,
             ));
-            if login_lost {
-                stop_reason = "login_required".to_string();
+            if let Some(blocker) = blocker {
+                stop_reason = blocker.to_string();
                 break;
             }
         }
@@ -3278,8 +3326,9 @@ impl Tool for GetNotesTool {
         if !stop_reason.is_empty() {
             payload["reason"] = json!(stop_reason);
         }
-        // Mid-scan login loss surfaces as a top-level `reason` too; mark it
-        // for remote browsers the same way the pre-flight gate is marked.
+        promote_page_diagnostic(&mut payload);
+        // Mid-scan blockers surface as a top-level `reason` too; mark login
+        // loss for remote browsers the same way the pre-flight gate is marked.
         annotate_remote_login_gate(&self.page, &mut payload);
         if let Some((count, path, error)) = media_manifest_metadata {
             payload["media_manifest_count"] = json!(count);
@@ -3654,6 +3703,55 @@ impl Tool for WaitForLoginTool {
     }
 }
 
+/// wait_for_rate_limit — visible cooldown after OCR recognizes XHS's frequent
+/// access page. The duration is intentionally chosen inside the tool so agent
+/// retries cannot accidentally settle into a fixed interval.
+pub struct WaitForRateLimitTool;
+
+const RATE_LIMIT_WAIT_MIN_SECS: u64 = 300;
+const RATE_LIMIT_WAIT_MAX_SECS: u64 = 360;
+
+fn random_rate_limit_wait_seconds() -> u64 {
+    let uuid = uuid::Uuid::new_v4();
+    let mut seed = [0_u8; 8];
+    seed.copy_from_slice(&uuid.as_bytes()[..8]);
+    let span = RATE_LIMIT_WAIT_MAX_SECS - RATE_LIMIT_WAIT_MIN_SECS + 1;
+    RATE_LIMIT_WAIT_MIN_SECS + u64::from_le_bytes(seed) % span
+}
+
+#[async_trait]
+impl Tool for WaitForRateLimitTool {
+    fn name(&self) -> &str {
+        "wait_for_rate_limit"
+    }
+
+    fn description(&self) -> &str {
+        "Recover from Xiaohongshu rate limiting: after a tool returns \
+         `reason:rate_limited`, call this instead of immediately retrying. It \
+         visibly waits for a random 5-6 minute cooldown, then tells you to \
+         retry the original tool once. If that retry is still rate-limited, \
+         call this tool again."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+        })
+    }
+
+    async fn call(&self, _input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let waited_seconds = random_rate_limit_wait_seconds();
+        tokio::time::sleep(std::time::Duration::from_secs(waited_seconds)).await;
+        Ok(json_result(&json!({
+            "rate_limit_wait_complete": true,
+            "waited_seconds": waited_seconds,
+            "message": "Cooldown finished. Re-run the original tool once. If it still returns reason:rate_limited, call wait_for_rate_limit again before another retry.",
+        })))
+    }
+}
+
 /// extract_search_cards() -> [card] — read-only; just returns the cards
 /// currently visible in the search results without re-running the search.
 pub struct ExtractSearchCardsTool {
@@ -3850,8 +3948,23 @@ impl Tool for ExtractProfileTool {
         let max_notes = get_i64(&input, "max_notes", 20);
         let scroll_rounds = get_i64(&input, "scroll_rounds", 6);
         let xhs = XhsPageRuntime::new(&self.page);
-        let profile = xhs.extract_profile(max_notes, scroll_rounds).await?;
-        Ok(json_result(&profile.to_value()))
+        match xhs.extract_profile(max_notes, scroll_rounds).await {
+            Ok(profile) => Ok(json_result(&profile.to_value())),
+            Err(err) => {
+                let rendered = format!("{err:#}");
+                let mut result = json!({
+                    "ok": false,
+                    "reason": if rendered.contains("not a profile page") {
+                        "not_profile_page"
+                    } else {
+                        "extract_profile_failed"
+                    },
+                    "error": rendered,
+                });
+                xhs.attach_page_failure_diagnostic(&mut result).await;
+                Ok(json_result(&result))
+            }
+        }
     }
 }
 
@@ -4025,9 +4138,24 @@ impl Tool for SearchTool {
                 tokio::task::spawn_blocking(ocr_warm_up);
             }
             let xhs = XhsPageRuntime::new(&self.page);
-            let mut value = xhs
+            let mut value = match xhs
                 .search_notes(&query, filters.as_ref(), SEARCH_WAIT_SECONDS, num_notes)
-                .await?;
+                .await
+            {
+                Ok(value) => value,
+                Err(err) => {
+                    let mut result = json!({
+                        "ok": false,
+                        "query": query.clone(),
+                        "reason": "search_failed",
+                        "error": format!("{err:#}"),
+                        "cards": [],
+                    });
+                    xhs.attach_page_failure_diagnostic(&mut result).await;
+                    result
+                }
+            };
+            promote_page_diagnostic(&mut value);
             if let Some(cards) = value.get_mut("cards") {
                 self.history.annotate_cards(cards);
             }
@@ -4164,9 +4292,21 @@ impl Tool for SearchTool {
 
         // Filters are applied after the initial search below, so don't pass
         // them here.
-        let search = xhs
+        let search = match xhs
             .search_notes(&query, None, SEARCH_WAIT_SECONDS, None)
-            .await?;
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                let mut result = json!({
+                    "ok": false,
+                    "reason": "search_failed",
+                    "error": format!("{err:#}"),
+                });
+                xhs.attach_page_failure_diagnostic(&mut result).await;
+                result
+            }
+        };
 
         // If the search never landed on a results page (search box not found,
         // login required, …) bail before the browse loop. Otherwise
@@ -4195,6 +4335,7 @@ impl Tool for SearchTool {
                     "ocr": ocr,
                 },
             });
+            promote_page_diagnostic(&mut payload);
             // `reason` already summarizes the failure; keep the failed scan
             // compact too.
             lean_scan_payload(&mut payload);
@@ -4237,6 +4378,7 @@ impl Tool for SearchTool {
         // Wall-clock markers so the perf file can show how much OCR overlapped
         // the browse loop (the pipeline benefit) vs. spilled past it.
         let browse_t0 = std::time::Instant::now();
+        let mut stop_reason = String::new();
 
         while notes.len() < want {
             let cards = xhs.extract_search_cards().await?;
@@ -4289,6 +4431,7 @@ impl Tool for SearchTool {
                 ocr,
             )
             .await;
+            let blocker = recovery_blocker(&entry);
             notes.push(entry);
             let idx = notes.len() - 1;
             if ocr {
@@ -4325,6 +4468,10 @@ impl Tool for SearchTool {
                 close_ms,
                 total_ms,
             ));
+            if let Some(blocker) = blocker {
+                stop_reason = blocker.to_string();
+                break;
+            }
         }
 
         scan_progress.finish_reading(notes.len());
@@ -4395,7 +4542,8 @@ impl Tool for SearchTool {
         };
 
         let mut payload = json!({
-            "ok": search.get("ok").and_then(Value::as_bool).unwrap_or(false),
+            "ok": search.get("ok").and_then(Value::as_bool).unwrap_or(false)
+                && stop_reason.is_empty(),
             "query": query,
             "search": search,
             "notes": notes,
@@ -4412,6 +4560,10 @@ impl Tool for SearchTool {
                 "media": media_timing,
             }
         });
+        if !stop_reason.is_empty() {
+            payload["reason"] = json!(stop_reason);
+        }
+        promote_page_diagnostic(&mut payload);
         // Even the artifact keeps only the compact filter summary (changed +
         // active values); the raw panel readback with click coordinates is
         // never persisted.
@@ -4629,6 +4781,7 @@ impl Tool for AuthorScanTool {
                 "notes": [],
                 "reason": reason,
             });
+            copy_page_diagnostic(&mut payload, &open);
             annotate_remote_login_gate(&self.page, &mut payload);
             return Ok(json_result(&payload));
         }
@@ -4672,6 +4825,7 @@ impl Tool for AuthorScanTool {
         // By default open each collected note and read body + top comments;
         // `preview` returns the cards only and skips this.
         let mut notes: Vec<Value> = Vec::new();
+        let mut stop_reason = String::new();
         if !preview {
             // OCR and cloud ASR run in the background so they overlap the next
             // note's read + download; tasks are joined after the loop.
@@ -4710,6 +4864,7 @@ impl Tool for AuthorScanTool {
                     ocr,
                 )
                 .await;
+                let blocker = recovery_blocker(&entry);
                 notes.push(entry);
                 let idx = notes.len() - 1;
                 if ocr {
@@ -4747,6 +4902,10 @@ impl Tool for AuthorScanTool {
                     close_ms,
                     total_ms,
                 ));
+                if let Some(blocker) = blocker {
+                    stop_reason = blocker.to_string();
+                    break;
+                }
             }
             scan_progress.finish_reading(notes.len());
             let browse_ms = browse_t0.elapsed().as_millis() as u64;
@@ -4831,7 +4990,7 @@ impl Tool for AuthorScanTool {
         };
 
         let mut payload = json!({
-            "ok": true,
+            "ok": stop_reason.is_empty(),
             "author_id": author_id,
             "profile": profile_value,
             "notes": notes,
@@ -4846,6 +5005,10 @@ impl Tool for AuthorScanTool {
             },
             "timing": { "media": media_timing },
         });
+        if !stop_reason.is_empty() {
+            payload["reason"] = json!(stop_reason);
+        }
+        promote_page_diagnostic(&mut payload);
 
         // Scan perf is written to `stats/scan.json` (see above), not the artifact.
 

@@ -39,7 +39,14 @@ blank/404/app-only detail pages, or copy such as "帖子不见了" / "内容无�
 "page unavailable", do not loop the same macro with identical inputs. Treat it
 as a platform/session/rate-limit blocker: use whatever evidence was collected,
 try at most one narrower or slower query/profile path if it materially changes
-the route, and otherwise explain the blocker to the user.
+the route, and otherwise explain the blocker to the user. For
+`reason:"rate_limited"`, follow the protocol below.
+
+## Rate-Limit Recovery
+
+On `reason:"rate_limited"`, call `wait_for_rate_limit` instead of retrying.
+After it returns, retry the original tool once; if still limited, repeat this
+wait-then-one-retry cycle until success or cancellation.
 
 ## Login Detection
 
