@@ -59,6 +59,9 @@ export namespace agentPanel {
   let tasks: AgentTaskView[] = [];
   let pendingEvents = new Map<string, AgentTaskEventPayload[]>();
   let selectedTaskId: string | null = null;
+  // Full shell renders replace the sidebar DOM. Keep its viewport stable when
+  // selecting a task (and across any other render) instead of jumping to top.
+  let sidebarScrollTop = 0;
   // Confirm-first delete: every affordance (row ×, conversation-head button)
   // opens the centered dialog by setting this; the delete only runs on confirm.
   let deleteRequestTaskId: string | null = null;
@@ -734,6 +737,7 @@ export namespace agentPanel {
   }
 
   export function bind(shell: ShellState): void {
+    restoreSidebarScroll();
     bindFeishuConnector(shell, (taskId, turnIndex) => {
       const task = tasks.find((item) => item.task_id === taskId);
       return task ? answerTextForTurn(task, turnIndex) : null;
@@ -818,6 +822,17 @@ export namespace agentPanel {
     }
   }
 
+  // A shell render rebuilds the left rail, so restore the task list's previous
+  // viewport and keep recording it for the next render.
+  function restoreSidebarScroll(): void {
+    const list = document.querySelector<HTMLDivElement>(".sidebar-list");
+    if (!list) return;
+    list.scrollTop = sidebarScrollTop;
+    list.addEventListener("scroll", () => {
+      sidebarScrollTop = list.scrollTop;
+    });
+  }
+
   // Put the freshly rebuilt event stream back where the user left it: at the
   // saved offset when they had scrolled up, otherwise pinned to the newest row.
   // Also (re)attaches the scroll listener that feeds `streamScroll`.
@@ -896,6 +911,17 @@ export namespace agentPanel {
     // The compose pane's connect-overlay CTA.
     document.getElementById("overlay-chrome-connect")?.addEventListener("click", () => {
       invoke("cdp_connect").catch((e) => console.error("cdp_connect failed:", e));
+    });
+    // WKWebView marks target=_blank navigation as defaultPrevented before the
+    // document-level external-link delegate runs. Bind this help link directly
+    // so it reaches the same backend opener first; the global delegate then
+    // sees the prevented event and correctly avoids a duplicate open.
+    document.getElementById("overlay-remote-debugging-help")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      const href = (event.currentTarget as HTMLAnchorElement).getAttribute("href");
+      if (href) {
+        invoke("open_external", { url: href }).catch((e) => console.error("open_external failed:", e));
+      }
     });
   }
 
