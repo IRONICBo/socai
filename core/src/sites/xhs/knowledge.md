@@ -86,16 +86,45 @@ artifacts, and return a compact bundle. They differ only in where they enter:
 Both flows keep opening notes by clicking their cards. Their card/note URLs
 carry the xsec token needed for a later `get_notes` call.
 
-For deep, complex topic research only, consider `author_scan` when a search
-finds a high-quality, suspicious, or representative note. A quick profile check
-can distinguish firsthand expertise from soft ads/content farms, uncover related
-notes, reveal the author's recurring style and so on. Skip this extra step for routine
-searches.
+While reading any result set, keep track of what each author is: the subject's
+own official account (the gym/brand/venue/organizer itself), semi-official
+voices (its staff or coaches), aggregator/curator accounts, or ordinary users.
+Search ranking is relevance-based, not recency-based — one results page
+routinely mixes fresh notes with ones from months or years ago, so compare
+each note's `date` before treating any of them as current.
+
+When the question concerns something its subject announces or decides itself —
+schedules, prices, opening hours, events, rules, openings/closures — and an
+account that looks like the subject's official account appears in the results,
+do not answer from the search sample alone.
+Run `author_scan` on that author_id: the profile lists the account's notes
+newest-first (pinned 置顶 notes may sit on top), it confirms official status
+via the verified/认证 header fields, and it reveals announcements that search
+ranking missed. It reads only the first screen of the grid unless you pass
+`num_notes` — raise it when the newest matching note isn't in that first
+screen. A stale-looking official notice in search results means "check the
+profile", never "nothing newer exists". The one exception: when the sample
+already contains the official account's own announcement and its date is
+current for what is being asked, answer from it directly — the hop is for
+official evidence that is stale, conflicting, or missing from the sample.
+
+If no official account surfaces for such a question, keep the default search
+ranking — that relevance ordering is what XHS search is good at; do not
+re-search with recency filters just to freshen results. Answer from the dated
+evidence you have: state the dates of the notes you relied on, and when the
+newest relevant note looks old for what is being asked, say clearly that the
+answer may be outdated.
+
+For questions with no authoritative owner (experiences, opinions,
+recommendations), user notes are the evidence — no profile hop needed. An
+`author_scan` can still help there to distinguish firsthand expertise from
+soft ads/content farms when a note looks suspicious or representative.
 
 Shared options (same meaning for both):
 
-- `num_notes=N` — how many notes to collect (default 10); raise only when the
-  question needs broader evidence.
+- `num_notes=N` — how many notes to collect. `search` defaults to 10;
+  `author_scan` defaults to the first unscrolled screen of the profile grid.
+  Raise it only when the question needs broader evidence.
 - `num_comments=N` — how many comments to load per note (default 5; replies
   count toward N). Use the default unless the question is about the discussion itself.
   N ≤ 12 usually loads without extra scrolling, larger values add scroll/expand rounds 
