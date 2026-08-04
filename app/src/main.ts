@@ -6,9 +6,11 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
-import { applyLanguageToDocument, formatTabs, t } from "./lib/i18n";
+import { applyLanguageToDocument, t } from "./lib/i18n";
+import { authMenu } from "./panels/auth";
 import { agentPanel } from "./panels/tasks";
 import { settingsMenu } from "./panels/settings";
+import { subscriptionMenu } from "./panels/subscription";
 
 export type Status =
   | { state: "disconnected"; reason: string }
@@ -35,6 +37,7 @@ export interface ModelInfo {
   selected_model?: string;
   has_key: boolean;
   credential_kind?: "api_key" | "codex_oauth" | null;
+  credential_preview?: string | null;
   is_default?: boolean;
   recommended?: boolean;
   source?: string | null;
@@ -45,6 +48,7 @@ export type AgentTaskStatus = "queued" | "running" | "completed" | "failed" | "c
 export interface AgentTaskSnapshot {
   task_id: string;
   task: string;
+  provider: string | null;
   model: string | null;
   status: AgentTaskStatus;
   created_at: number;
@@ -62,6 +66,7 @@ export interface AgentTaskSnapshot {
   cache_creation_input_tokens: number | null;
   estimated_cost: number | null;
   cost_currency: string | null;
+  points_used: number | null;
 }
 
 export interface TimelineEntity {
@@ -136,6 +141,7 @@ export interface AgentTaskEventPayload {
   sequence: number;
   created_at: number;
   step?: number;
+  steps?: number;
   id?: string;
   sequence_in_step?: number;
   name?: string;
@@ -145,6 +151,13 @@ export interface AgentTaskEventPayload {
   ok?: boolean;
   summary?: string;
   duration_ms?: number;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cached_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+  estimated_cost?: number | null;
+  cost_currency?: string | null;
+  points_used?: number | null;
   entities?: TimelineEntity[];
   error?: string | null;
   result_file?: string | null;
@@ -203,7 +216,11 @@ function render(): void {
           <div class="status-capsule" role="group" aria-label="${htmlEsc(t("status.capsuleAria"))}">
             ${connectionStatusBar()}
             <span class="status-capsule__divider" aria-hidden="true"></span>
-            ${agentPanel.renderHeader()}
+            ${authMenu.render(
+              agentPanel.currentModelLabel(),
+              agentPanel.renderAccountConfig(),
+              subscriptionMenu.render(),
+            )}
           </div>
           ${settingsMenu.render(state)}
         </div>
@@ -221,7 +238,39 @@ function render(): void {
   bindUpdateChip();
   bindSidebarToggle();
   agentPanel.bindHeader(state);
-  settingsMenu.bind(state);
+  authMenu.bind(
+    state,
+    () => {
+      settingsMenu.closePopover();
+    },
+    async () => {
+      await Promise.all([
+        settingsMenu.loadConfig(),
+        agentPanel.refreshModels(),
+        subscriptionMenu.refresh(authMenu.isLoggedIn()),
+      ]);
+      if (authMenu.isLoggedIn()) await agentPanel.selectSocaiAgent();
+    },
+  );
+  subscriptionMenu.bind(state, async () => {
+    const alreadyHadPro = authMenu.hasProAccess();
+    await authMenu.refreshWallet();
+    if (!alreadyHadPro && authMenu.hasProAccess()) {
+      await settingsMenu.selectRemoteForNewPro(state);
+    }
+  });
+  settingsMenu.bind(
+    state,
+    () => {
+      authMenu.closePopover();
+    },
+    async () => {
+      await Promise.all([
+        authMenu.refreshWallet(),
+        subscriptionMenu.refresh(authMenu.isLoggedIn()),
+      ]);
+    },
+  );
   agentPanel.bind(state);
 }
 
@@ -236,61 +285,40 @@ function connectionStatusBar(): string {
   return `
     <div class="connection-status" aria-live="polite">
       ${connectionBadge()}
-      ${status.state === "connected" && connectionDetailsOpen ? renderConnectionDialog(status) : ""}
+      ${connectionDetailsOpen ? renderConnectionDialog() : ""}
     </div>
   `;
 }
 
 function connectionBadge(): string {
+  const expanded = connectionDetailsOpen ? "true" : "false";
   switch (status.state) {
     case "disconnected":
-      return `<button id="chrome-connect" type="button" class="badge badge-button" aria-label="${htmlEsc(t("chrome.connectAria"))}"><i class="badge-dot badge-dot-muted" aria-hidden="true"></i>${htmlEsc(t("chrome.label"))} · ${htmlEsc(t("chrome.disconnected"))}</button>`;
+      return `<button id="chrome-status-toggle" type="button" class="badge badge-button" aria-expanded="${expanded}" aria-label="${htmlEsc(t("chrome.statusToggleAria"))}"><i class="badge-dot badge-dot-muted" aria-hidden="true"></i>${htmlEsc(t("chrome.label"))} · ${htmlEsc(t("chrome.disconnected"))}</button>`;
     case "connecting":
-      return `<button type="button" class="badge badge-button" disabled><i class="badge-dot badge-dot-ink badge-dot-pulse" aria-hidden="true"></i>${htmlEsc(t("chrome.label"))} · ${htmlEsc(t("chrome.connecting"))} · ${status.attempt}/3</button>`;
+      return `<button id="chrome-status-toggle" type="button" class="badge badge-button" aria-expanded="${expanded}" aria-label="${htmlEsc(t("chrome.statusToggleAria"))}"><i class="badge-dot badge-dot-ink badge-dot-pulse" aria-hidden="true"></i>${htmlEsc(t("chrome.label"))} · ${htmlEsc(t("chrome.connecting"))}</button>`;
     case "connected":
-      return `<button id="chrome-status-toggle" type="button" class="badge badge-button" aria-expanded="${connectionDetailsOpen ? "true" : "false"}" aria-label="${htmlEsc(t("chrome.statusToggleAria"))}"><i class="badge-dot badge-dot-ink" aria-hidden="true"></i>${htmlEsc(t("chrome.label"))} · ${htmlEsc(t("chrome.connected"))}</button>`;
+      return `<button id="chrome-status-toggle" type="button" class="badge badge-button" aria-expanded="${expanded}" aria-label="${htmlEsc(t("chrome.statusToggleAria"))}"><i class="badge-dot badge-dot-ink" aria-hidden="true"></i>${htmlEsc(t("chrome.label"))} · ${htmlEsc(t("chrome.connected"))}</button>`;
   }
 }
 
-function renderConnectionDialog(connected: Extract<Status, { state: "connected" }>): string {
-  const tabs = formatTabs(connected.page_count);
+function renderConnectionDialog(): string {
+  const remoteBlocked = settingsMenu.isRemoteSelected() && !authMenu.hasProAccess();
+  const action = status.state === "connected"
+    ? `<button id="chrome-disconnect" type="button" class="btn-ghost chrome-manager-action">${htmlEsc(t("chrome.disconnect"))}</button>`
+    : status.state === "connecting"
+      ? `<button type="button" class="btn-primary chrome-manager-action" disabled>${htmlEsc(t("chrome.connectingCta"))}</button>`
+      : `<button id="chrome-connect-action" type="button" class="btn-primary chrome-manager-action" ${remoteBlocked || settingsMenu.isSaving() ? "disabled" : ""}>${htmlEsc(t("chrome.connectCta"))}</button>`;
   return `
     <div class="topbar-popover connection-dialog" role="dialog" aria-label="${htmlEsc(t("chrome.dialogAria"))}">
-      <div class="connection-dialog-head">
-        <p class="t-eyebrow connection-dialog-title">${htmlEsc(t("chrome.label"))}</p>
-        <span class="badge"><i class="badge-dot badge-dot-ink" aria-hidden="true"></i>${htmlEsc(t("chrome.connected"))}</span>
-      </div>
-      <div class="connection-meta">
-        <div>
-          <p class="t-eyebrow">${htmlEsc(t("chrome.tabs"))}</p>
-          <p class="t-mono">${htmlEsc(tabs)}</p>
-        </div>
-        <div>
-          <p class="t-eyebrow">${htmlEsc(t("chrome.browser"))}</p>
-          <p class="t-mono">${htmlEsc(connected.browser_version)}</p>
-        </div>
-        <div>
-          <p class="t-eyebrow">${htmlEsc(t("chrome.source"))}</p>
-          <p class="t-mono">${htmlEsc(connected.remote ? t("chrome.sourceRemote") : connected.managed ? t("chrome.sourceManaged") : t("chrome.sourceExisting"))}</p>
-        </div>
-        ${connected.user_data_dir ? `
-        <div class="connection-meta-wide">
-          <p class="t-eyebrow">${htmlEsc(t("chrome.profile"))}</p>
-          <p class="t-mono connection-endpoint">${htmlEsc(connected.user_data_dir)}</p>
-        </div>` : ""}
-        ${connected.remote ? "" : `
-        <div class="connection-meta-wide">
-          <p class="t-eyebrow">${htmlEsc(t("chrome.endpoint"))}</p>
-          <p class="t-mono connection-endpoint">${htmlEsc(connected.endpoint)}</p>
-        </div>`}
-      </div>
-      <button id="chrome-disconnect" type="button" class="btn-ghost">${htmlEsc(t("chrome.disconnect"))}</button>
+      ${settingsMenu.renderChromeManager()}
+      ${action}
     </div>
   `;
 }
 
 function bindConnectionStatusBar(): void {
-  document.getElementById("chrome-connect")?.addEventListener("click", () => {
+  document.getElementById("chrome-connect-action")?.addEventListener("click", () => {
     connectionDetailsOpen = false;
     invoke("cdp_connect").catch((e) => console.error("cdp_connect failed:", e));
   });
@@ -298,6 +326,8 @@ function bindConnectionStatusBar(): void {
     event.stopPropagation();
     const opening = !connectionDetailsOpen;
     if (opening) {
+      settingsMenu.closePopover();
+      authMenu.closePopover();
       try {
         status = await invoke<Status>("cdp_status");
       } catch (e) {
@@ -498,10 +528,10 @@ function bindGlobalDismiss(): void {
       connectionDetailsOpen = false;
       changed = true;
     }
-    if (!eventPathHasClass(event, "agent-status") && agentPanel.closeHeaderConfig()) {
+    if (settingsMenu.isOpen() && !eventPathHasClass(event, "settings-menu") && settingsMenu.closePopover()) {
       changed = true;
     }
-    if (settingsMenu.isOpen() && !eventPathHasClass(event, "settings-menu") && settingsMenu.closePopover()) {
+    if (authMenu.isOpen() && !eventPathHasClass(event, "auth-menu") && authMenu.closePopover()) {
       changed = true;
     }
     if (restartWarn && !eventPathHasClass(event, "update-chip-wrap")) {
@@ -579,6 +609,7 @@ async function main(): Promise<void> {
       void maybeCheckForUpdate();
       void agentPanel.loadTaskNotes(event.payload.task_id, shell());
       maybeRelaunchReadyUpdate();
+      void authMenu.refreshWallet().then(render);
     }
   });
   await listen<BackgroundMediaEvent>("agent_task:notes_updated", (event) => {
@@ -608,7 +639,8 @@ async function main(): Promise<void> {
   } catch (e) {
     console.error("getVersion failed:", e);
   }
-  await settingsMenu.loadConfig();
+  await Promise.all([settingsMenu.loadConfig(), authMenu.loadSession()]);
+  await subscriptionMenu.refresh(authMenu.isLoggedIn());
   render();
   bindGlobalDismiss();
   bindExternalLinks();

@@ -97,6 +97,46 @@ pub fn run() {
                 while let Ok(event) = rx.recv().await {
                     match event {
                         RuntimeBrowserEvent::StatusChanged(payload) => {
+                            match &payload {
+                                socai_core::cdp::StatusPayload::Connected {
+                                    managed,
+                                    remote,
+                                    source,
+                                    ..
+                                } => {
+                                    let profile = if *remote {
+                                        "remote"
+                                    } else if *managed {
+                                        "managed"
+                                    } else {
+                                        "existing"
+                                    };
+                                    telemetry.capture(
+                                        "socai_browser_connect",
+                                        json!({
+                                            "outcome": "completed",
+                                            "browser_profile": profile,
+                                            "browser_source": source,
+                                        }),
+                                    );
+                                }
+                                socai_core::cdp::StatusPayload::Disconnected { reason }
+                                    if reason != "not_yet_connected" =>
+                                {
+                                    telemetry.capture(
+                                        "socai_browser_connect",
+                                        json!({
+                                            "outcome": if reason == "user_disconnected" {
+                                                "disconnected"
+                                            } else {
+                                                "failed"
+                                            },
+                                            "error": crate::telemetry::short_error(reason),
+                                        }),
+                                    );
+                                }
+                                _ => {}
+                            }
                             let _ = handle.emit("cdp:status_changed", payload);
                         }
                         RuntimeBrowserEvent::TargetsChanged(targets) => {
@@ -132,6 +172,7 @@ pub fn run() {
                                         "steps": snapshot.steps,
                                         "input_tokens": snapshot.input_tokens,
                                         "output_tokens": snapshot.output_tokens,
+                                        "points_used": snapshot.points_used,
                                         "duration_ms": duration_ms(
                                             snapshot.started_at,
                                             snapshot.finished_at,
@@ -180,9 +221,11 @@ pub fn run() {
             commands::cdp_connect,
             commands::cdp_disconnect,
             commands::cdp_status,
+            commands::cdp_remote_debugging_ready,
             commands::cdp_refresh,
             commands::app_relaunch,
             commands::open_external,
+            commands::open_chrome_remote_debugging,
             commands::agent_list_models,
             commands::agent_set_default_model,
             commands::agent_open_codex_login,
@@ -199,6 +242,16 @@ pub fn run() {
             commands::config_set,
             commands::config_unset,
             commands::pro_activate,
+            commands::auth_session,
+            commands::auth_sms_send,
+            commands::auth_sms_verify,
+            commands::auth_logout,
+            commands::billing_wallet,
+            commands::billing_plan,
+            commands::billing_create_wechat_order,
+            commands::billing_create_alipay_order,
+            commands::billing_order_status,
+            commands::billing_mock_recharge,
             connectors::feishu::feishu_status,
             connectors::feishu::feishu_accounts,
             connectors::feishu::feishu_account_identity,

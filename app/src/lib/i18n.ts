@@ -52,6 +52,10 @@ const messages = {
     en: "connect chrome to start",
     zh: "连接 chrome 后开始",
   },
+  "chrome.setupTitle": {
+    en: "connect agent to chrome",
+    zh: "帮Agent连接到Chrome",
+  },
   "chrome.connectCta": { en: "connect chrome →", zh: "连接 chrome →" },
   "chrome.connectingCta": { en: "connecting…", zh: "连接中…" },
   "chrome.remoteAutoReconnect": {
@@ -59,13 +63,48 @@ const messages = {
     zh: "云端浏览器未连接 — 发送时会自动重连。",
   },
   "chrome.remoteDebuggingHelp": {
-    en: "how do i enable remote debugging? ↗",
-    zh: "如何启用远程调试？↗",
+    en: "open chrome remote debugging ↗",
+    zh: "打开 chrome 远程调试 ↗",
+  },
+  "chrome.setupEnableTitle": {
+    en: "enable remote debugging and check the box",
+    zh: "开启远程调试，在方框里打钩",
+  },
+  "chrome.setupAllowTitle": {
+    en: "click Allow in chrome",
+    zh: "在 chrome 弹窗中点击 Allow",
+  },
+  "chrome.setupOpenSettings": {
+    en: "open chrome settings ↗",
+    zh: "打开 chrome 设置 ↗",
+  },
+  "chrome.setupConnect": { en: "connect chrome", zh: "连接 chrome" },
+  "chrome.setupWaiting": { en: "waiting", zh: "等待操作" },
+  "chrome.setupDone": { en: "done", zh: "已完成" },
+  "chrome.setupDetecting": {
+    en: "waiting for remote debugging…",
+    zh: "正在等待开启远程调试…",
+  },
+  "chrome.setupWaitingAllow": {
+    en: "detected — waiting for Allow…",
+    zh: "已检测到，等待点击 Allow…",
+  },
+  "chrome.setupReady": {
+    en: "remote debugging enabled",
+    zh: "远程调试已开启",
+  },
+  "chrome.setupEnableImageAlt": {
+    en: "allow remote debugging setting in chrome",
+    zh: "chrome 开启远程调试设置",
+  },
+  "chrome.setupAllowImageAlt": {
+    en: "chrome remote debugging Allow dialog",
+    zh: "chrome 远程调试 Allow 弹窗",
   },
 
   "status.capsuleAria": {
-    en: "chrome and agent status",
-    zh: "chrome 与智能体状态",
+    en: "chrome, model, and account status",
+    zh: "chrome、模型与账号状态",
   },
 
   "sidebar.collapseAria": { en: "collapse sidebar", zh: "收起侧边栏" },
@@ -81,6 +120,145 @@ const messages = {
   "update.restartAnyway": { en: "restart anyway", zh: "仍然重启" },
   "update.later": { en: "later", zh: "稍后" },
 
+  "auth.title": { en: "account", zh: "账号" },
+  "auth.login": { en: "sign in", zh: "登录" },
+  "auth.loginAria": { en: "sign in to socai", zh: "登录 socai" },
+  "auth.accountAria": { en: "open account menu", zh: "打开账号菜单" },
+  "auth.loginTitle": { en: "sign in with phone", zh: "手机号登录" },
+  "auth.loginAgentHint": {
+    en: "sign in to get 30 points of agent credit",
+    zh: "登录后获赠30点 agent额度",
+  },
+  "auth.useOwnApiKey": { en: "or use your own api key", zh: "或自己输入 API key" },
+  "auth.phone": { en: "phone", zh: "手机号" },
+  "auth.sendCode": { en: "send code", zh: "获取验证码" },
+  "auth.sending": { en: "sending…", zh: "发送中…" },
+  "auth.enterCode": { en: "enter verification code", zh: "输入验证码" },
+  "auth.code": { en: "verification code", zh: "验证码" },
+  "auth.codeSent": {
+    en: "a 6-digit code was sent to {phone}.",
+    zh: "6 位验证码已发送至 {phone}。",
+  },
+  "auth.verifying": { en: "signing in…", zh: "登录中…" },
+  "auth.changePhone": { en: "change phone", zh: "更换手机号" },
+  "auth.resend": { en: "resend code", zh: "重新发送" },
+  "auth.resendCountdown": { en: "resend in {seconds}s", zh: "{seconds} 秒后重发" },
+  "auth.account": { en: "account", zh: "账号" },
+  "auth.accountHint": {
+    en: "this account is active on this device.",
+    zh: "此账号已在当前设备登录。",
+  },
+  "auth.loggedIn": { en: "signed in", zh: "已登录" },
+  "auth.loggedOut": { en: "signed out", zh: "未登录" },
+  "auth.logout": { en: "sign out", zh: "退出登录" },
+  "auth.loggingOut": { en: "signing out…", zh: "退出中…" },
+  "auth.invalidPhone": {
+    en: "enter a valid mainland China phone number.",
+    zh: "请输入有效的中国大陆手机号。",
+  },
+  "auth.invalidCodeFormat": {
+    en: "enter the 6-digit verification code.",
+    zh: "请输入 6 位验证码。",
+  },
+  "auth.tooFrequent": {
+    en: "code requested too frequently. try again shortly.",
+    zh: "验证码请求过于频繁，请稍后重试。",
+  },
+  "auth.invalidCode": { en: "the verification code is incorrect.", zh: "验证码不正确。" },
+  "auth.expiredCode": { en: "the verification code has expired.", zh: "验证码已过期。" },
+  "auth.usedCode": { en: "this verification code was already used.", zh: "此验证码已使用。" },
+  "auth.tooManyAttempts": {
+    en: "too many attempts. request a new code.",
+    zh: "尝试次数过多，请重新获取验证码。",
+  },
+  "auth.serverNotConfigured": {
+    en: "the socai service is not configured in this build.",
+    zh: "当前版本尚未配置 socai 服务地址。",
+  },
+  "auth.requestFailed": {
+    en: "request failed. check your connection and try again.",
+    zh: "请求失败，请检查网络后重试。",
+  },
+  "auth.sessionLoadFailed": {
+    en: "could not read the saved sign-in state.",
+    zh: "无法读取已保存的登录状态。",
+  },
+
+  "billing.balance": { en: "point balance", zh: "点数余额" },
+  "billing.remaining": { en: "points remaining", zh: "剩余点数" },
+  "billing.points": { en: "{points} points", zh: "{points} 点" },
+  "billing.pointsUsed": { en: "{points} points used", zh: "消耗 {points} 点" },
+  "billing.unavailable": { en: "unavailable", zh: "暂不可用" },
+  "billing.activeUntil": { en: "active until {date}", zh: "有效期至 {date}" },
+  "billing.rechargeHint": {
+    en: "mock recharge for the MVP; points are added immediately.",
+    zh: "MVP 暂用 mock 充值，点击后点数立即到账。",
+  },
+  "billing.recharging": { en: "adding…", zh: "充值中…" },
+
+  "subscription.label": { en: "subscribe", zh: "订阅" },
+  "subscription.aria": { en: "open subscription", zh: "打开订阅" },
+  "subscription.upgradePro": { en: "upgrade to pro", zh: "升级到 Pro" },
+  "subscription.renewPro": { en: "renew pro", zh: "续订 Pro" },
+  "subscription.proPoints": { en: "500 points", zh: "500 点数" },
+  "subscription.proXhs": { en: "use xiaohongshu without signing in", zh: "免登录小红书" },
+  "subscription.proTranscript": { en: "extract video transcripts", zh: "获取视频文字稿" },
+  "subscription.active": { en: "subscribed", zh: "已订阅" },
+  "subscription.inactive": { en: "not subscribed", zh: "未订阅" },
+  "subscription.loginHint": {
+    en: "sign in with your phone number before subscribing.",
+    zh: "请先使用手机号登录，再开通订阅。",
+  },
+  "subscription.login": { en: "sign in to continue", zh: "登录后继续" },
+  "subscription.loadFailed": {
+    en: "could not load the subscription plan.",
+    zh: "暂时无法加载订阅方案。",
+  },
+  "subscription.unavailable": {
+    en: "Payment is not available yet.",
+    zh: "支付尚未开放。",
+  },
+  "subscription.duration": { en: "access", zh: "有效期" },
+  "subscription.days": { en: "{days} days", zh: "{days} 天" },
+  "subscription.oneMonth": { en: "one-month subscription", zh: "订阅一个月" },
+  "subscription.renewal": { en: "renewal", zh: "续费方式" },
+  "subscription.noAutoRenew": { en: "manual", zh: "到期不自动续费" },
+  "subscription.planHint": {
+    en: "Includes hosted AI access with no API key setup. Your own API key remains available in settings.",
+    zh: "包含免配置 API Key 的云端模型用量；你仍可在设置中使用自己的 API Key。",
+  },
+  "subscription.wechatPay": { en: "pay with WeChat", zh: "微信扫码支付" },
+  "subscription.alipay": { en: "pay with Alipay", zh: "支付宝支付" },
+  "subscription.alipayOpened": {
+    en: "Alipay checkout opened in your browser. Complete payment there, then return to socai.",
+    zh: "已在浏览器打开支付宝收银台。完成支付后请返回 socai。",
+  },
+  "subscription.openAlipay": {
+    en: "open Alipay checkout again",
+    zh: "重新打开支付宝收银台",
+  },
+  "subscription.awaitingPayment": { en: "awaiting payment", zh: "等待支付" },
+  "subscription.qrAria": { en: "WeChat Pay QR code", zh: "微信支付二维码" },
+  "subscription.scanHint": {
+    en: "scan with WeChat on your phone. Payment is confirmed automatically.",
+    zh: "请使用手机微信扫码，支付成功后会自动确认。",
+  },
+  "subscription.expires": { en: "QR code expires at {time}.", zh: "二维码将在 {time} 失效。" },
+  "subscription.success": { en: "subscription active", zh: "订阅已开通" },
+  "subscription.successHint": {
+    en: "{points} points added. Access is active until {date}.",
+    zh: "已到账 {points} 点，有效期至 {date}。",
+  },
+  "subscription.done": { en: "done", zh: "完成" },
+  "subscription.orderExpired": {
+    en: "this payment QR code expired. create a new one to continue.",
+    zh: "支付二维码已失效，请重新发起支付。",
+  },
+  "subscription.paymentFailed": {
+    en: "payment could not be started. try again shortly.",
+    zh: "暂时无法发起支付，请稍后重试。",
+  },
+
   "settings.aria": { en: "settings", zh: "设置" },
   "settings.title": { en: "settings", zh: "设置" },
   "settings.general": { en: "general", zh: "通用" },
@@ -93,21 +271,21 @@ const messages = {
     en: "where run reports, traces, and screenshots are saved.",
     zh: "运行报告、轨迹和截图的保存位置。",
   },
-  "settings.pro": { en: "pro", zh: "pro" },
   "settings.inviteCode": { en: "invite code", zh: "邀请码" },
-  "settings.activate": { en: "activate", zh: "激活" },
-  "settings.proActivated": { en: "activated", zh: "已激活" },
-  "settings.proNotActivated": { en: "not activated", zh: "未激活" },
-  "settings.proHint": {
-    en: "required for video transcripts and future pro features.",
-    zh: "视频帖子提取音频，等其他 pro 功能。",
-  },
+  "settings.enter": { en: "enter", zh: "输入" },
+  "settings.loginForInvite": { en: "sign in first", zh: "请先登录" },
+  "settings.inviteRequired": { en: "enter an invite code", zh: "请输入邀请码" },
+  "settings.inviteInvalid": { en: "invite code could not be verified", zh: "邀请码验证失败" },
   "settings.browse": { en: "browse…", zh: "浏览…" },
   "settings.chrome": { en: "chrome", zh: "chrome" },
   "settings.source": { en: "source", zh: "来源" },
   "settings.sourceManaged": { en: "isolated profile", zh: "独立配置文件" },
   "settings.sourceExisting": { en: "existing browser", zh: "现有浏览器" },
   "settings.sourceRemote": { en: "remote (beta)", zh: "远程（beta）" },
+  "settings.sourceRemotePro": {
+    en: "remote (Pro, no local xiaohongshu connection)",
+    zh: "远程（Pro，无需本地连接小红书）",
+  },
   "settings.profileDir": { en: "profile directory", zh: "资料目录" },
   "settings.profileHint": {
     en: "socai launches a throwaway chrome with this profile.",
@@ -132,27 +310,25 @@ const messages = {
     en: "could not load settings.",
     zh: "无法加载设置。",
   },
-  "settings.autosaveHint": {
-    en: "changes are saved automatically.",
-    zh: "更改会自动保存。",
-  },
-
   "agent.label": { en: "model", zh: "模型" },
   "agent.configurationAria": { en: "agent configuration", zh: "智能体设置" },
   "agent.selectModelAria": { en: "select agent model", zh: "选择智能体模型" },
   "agent.selectProviderAria": {
-    en: "select agent provider",
-    zh: "选择智能体服务商",
+    en: "select model source",
+    zh: "选择模型来源",
   },
-  "agent.provider": { en: "provider", zh: "服务商" },
   "agent.apiKey": { en: "api key", zh: "api key" },
-  "agent.credentialConfigured": {
-    en: "{provider} api key configured.",
-    zh: "{provider} api key 已配置。",
+  "agent.credentialPreview": {
+    en: "configured {preview}",
+    zh: "已配置 {preview}",
+  },
+  "agent.managedModel": {
+    en: "an LLM adapted for socai, used with points, no API key required",
+    zh: "针对socai适配的LLM，通过点数使用，无需API key",
   },
   "agent.chatgptConnected": {
-    en: "chatgpt subscription connected.",
-    zh: "chatgpt 订阅已连接。",
+    en: "chatgpt connected",
+    zh: "已连接 chatgpt",
   },
   "agent.updateCredential": { en: "update api key", zh: "更新 api key" },
   "agent.replaceCredential": {

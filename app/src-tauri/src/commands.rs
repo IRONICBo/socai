@@ -1,17 +1,17 @@
-use crate::tasks::{now_ms, AgentTaskRegistry, AgentTaskSnapshot};
+use crate::tasks::{app_data_dir, now_ms, AgentTaskRegistry, AgentTaskSnapshot};
 use crate::telemetry::{duration_ms, short_error, DesktopTelemetry};
 use crate::timeline::{agent_event_to_timeline, AgentTaskEventKind, AgentTaskEventPayload};
 use anyhow::Result;
 use serde_json::{json, Map, Value};
 use socai_core::agent::{
     catalog_models_for, configured_default_model_for, configured_default_provider,
-    desktop_agent_tools, make_run_dir, mark_agent_run_status, provider_credential_kind,
-    resolve_provider, save_default_model, AgentEvent, Conversation, CredentialKind,
-    ModelCatalogEntry, Provider, TokenUsage,
+    desktop_agent_tools, load_api_key, make_run_dir, mark_agent_run_status,
+    provider_credential_kind, resolve_provider, save_default_model, AgentEvent, Conversation,
+    CredentialKind, ModelCatalogEntry, Provider, TokenUsage,
 };
 use socai_core::runtime::{
-    create_llm_provider_for, ensure_llm_provider_configured_for,
-    run_agent_task as run_agent_with_tools, wait_browser_connected, AgentRunConfig, BrowserStatus,
+    create_llm_provider_for_task, ensure_llm_provider_configured_for,
+    run_agent_task as run_agent_with_tools, AgentRunConfig, BrowserStatus, ChromeConnectOptions,
     RuntimePageSession, SocaiRuntime,
 };
 use socai_core::sites::xhs::XhsHistoryStore;
@@ -19,6 +19,7 @@ use socai_core::sites::{find_site, SiteSpec};
 use socai_core::telemetry::query_text_enabled;
 use socai_core::telemetry::tool_call::{summarize_tool_args, summarize_tool_result};
 use socai_core::telemetry::trace::mark_run_trace_status;
+use std::collections::HashMap;
 use std::io::{BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -63,8 +64,14 @@ pub async fn cdp_connect(
     runtime: State<'_, SocaiRuntime>,
     telemetry: State<'_, DesktopTelemetry>,
 ) -> Result<(), String> {
-    runtime.connect_browser();
-    telemetry.capture("socai_browser_connect", json!({}));
+    let profile = ChromeConnectOptions::from_config()
+        .map(|options| options.profile.as_str())
+        .unwrap_or("unknown");
+    runtime.connect_browser_once();
+    telemetry.capture(
+        "socai_browser_connect",
+        json!({ "outcome": "requested", "browser_profile": profile }),
+    );
     Ok(())
 }
 
@@ -81,6 +88,36 @@ pub async fn cdp_disconnect(runtime: State<'_, SocaiRuntime>) -> Result<(), Stri
 #[tauri::command]
 pub async fn cdp_status(runtime: State<'_, SocaiRuntime>) -> Result<BrowserStatus, String> {
     Ok(runtime.browser_status().await)
+}
+
+#[tauri::command]
+pub async fn cdp_remote_debugging_ready() -> Result<bool, String> {
+    let Some(endpoint) = socai_core::cdp::discover_existing_chrome_endpoint()
+        .await
+        .map_err(|err| format!("{err:#}"))?
+    else {
+        return Ok(false);
+    };
+    let url = url::Url::parse(&endpoint.browser_ws_url)
+        .map_err(|err| format!("invalid chrome debugging endpoint: {err}"))?;
+    let Some(host) = url.host_str() else {
+        return Ok(false);
+    };
+    let Some(port) = url.port_or_known_default() else {
+        return Ok(false);
+    };
+
+    // DevToolsActivePort can remain after the user disables remote debugging.
+    // A short TCP probe verifies the local listener without opening a CDP
+    // websocket, which would itself trigger chrome's Allow confirmation.
+    Ok(matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(350),
+            tokio::net::TcpStream::connect((host, port)),
+        )
+        .await,
+        Ok(Ok(_))
+    ))
 }
 
 #[tauri::command]
@@ -109,8 +146,12 @@ pub async fn app_relaunch(app: AppHandle) {
 /// timeout between runs, and reconnecting mints a fresh one — and it also
 /// revives a killed managed chrome. Bounded by the runtime's connect budget.
 async fn ensure_browser_connected(runtime: &SocaiRuntime) -> Result<(), String> {
-    wait_browser_connected(runtime)
+    let site = app_site().map_err(|err| format!("{err:#}"))?;
+    let options = ChromeConnectOptions::from_config().map_err(|err| format!("{err:#}"))?;
+    runtime
+        .ensure_site_page_with_browser_options(site.id, site.home_url, options)
         .await
+        .map(|_| ())
         .map_err(|err| format!("{err:#}"))
 }
 
@@ -158,6 +199,90 @@ fn read_run_usage(run_dir: &str) -> Option<TokenUsage> {
         serde_json::from_slice(&std::fs::read(PathBuf::from(run_dir).join("run.json")).ok()?)
             .ok()?;
     serde_json::from_value(value.get("usage")?.clone()).ok()
+}
+
+fn persist_run_points_used(run_dir: Option<&str>, points_used: Option<i64>) {
+    let (Some(run_dir), Some(points_used)) = (run_dir, points_used) else {
+        return;
+    };
+    let path = PathBuf::from(run_dir).join("run.json");
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else {
+        return;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let billing = object
+        .entry("billing")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(billing) = billing.as_object_mut() else {
+        return;
+    };
+    billing.insert("points_used".into(), json!(points_used));
+    if let Ok(rendered) = serde_json::to_vec_pretty(&value) {
+        let _ = std::fs::write(path, rendered);
+    }
+}
+
+/// Older desktop builds captured the server-authoritative charge in the local
+/// task-end telemetry row but did not copy it into that turn's run.json. Match
+/// by run_id (not task_id: replies intentionally share one task id) so those
+/// completed turns gain the same durable per-run field as new runs.
+fn recover_run_points_from_local_telemetry(snapshots: &[AgentTaskSnapshot]) {
+    let path = app_data_dir().join("telemetry/events.jsonl");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let mut by_run_id = HashMap::<String, i64>::new();
+    for line in text.lines() {
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if row.get("event").and_then(Value::as_str) != Some("socai_agent_task_end") {
+            continue;
+        }
+        let properties = row.get("properties").unwrap_or(&row);
+        let Some(run_id) = properties
+            .get("run_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(points_used) = properties.get("points_used").and_then(Value::as_i64) else {
+            continue;
+        };
+        by_run_id.insert(run_id.to_string(), points_used);
+    }
+    if by_run_id.is_empty() {
+        return;
+    }
+    for snapshot in snapshots {
+        for (run_dir, _) in crate::timeline::conversation_run_dirs(snapshot) {
+            let path = run_dir.join("run.json");
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let Ok(run) = serde_json::from_slice::<Value>(&bytes) else {
+                continue;
+            };
+            if run.pointer("/billing/points_used").is_some() {
+                continue;
+            }
+            let Some(points_used) = run
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|run_id| by_run_id.get(run_id))
+                .copied()
+            else {
+                continue;
+            };
+            persist_run_points_used(run_dir.to_str(), Some(points_used));
+        }
+    }
 }
 
 fn with_usage_telemetry(mut properties: Value, usage: Option<&TokenUsage>) -> Value {
@@ -219,6 +344,9 @@ pub struct AgentRunOutcome {
 pub async fn agent_save_api_key(provider: String, api_key: String) -> Result<(), String> {
     let provider_enum = Provider::from_name(provider.trim())
         .ok_or_else(|| format!("unknown provider: {provider}"))?;
+    if provider_enum == Provider::Socai {
+        return Err("socai agent uses your signed-in account, not an API key".into());
+    }
     socai_core::agent::save_api_key(provider_enum, api_key.trim())
         .map(|_| ())
         .map_err(|e| format!("{e:#}"))
@@ -227,6 +355,7 @@ pub async fn agent_save_api_key(provider: String, api_key: String) -> Result<(),
 #[tauri::command]
 pub async fn agent_list_models() -> Result<Vec<Value>, String> {
     use socai_core::agent::PROVIDERS;
+    let _ = socai_core::cloud::take_hosted_llm_default().map_err(|err| format!("{err:#}"))?;
     // The provider/model that would be used right now. Environment overrides
     // win when present; otherwise the desktop restores persisted defaults even
     // if the selected provider still needs a key. The frontend uses
@@ -235,6 +364,8 @@ pub async fn agent_list_models() -> Result<Vec<Value>, String> {
         resolve_provider(None, None)
             .ok()
             .or_else(configured_default_provider)
+    } else if socai_core::cloud::hosted_llm_selected() {
+        Some(Provider::Socai)
     } else {
         configured_default_provider().or_else(|| resolve_provider(None, None).ok())
     };
@@ -242,12 +373,28 @@ pub async fn agent_list_models() -> Result<Vec<Value>, String> {
     let mut out = Vec::new();
     for cfg in PROVIDERS {
         let credential_kind = provider_credential_kind(cfg.provider);
+        if cfg.provider == Provider::Socai && credential_kind.is_none() {
+            continue;
+        }
         let credential_kind_label = match credential_kind {
             Some(CredentialKind::ApiKey) => Some("api_key"),
             Some(CredentialKind::CodexOAuth) => Some("codex_oauth"),
             None => None,
         };
-        let selected_model = if Some(cfg.provider) == default_provider {
+        let credential_preview =
+            if cfg.provider != Provider::Socai && credential_kind == Some(CredentialKind::ApiKey) {
+                load_api_key(cfg.provider).map(|key| {
+                    let prefix = key.chars().take(8).collect::<String>();
+                    format!("{prefix}…")
+                })
+            } else {
+                None
+            };
+        let selected_model = if cfg.provider == Provider::Socai {
+            // The hosted model is a server concern. Keep an opaque value in
+            // desktop state even when SOCAI_MODEL is set for BYOK providers.
+            cfg.default_model.to_string()
+        } else if Some(cfg.provider) == default_provider {
             env_model
                 .clone()
                 .unwrap_or_else(|| configured_default_model_for(cfg.provider))
@@ -255,6 +402,9 @@ pub async fn agent_list_models() -> Result<Vec<Value>, String> {
             configured_default_model_for(cfg.provider)
         };
         let mut models = catalog_models_for(cfg.provider);
+        if cfg.provider == Provider::Socai {
+            models.retain(|model| model.id == cfg.default_model);
+        }
         if !selected_model.trim().is_empty()
             && !models.iter().any(|model| model.id == selected_model)
         {
@@ -287,6 +437,7 @@ pub async fn agent_list_models() -> Result<Vec<Value>, String> {
                 "selected_model": selected_model,
                 "has_key": credential_kind.is_some(),
                 "credential_kind": credential_kind_label,
+                "credential_preview": credential_preview.clone(),
                 "is_default": is_default,
                 "recommended": model.recommended,
                 "source": model.source,
@@ -313,12 +464,16 @@ fn model_env_override() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// Persist the user's model choice so it survives a relaunch. Writes
-/// `defaults.provider` + `defaults.{provider}_model` to `~/.socai/auth.json`.
+/// Persist the user's model choice so it survives a relaunch. The hosted model
+/// is account-scoped; BYOK choices keep using the shared CLI defaults.
 #[tauri::command]
 pub async fn agent_set_default_model(provider: String, model: String) -> Result<(), String> {
     let provider_enum = Provider::from_name(provider.trim())
         .ok_or_else(|| format!("unknown provider: {provider}"))?;
+    if provider_enum == Provider::Socai {
+        return socai_core::cloud::set_hosted_llm_selected(true).map_err(|err| format!("{err:#}"));
+    }
+    socai_core::cloud::set_hosted_llm_selected(false).map_err(|err| format!("{err:#}"))?;
     save_default_model(provider_enum, model.trim())
         .map(|_| ())
         .map_err(|e| format!("{e:#}"))
@@ -357,6 +512,11 @@ pub fn open_external(url: String) -> Result<(), String> {
         .status()
         .map_err(|e| format!("failed to open {url}: {e}"))?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn open_chrome_remote_debugging() -> Result<(), String> {
+    socai_core::cdp::open_remote_debugging_page().map_err(|err| format!("{err:#}"))
 }
 
 #[tauri::command]
@@ -560,6 +720,7 @@ pub async fn agent_task_reply(
             snapshot.cache_creation_input_tokens = None;
             snapshot.estimated_cost = None;
             snapshot.cost_currency = None;
+            snapshot.points_used = None;
             snapshot.current_message = Some(message_text.clone());
         })
         .await
@@ -611,6 +772,41 @@ pub async fn agent_task_reply(
 pub async fn agent_task_list(
     tasks: State<'_, AgentTaskRegistry>,
 ) -> Result<Vec<AgentTaskSnapshot>, String> {
+    // Older cloud-usage tasks predate persisted settlement results. Replaying the
+    // idempotent settlement once on launch lets those tasks show the exact
+    // server charge instead of deriving points from the desktop cost estimate.
+    let snapshots = tasks.list().await;
+    recover_run_points_from_local_telemetry(&snapshots);
+    let snapshots = tasks.list().await;
+    let has_cloud_session = socai_core::cloud::pro_activated();
+    for snapshot in snapshots {
+        if !has_cloud_session
+            || snapshot.points_used.is_some()
+            || !matches!(
+                snapshot.status.as_str(),
+                "completed" | "failed" | "cancelled" | "interrupted"
+            )
+        {
+            continue;
+        }
+        match socai_core::cloud::settle_llm_task(&snapshot.task_id, &snapshot.status).await {
+            Ok(settlement) => {
+                if let Some(updated) = tasks
+                    .update(&snapshot.task_id, |task| {
+                        task.points_used =
+                            visible_billed_points(task.provider.as_deref(), &settlement);
+                    })
+                    .await
+                {
+                    persist_run_points_used(updated.run_dir.as_deref(), updated.points_used);
+                }
+            }
+            Err(err) => eprintln!(
+                "failed to recover hosted LLM settlement for {}: {err:#}",
+                snapshot.task_id
+            ),
+        }
+    }
     Ok(tasks.list().await)
 }
 
@@ -715,7 +911,7 @@ pub async fn agent_task_cancel(
     telemetry: State<'_, DesktopTelemetry>,
     task_id: String,
 ) -> Result<AgentTaskSnapshot, String> {
-    let (snapshot, abort_handle, target_id, changed) = tasks
+    let (mut snapshot, abort_handle, target_id, changed) = tasks
         .cancel(&task_id)
         .await
         .ok_or_else(|| format!("unknown task: {task_id}"))?;
@@ -729,6 +925,20 @@ pub async fn agent_task_cancel(
         let _ = runtime.close_target(&target_id).await;
     }
     if changed {
+        if socai_core::cloud::pro_activated() {
+            if let Some(settlement) = settle_hosted_task_with_retry(&task_id, "cancelled").await {
+                if let Some(updated) = tasks
+                    .update(&task_id, |task| {
+                        task.points_used =
+                            visible_billed_points(task.provider.as_deref(), &settlement);
+                    })
+                    .await
+                {
+                    snapshot = updated;
+                }
+            }
+        }
+        persist_run_points_used(snapshot.run_dir.as_deref(), snapshot.points_used);
         let usage = snapshot.run_dir.as_deref().and_then(read_run_usage);
         if let Some(run_dir) = snapshot.run_dir.as_deref() {
             let _ = mark_agent_run_status(run_dir, "cancelled", None);
@@ -749,6 +959,7 @@ pub async fn agent_task_cancel(
                     "model": snapshot.model.clone(),
                     "outcome": "cancelled",
                     "steps": snapshot.steps,
+                    "points_used": snapshot.points_used,
                     "duration_ms": duration_ms(snapshot.started_at, snapshot.finished_at),
                 }),
                 usage.as_ref(),
@@ -765,6 +976,50 @@ pub async fn agent_task_cancel(
         .await;
     }
     Ok(snapshot)
+}
+
+async fn settle_hosted_task_with_retry(
+    task_id: &str,
+    final_status: &str,
+) -> Option<socai_core::cloud::LlmSettlement> {
+    let mut delay_ms = 200;
+    for attempt in 0..3 {
+        match socai_core::cloud::settle_llm_task(task_id, final_status).await {
+            Ok(settlement) => return Some(settlement),
+            Err(err) if attempt < 2 => {
+                eprintln!(
+                    "hosted LLM settlement retry {} for task {} ({}): {err:#}",
+                    attempt + 1,
+                    task_id,
+                    final_status,
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                delay_ms *= 4;
+            }
+            Err(err) => {
+                eprintln!(
+                    "hosted LLM settlement failed for task {} ({}); server stale-task settlement will recover it: {err:#}",
+                    task_id,
+                    final_status,
+                );
+            }
+        }
+    }
+    None
+}
+
+fn visible_billed_points(
+    provider: Option<&str>,
+    settlement: &socai_core::cloud::LlmSettlement,
+) -> Option<i64> {
+    if settlement.status == "settlement_pending" {
+        return None;
+    }
+    if settlement.billed_points > 0 || provider == Some(Provider::Socai.as_str()) {
+        Some(settlement.billed_points)
+    } else {
+        Some(0)
+    }
 }
 
 /// Remove a task from history and delete its on-disk artifacts: every run dir
@@ -871,6 +1126,7 @@ async fn run_agent_task_background(
                     "model": model.clone(),
                     "outcome": "failed",
                     "error": short_error(&error),
+                    "points_used": snapshot.points_used,
                     "duration_ms": duration_ms(snapshot.started_at, snapshot.finished_at),
                 }),
             );
@@ -923,6 +1179,17 @@ async fn run_agent_task_background(
     )
     .await;
 
+    let settlement = if socai_core::cloud::pro_activated() {
+        let final_status = if result.is_ok() {
+            "completed"
+        } else {
+            "failed"
+        };
+        settle_hosted_task_with_retry(&task_id, final_status).await
+    } else {
+        None
+    };
+
     let _ = registry.remove_abort_handle(&task_id).await;
 
     match result {
@@ -944,9 +1211,13 @@ async fn run_agent_task_background(
                         Some(outcome.cache_creation_input_tokens);
                     snapshot.estimated_cost = outcome.estimated_cost;
                     snapshot.cost_currency = outcome.cost_currency.clone();
+                    snapshot.points_used = settlement.as_ref().and_then(|settlement| {
+                        visible_billed_points(provider.as_deref(), settlement)
+                    });
                 })
                 .await
             {
+                persist_run_points_used(snapshot.run_dir.as_deref(), snapshot.points_used);
                 record_desktop_session(&snapshot, &outcome.final_text, "completed");
                 telemetry.capture(
                     "socai_agent_task_end",
@@ -958,6 +1229,7 @@ async fn run_agent_task_background(
                             "model": model.clone(),
                             "outcome": "completed",
                             "steps": outcome.steps,
+                            "points_used": snapshot.points_used,
                             "duration_ms": duration_ms(snapshot.started_at, snapshot.finished_at),
                         }),
                         Some(&outcome.usage),
@@ -981,9 +1253,13 @@ async fn run_agent_task_background(
                     snapshot.status = "failed".into();
                     snapshot.finished_at = Some(now_ms());
                     snapshot.error = Some(error.clone());
+                    snapshot.points_used = settlement.as_ref().and_then(|settlement| {
+                        visible_billed_points(provider.as_deref(), settlement)
+                    });
                 })
                 .await
             {
+                persist_run_points_used(snapshot.run_dir.as_deref(), snapshot.points_used);
                 let usage = snapshot.run_dir.as_deref().and_then(read_run_usage);
                 if let Some(run_dir) = snapshot.run_dir.as_deref() {
                     let _ = mark_agent_run_status(run_dir, "failed", Some(&error));
@@ -1000,6 +1276,7 @@ async fn run_agent_task_background(
                             "model": model.clone(),
                             "outcome": "failed",
                             "error": short_error(&error),
+                            "points_used": snapshot.points_used,
                             "duration_ms": duration_ms(snapshot.started_at, snapshot.finished_at),
                         }),
                         usage.as_ref(),
@@ -1133,16 +1410,19 @@ async fn run_agent_task_on_shared_page(
         .unwrap_or_default();
 
     ensure_llm_provider_configured_for(provider, model)?;
-    let llm_provider = create_llm_provider_for(provider, model)?;
+    let llm_provider = create_llm_provider_for_task(provider, model, &task_id)?;
     let site = app_site()?;
     // Held for the whole task — LLM thinking pauses between tool calls
     // included — so the remote idle reaper only fires between tasks.
     let _activity = runtime.begin_activity().await;
-    // Reused across every task/reply for the life of the browser connection —
-    // matches the TUI's ensure_site_page, so a follow-up continues on the
-    // same tab instead of navigating a fresh one from scratch. The runtime
-    // detects and replaces it if the user closed the tab externally.
-    let page = runtime.ensure_site_page(site.id, site.home_url).await?;
+    // Reuse the site tab only while it belongs to the currently configured
+    // browser profile. A user may switch local/managed/remote between turns;
+    // the options-aware runtime closes the cached page and reconnects before
+    // a follow-up can accidentally keep driving the previous browser.
+    let browser_options = ChromeConnectOptions::from_config()?;
+    let page = runtime
+        .ensure_site_page_with_browser_options(site.id, site.home_url, browser_options)
+        .await?;
     let target_id = page.target_id().to_string();
     label_controlled_page(&page, &title_label).await;
     if let Some(registry) = &registry {
@@ -1191,6 +1471,7 @@ async fn run_agent_task_on_shared_page(
             run_dir,
             session_id,
             background_media_generation,
+            billing_task_id: Some(task_id.clone()),
             ..AgentRunConfig::default()
         };
         let outcome = run_agent_with_tools(task, llm_provider, tools, config, tx).await;
@@ -1347,16 +1628,11 @@ pub struct DesktopConfig {
     output_dir: String,
     /// Resolved default run-artifact root (shown as the input placeholder).
     output_dir_default: String,
-    /// Whether this install has a saved pro device token.
-    pro_activated: bool,
-    /// Saved pro device id, or "" when not activated.
-    pro_device_id: String,
 }
 
 #[tauri::command]
 pub fn config_get() -> Result<DesktopConfig, String> {
     let config = socai_core::config::load_config().map_err(|err| format!("{err:#}"))?;
-    let pro = socai_core::cloud::status().map_err(|err| format!("{err:#}"))?;
     Ok(DesktopConfig {
         chrome_source: config
             .chrome
@@ -1368,17 +1644,238 @@ pub fn config_get() -> Result<DesktopConfig, String> {
         chrome_profile_dir_default: default_managed_profile_dir(),
         output_dir: config.runs.dir.unwrap_or_default(),
         output_dir_default: default_runs_root_display(),
-        pro_activated: pro.activated,
-        pro_device_id: pro.device_id,
     })
 }
 
 #[tauri::command]
-pub async fn pro_activate(invite_code: String, label: String) -> Result<Value, String> {
-    socai_core::cloud::activate(&invite_code, &label)
+pub async fn pro_activate(
+    telemetry: State<'_, DesktopTelemetry>,
+    invite_code: String,
+    label: String,
+) -> Result<Value, String> {
+    let _ = label;
+    let result = socai_core::cloud::redeem_invite(&invite_code)
         .await
-        .map(|status| serde_json::to_value(status).unwrap_or_else(|_| json!({})))
+        .map(|redemption| serde_json::to_value(redemption).unwrap_or_else(|_| json!({})))
+        .map_err(|err| format!("{err:#}"));
+    match &result {
+        Ok(redemption) => telemetry.capture(
+            "socai_invite_redeemed",
+            json!({
+                "outcome": "completed",
+                "added_points": redemption.get("added_points"),
+                "balance_points": redemption.get("balance_points"),
+                "duration_days": redemption.get("duration_days"),
+                "pro_active_until": redemption.get("active_until"),
+            }),
+        ),
+        Err(error) => telemetry.capture(
+            "socai_invite_redeemed",
+            json!({ "outcome": "failed", "error": short_error(error) }),
+        ),
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn auth_session() -> Result<socai_core::cloud::AuthSession, String> {
+    socai_core::cloud::auth_session().map_err(|err| format!("{err:#}"))
+}
+
+#[tauri::command]
+pub async fn auth_sms_send(
+    telemetry: State<'_, DesktopTelemetry>,
+    phone: String,
+) -> Result<socai_core::cloud::SmsChallengeResponse, String> {
+    let result = socai_core::cloud::send_sms_code(&phone)
+        .await
+        .map_err(|err| format!("{err:#}"));
+    telemetry.capture(
+        "socai_auth_sms_requested",
+        match &result {
+            Ok(_) => json!({ "account_phone": phone.trim(), "outcome": "completed" }),
+            Err(error) => json!({
+                "account_phone": phone.trim(),
+                "outcome": "failed",
+                "error": short_error(error),
+            }),
+        },
+    );
+    result
+}
+
+#[tauri::command]
+pub async fn auth_sms_verify(
+    telemetry: State<'_, DesktopTelemetry>,
+    challenge_id: String,
+    phone: String,
+    code: String,
+) -> Result<socai_core::cloud::AuthSession, String> {
+    let result = socai_core::cloud::verify_sms_code(&challenge_id, &phone, &code, "desktop")
+        .await
+        .map_err(|err| format!("{err:#}"));
+    telemetry.capture(
+        "socai_auth_login",
+        match &result {
+            Ok(session) => json!({
+                "account_phone": session.phone,
+                "account_device_id": session.device_id,
+                "outcome": "completed",
+            }),
+            Err(error) => json!({
+                "account_phone": phone.trim(),
+                "outcome": "failed",
+                "error": short_error(error),
+            }),
+        },
+    );
+    result
+}
+
+#[tauri::command]
+pub async fn auth_logout(telemetry: State<'_, DesktopTelemetry>) -> Result<(), String> {
+    let session = socai_core::cloud::auth_session().ok();
+    let result = socai_core::cloud::logout()
+        .await
+        .map_err(|err| format!("{err:#}"));
+    telemetry.capture(
+        "socai_auth_logout",
+        json!({
+            "account_phone": session.as_ref().map(|value| value.phone.as_str()),
+            "outcome": if result.is_ok() { "completed" } else { "failed" },
+            "error": result.as_ref().err().map(|error| short_error(error)),
+        }),
+    );
+    result
+}
+
+#[tauri::command]
+pub async fn billing_wallet(
+    telemetry: State<'_, DesktopTelemetry>,
+) -> Result<socai_core::cloud::WalletBalance, String> {
+    let result = socai_core::cloud::wallet_balance()
+        .await
+        .map_err(|err| format!("{err:#}"));
+    if let Ok(wallet) = &result {
+        telemetry.capture(
+            "socai_wallet_snapshot",
+            json!({
+                "balance_points": wallet.balance_points,
+                "starter_points": wallet.starter_points,
+                "points_per_cny": wallet.points_per_cny,
+                "pro_active_until": wallet.active_until,
+            }),
+        );
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn billing_plan() -> Result<socai_core::cloud::PaymentPlan, String> {
+    socai_core::cloud::payment_plan()
+        .await
         .map_err(|err| format!("{err:#}"))
+}
+
+#[tauri::command]
+pub async fn billing_create_wechat_order(
+    telemetry: State<'_, DesktopTelemetry>,
+    plan_id: String,
+    request_id: String,
+) -> Result<socai_core::cloud::PaymentOrder, String> {
+    let result = socai_core::cloud::create_wechat_order(&plan_id, &request_id)
+        .await
+        .map_err(|err| format!("{err:#}"));
+    capture_subscription_checkout(&telemetry, "wechatpay", &plan_id, &result);
+    result
+}
+
+#[tauri::command]
+pub async fn billing_create_alipay_order(
+    telemetry: State<'_, DesktopTelemetry>,
+    plan_id: String,
+    request_id: String,
+) -> Result<socai_core::cloud::PaymentOrder, String> {
+    let result = socai_core::cloud::create_alipay_order(&plan_id, &request_id)
+        .await
+        .map_err(|err| format!("{err:#}"));
+    capture_subscription_checkout(&telemetry, "alipay", &plan_id, &result);
+    result
+}
+
+#[tauri::command]
+pub async fn billing_order_status(
+    telemetry: State<'_, DesktopTelemetry>,
+    order_id: String,
+) -> Result<socai_core::cloud::PaymentOrder, String> {
+    let result = socai_core::cloud::payment_order(&order_id)
+        .await
+        .map_err(|err| format!("{err:#}"));
+    if let Ok(order) = &result {
+        if order.status == "paid" {
+            telemetry.capture(
+                "socai_subscription_paid",
+                json!({
+                    "order_id": order.order_id,
+                    "amount_fen": order.amount_fen,
+                    "added_points": order.points,
+                    "duration_days": order.duration_days,
+                    "pro_active_until": order.active_until,
+                }),
+            );
+        }
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn billing_mock_recharge(
+    telemetry: State<'_, DesktopTelemetry>,
+    points: i64,
+    request_id: String,
+) -> Result<socai_core::cloud::RechargeReceipt, String> {
+    let result = socai_core::cloud::mock_recharge(points, &request_id)
+        .await
+        .map_err(|err| format!("{err:#}"));
+    if let Ok(receipt) = &result {
+        telemetry.capture(
+            "socai_wallet_mock_recharge",
+            json!({
+                "added_points": receipt.added_points,
+                "balance_points": receipt.balance_points,
+                "amount_fen": receipt.amount_fen,
+            }),
+        );
+    }
+    result
+}
+
+fn capture_subscription_checkout(
+    telemetry: &DesktopTelemetry,
+    provider: &str,
+    plan_id: &str,
+    result: &Result<socai_core::cloud::PaymentOrder, String>,
+) {
+    telemetry.capture(
+        "socai_subscription_checkout",
+        match result {
+            Ok(order) => json!({
+                "provider": provider,
+                "plan_id": plan_id,
+                "outcome": "created",
+                "order_id": order.order_id,
+                "amount_fen": order.amount_fen,
+                "points": order.points,
+                "duration_days": order.duration_days,
+            }),
+            Err(error) => json!({
+                "provider": provider,
+                "plan_id": plan_id,
+                "outcome": "failed",
+                "error": short_error(error),
+            }),
+        },
+    );
 }
 
 #[tauri::command]

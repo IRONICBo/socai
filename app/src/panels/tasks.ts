@@ -20,6 +20,7 @@ import {
   noteRefsFromEvent,
   pendingSearchQuery,
   answerTextForTurn,
+  liveActivityMetricsText,
   renderComposePane,
   renderConversation,
   renderEventRow,
@@ -66,6 +67,10 @@ export namespace agentPanel {
   // opens the centered dialog by setting this; the delete only runs on confirm.
   let deleteRequestTaskId: string | null = null;
   let modelsCache: ModelInfo[] = [];
+  let remoteDebuggingReady = false;
+  let chromeSetupPollTimer: number | null = null;
+  let chromeSetupPollInFlight = false;
+  let chromeSetupStatus: ShellState["status"] = { state: "disconnected", reason: "starting" };
 
   // Explicit activity-fold choices, keyed `${taskId}#${turnIndex}`. Absent =
   // the default (open while that turn's run streams, folded otherwise). The
@@ -107,6 +112,14 @@ export namespace agentPanel {
     const models = await invoke<ModelInfo[]>("agent_list_models");
     setModels(models);
     return models;
+  }
+
+  export async function selectSocaiAgent(): Promise<void> {
+    const picked = modelsCache.find((item) => item.provider === "socai" && item.recommended)
+      ?? modelsCache.find((item) => item.provider === "socai");
+    if (!picked) return;
+    selectModelInfo(picked);
+    await persistModelChoice(picked);
   }
 
   export function setTasks(snapshots: AgentTaskSnapshot[]): void {
@@ -206,11 +219,11 @@ export namespace agentPanel {
     }
     // Refresh the snapshot too: tokens/steps accumulate into run.json after
     // every LLM step, but no agent event carries them mid-run — this keeps the
-    // state fresh so the answer meta / activity summary are right the moment
-    // the terminal render lands. Nothing displays them mid-run, so no DOM
-    // update happens here.
+    // state fresh so the running activity summary and eventual answer meta
+    // show the current run's own figures without replacing earlier turns.
     try {
       upsertTask(await invoke<AgentTaskSnapshot>("agent_task_get", { taskId: task.task_id }));
+      updateLiveTaskMetrics(task);
     } catch (e) {
       console.error("agent_task_get poll failed:", e);
     }
@@ -224,6 +237,12 @@ export namespace agentPanel {
     } catch (e) {
       console.error("agent_task_notes poll failed:", e);
     }
+  }
+
+  function updateLiveTaskMetrics(task: AgentTaskView): void {
+    const stream = document.querySelector<HTMLDivElement>(`[data-agent-events="${task.task_id}"]`);
+    const metrics = stream?.querySelector<HTMLElement>(".thread-inner > .turn:last-child [data-turn-metrics]");
+    if (metrics) metrics.textContent = liveActivityMetricsText(task);
   }
 
   let liveStripKey = "";
@@ -413,13 +432,27 @@ export namespace agentPanel {
     return true;
   }
 
+  export function currentModelLabel(): string {
+    const selected = selectedModel();
+    if (!selected) return t("agent.label");
+    return selected.provider === "socai"
+      ? providerDisplayLabel(selected)
+      : modelDisplayLabel(selected);
+  }
+
+  export function renderAccountConfig(): string {
+    return `<div class="agent-account-config">${renderConfigContent()}</div>`;
+  }
+
   function renderAgentBadge(): string {
     const selected = selectedModel();
     const expanded = configOpen || selectedNeedsKey() ? "true" : "false";
     if (!selected) {
       return `<button id="agent-config-toggle" type="button" class="badge badge-button" aria-expanded="${expanded}"><i class="badge-dot badge-dot-muted" aria-hidden="true"></i><span class="badge-text">${esc(t("agent.label"))} · ${esc(t("agent.loading"))}</span></button>`;
     }
-    const label = modelDisplayLabel(selected);
+    const label = selected.provider === "socai"
+      ? providerDisplayLabel(selected)
+      : modelDisplayLabel(selected);
     if (!selected.has_key) {
       return `<button id="agent-config-toggle" type="button" class="badge badge-button" aria-expanded="${expanded}"><i class="badge-dot badge-dot-hollow" aria-hidden="true"></i><span class="badge-text">${esc(t("agent.label"))} · ${esc(label)} · ${esc(t("agent.keyNeeded"))}</span></button>`;
     }
@@ -427,6 +460,14 @@ export namespace agentPanel {
   }
 
   function renderConfigPopover(): string {
+    return `
+      <div class="topbar-popover agent-config-popover" role="dialog" aria-label="${esc(t("agent.configurationAria"))}">
+        ${renderConfigContent()}
+      </div>
+    `;
+  }
+
+  function renderConfigContent(): string {
     const selected = selectedModel();
     const disabled = savingKey || submittingTask;
     const activeProvider = modelProvider || selected?.provider || providerSummaries()[0]?.provider || "";
@@ -438,7 +479,9 @@ export namespace agentPanel {
         const dotClass = active ? "badge-dot-ink" : "badge-dot-hollow";
         const flag = provider.hasKey ? "" : `<span class="t-small subtle">${esc(t("agent.keyNeeded"))}</span>`;
         const selectedForProvider = preferredModelForProvider(provider.provider);
-        const hint = selectedForProvider ? modelNameLabel(selectedForProvider) : t("common.loading");
+        const hint = provider.provider === "socai"
+          ? t("agent.managedModel")
+          : selectedForProvider ? modelNameLabel(selectedForProvider) : t("common.loading");
         return `
           <button
             type="button"
@@ -468,32 +511,30 @@ export namespace agentPanel {
       .join("");
 
     return `
-      <div class="topbar-popover agent-config-popover" role="dialog" aria-label="${esc(t("agent.configurationAria"))}">
-        <section class="agent-config-field">
-          <p class="t-eyebrow agent-config-title">${esc(t("agent.provider"))}</p>
-          <div class="agent-model-list agent-provider-list" role="listbox" aria-label="${esc(t("agent.selectProviderAria"))}">
-            ${providerOptions || `<p class="t-small subtle agent-picker-empty">${esc(t("common.loading"))}</p>`}
-          </div>
-        </section>
-        ${renderCredentialSection(activeModel)}
-        <section class="agent-config-field">
-          <label class="t-eyebrow agent-config-title" for="agent-model-select">${esc(t("agent.modelVersion"))}</label>
-          <select
-            id="agent-model-select"
-            class="input-field agent-model-select"
-            data-provider="${esc(activeProvider)}"
-            aria-label="${esc(t("agent.selectModelAria"))}"
-            ${disabled || modelRows.length === 0 ? "disabled" : ""}
-          >
-            ${modelOptions}
-          </select>
-        </section>
-      </div>
+      <section class="agent-config-field">
+        <div class="agent-model-list agent-provider-list" role="listbox" aria-label="${esc(t("agent.selectProviderAria"))}">
+          ${providerOptions || `<p class="t-small subtle agent-picker-empty">${esc(t("common.loading"))}</p>`}
+        </div>
+      </section>
+      ${renderCredentialSection(activeModel)}
+      ${activeProvider === "socai" ? "" : `<section class="agent-config-field">
+        <label class="t-eyebrow agent-config-title" for="agent-model-select">${esc(t("agent.modelVersion"))}</label>
+        <select
+          id="agent-model-select"
+          class="input-field agent-model-select"
+          data-provider="${esc(activeProvider)}"
+          aria-label="${esc(t("agent.selectModelAria"))}"
+          ${disabled || modelRows.length === 0 ? "disabled" : ""}
+        >
+          ${modelOptions}
+        </select>
+      </section>`}
     `;
   }
 
   function renderCredentialSection(selected: ModelInfo | undefined): string {
     if (!selected) return "";
+    if (selected.provider === "socai") return "";
     if (selected.has_key && !editingKey) return renderCredentialConfigured(selected);
     return renderHeaderKeyEntry(selected);
   }
@@ -505,7 +546,9 @@ export namespace agentPanel {
         <p class="t-small subtle">${esc(
           selected.credential_kind === "codex_oauth"
             ? t("agent.chatgptConnected")
-            : t("agent.credentialConfigured", { provider: providerDisplayLabel(selected) }),
+            : t("agent.credentialPreview", {
+                preview: selected.credential_preview || t("agent.apiKey"),
+              }),
         )}</p>
         <div class="agent-config-actions">
           <button id="agent-header-key-edit" type="button" class="btn-ghost btn-compact" ${savingKey || submittingTask ? "disabled" : ""}>
@@ -584,10 +627,10 @@ export namespace agentPanel {
     if (info && model) modelByProvider.set(info.provider, model);
   }
 
-  function persistModelChoice(info: ModelInfo): void {
+  function persistModelChoice(info: ModelInfo): Promise<void> {
     const id = modelId(info);
-    if (!id) return;
-    invoke("agent_set_default_model", { provider: info.provider, model: id }).catch(
+    if (!id) return Promise.resolve();
+    return invoke<void>("agent_set_default_model", { provider: info.provider, model: id }).catch(
       (err) => console.error("agent_set_default_model failed:", err),
     );
   }
@@ -720,6 +763,7 @@ export namespace agentPanel {
       modelReady: !!selected && selected.has_key,
       running: false,
       remoteProfile: settingsMenu.isRemoteProfile(),
+      remoteDebuggingReady,
     };
   }
 
@@ -733,6 +777,7 @@ export namespace agentPanel {
       modelReady: true,
       running,
       remoteProfile: settingsMenu.isRemoteProfile(),
+      remoteDebuggingReady,
     };
   }
 
@@ -883,6 +928,7 @@ export namespace agentPanel {
   // The pinned composer: one input, two modes. Compose mode (no task shown)
   // starts a fresh task; a shown task takes a follow-up reply instead.
   function bindComposer(shell: ShellState): void {
+    syncChromeSetupDetection(shell);
     const composerTask = view === "compose" ? undefined : selectedTask();
     const input = document.getElementById("composer-input") as HTMLTextAreaElement | null;
     if (input) autosizeComposerInput(input);
@@ -908,21 +954,57 @@ export namespace agentPanel {
     document.getElementById("composer-connect")?.addEventListener("click", () => {
       invoke("cdp_connect").catch((e) => console.error("cdp_connect failed:", e));
     });
-    // The compose pane's connect-overlay CTA.
     document.getElementById("overlay-chrome-connect")?.addEventListener("click", () => {
       invoke("cdp_connect").catch((e) => console.error("cdp_connect failed:", e));
     });
-    // WKWebView marks target=_blank navigation as defaultPrevented before the
-    // document-level external-link delegate runs. Bind this help link directly
-    // so it reaches the same backend opener first; the global delegate then
-    // sees the prevented event and correctly avoids a duplicate open.
+    // chrome:// pages cannot be navigated to from ordinary web content. Route
+    // the explicit user click through the native shell so Chrome opens its own
+    // privileged remote-debugging page.
     document.getElementById("overlay-remote-debugging-help")?.addEventListener("click", (event) => {
       event.preventDefault();
-      const href = (event.currentTarget as HTMLAnchorElement).getAttribute("href");
-      if (href) {
-        invoke("open_external", { url: href }).catch((e) => console.error("open_external failed:", e));
-      }
+      remoteDebuggingReady = false;
+      invoke("open_chrome_remote_debugging")
+        .then(() => pollChromeSetup(shell))
+        .catch((e) => console.error("open_chrome_remote_debugging failed:", e));
     });
+  }
+
+  function syncChromeSetupDetection(shell: ShellState): void {
+    chromeSetupStatus = shell.status;
+
+    const overlayVisible = document.getElementById("overlay-remote-debugging-help") !== null;
+    if (!overlayVisible || shell.status.state === "connected" || settingsMenu.isRemoteProfile()) {
+      stopChromeSetupPolling();
+      if (shell.status.state === "connected") {
+        remoteDebuggingReady = true;
+      }
+      return;
+    }
+
+    if (chromeSetupPollTimer === null) {
+      chromeSetupPollTimer = window.setInterval(() => void pollChromeSetup(shell), 1_000);
+    }
+    void pollChromeSetup(shell);
+  }
+
+  function stopChromeSetupPolling(): void {
+    if (chromeSetupPollTimer !== null) window.clearInterval(chromeSetupPollTimer);
+    chromeSetupPollTimer = null;
+  }
+
+  async function pollChromeSetup(shell: ShellState): Promise<void> {
+    if (chromeSetupPollInFlight || chromeSetupStatus.state === "connected") return;
+    chromeSetupPollInFlight = true;
+    try {
+      const ready = await invoke<boolean>("cdp_remote_debugging_ready");
+      const changed = ready !== remoteDebuggingReady;
+      remoteDebuggingReady = ready;
+      if (changed) shell.rerender();
+    } catch (e) {
+      console.error("cdp_remote_debugging_ready failed:", e);
+    } finally {
+      chromeSetupPollInFlight = false;
+    }
   }
 
   // Toggling `disabled` on every keystroke via a full shell.rerender() would
@@ -1125,6 +1207,7 @@ export namespace agentPanel {
         incoming.cache_creation_input_tokens ?? existing.cache_creation_input_tokens,
       estimated_cost: incoming.estimated_cost ?? existing.estimated_cost,
       cost_currency: incoming.cost_currency ?? existing.cost_currency,
+      points_used: incoming.points_used ?? existing.points_used,
     };
   }
 

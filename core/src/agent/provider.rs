@@ -14,6 +14,8 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Provider {
+    /// The model selected by the authenticated socai hosted gateway.
+    Socai,
     Anthropic,
     OpenAI,
     Kimi,
@@ -32,6 +34,7 @@ pub enum Provider {
 impl Provider {
     pub fn as_str(self) -> &'static str {
         match self {
+            Provider::Socai => "socai",
             Provider::Anthropic => "anthropic",
             Provider::OpenAI => "openai",
             Provider::Kimi => "kimi",
@@ -44,6 +47,7 @@ impl Provider {
 
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
+            "socai" | "socai-cloud" | "hosted" => Some(Self::Socai),
             "anthropic" | "claude" => Some(Self::Anthropic),
             "openai" | "gpt" => Some(Self::OpenAI),
             "kimi" | "moonshot" => Some(Self::Kimi),
@@ -59,6 +63,7 @@ impl Provider {
     /// same model lineup as mainland Qwen, so both share the "qwen" entry.
     fn catalog_key(self) -> &'static str {
         match self {
+            Provider::Socai => Provider::Socai.as_str(),
             Provider::QwenIntl => Provider::Qwen.as_str(),
             other => other.as_str(),
         }
@@ -181,6 +186,16 @@ pub enum CredentialKind {
 /// explicitly chosen.
 pub static PROVIDERS: &[ProviderConfig] = &[
     ProviderConfig {
+        provider: Provider::Socai,
+        display_name: "Socai Agent",
+        // Opaque by design: the server owns the concrete hosted model and may
+        // change it without requiring a desktop release.
+        default_model: "managed",
+        env_keys: &[],
+        base_url: None,
+        model_prefixes: &[],
+    },
+    ProviderConfig {
         provider: Provider::Anthropic,
         display_name: "Anthropic",
         default_model: "claude-sonnet-5",
@@ -207,7 +222,7 @@ pub static PROVIDERS: &[ProviderConfig] = &[
     ProviderConfig {
         provider: Provider::Qwen,
         display_name: "Qwen",
-        default_model: "qwen3.7-plus",
+        default_model: "qwen3.7-max",
         env_keys: &["QWEN_API_KEY", "DASHSCOPE_API_KEY"],
         base_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
         model_prefixes: &["qwen", "qwq-", "qvq-"],
@@ -215,7 +230,7 @@ pub static PROVIDERS: &[ProviderConfig] = &[
     ProviderConfig {
         provider: Provider::QwenIntl,
         display_name: "Qwen International",
-        default_model: "qwen3.7-plus",
+        default_model: "qwen3.7-max",
         env_keys: &["QWEN_INTL_API_KEY", "DASHSCOPE_INTL_API_KEY"],
         base_url: Some("https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
         // Model ids are identical to mainland Qwen, so prefix inference
@@ -382,6 +397,11 @@ pub fn provider_credential_kind(provider: Provider) -> Option<CredentialKind> {
 }
 
 pub fn load_provider_credential(provider: Provider) -> Option<Credential> {
+    if provider == Provider::Socai {
+        return crate::cloud::llm_gateway_config()
+            .ok()
+            .map(|config| Credential::ApiKey(config.device_token));
+    }
     if provider == Provider::OpenAI {
         return load_openai_credential();
     }
@@ -632,6 +652,7 @@ mod tests {
 
     #[test]
     fn from_name_aliases() {
+        assert_eq!(Provider::from_name("hosted"), Some(Provider::Socai));
         assert_eq!(Provider::from_name("claude"), Some(Provider::Anthropic));
         assert_eq!(Provider::from_name("MOONSHOT"), Some(Provider::Kimi));
         assert_eq!(Provider::from_name("DashScope"), Some(Provider::Qwen));
@@ -644,6 +665,7 @@ mod tests {
     #[test]
     fn config_for_each_variant() {
         for p in [
+            Provider::Socai,
             Provider::Anthropic,
             Provider::OpenAI,
             Provider::Kimi,
