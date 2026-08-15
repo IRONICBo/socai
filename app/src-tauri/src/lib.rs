@@ -248,6 +248,18 @@ pub fn run() {
                         RuntimeBrowserEvent::TargetsChanged(targets) => {
                             let generation =
                                 browser_event_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                            for snapshot in tasks.rebind_missing_targets(&targets).await {
+                                let task_id = snapshot.task_id.clone();
+                                commands::emit_task_event(
+                                    &handle,
+                                    &tasks,
+                                    &task_id,
+                                    "tab_rebound",
+                                    "chrome target rebound after reconnect".into(),
+                                    Some(snapshot),
+                                )
+                                .await;
+                            }
                             let active_targets: HashSet<String> =
                                 targets.into_iter().map(|target| target.target_id).collect();
                             let interruption_reason = latest_disconnect_reason
