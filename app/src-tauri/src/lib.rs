@@ -5,12 +5,82 @@ mod telemetry;
 mod timeline;
 
 use std::collections::HashSet;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+use std::time::Duration;
 
 use serde_json::json;
 use socai_core::runtime::{RuntimeBrowserEvent, SocaiRuntime};
 use tasks::AgentTaskRegistry;
 use tauri::{Emitter, Manager};
 use telemetry::{duration_ms, DesktopTelemetry};
+
+const BROWSER_RECOVERY_GRACE: Duration = Duration::from_secs(15);
+
+async fn interrupt_missing_browser_targets(
+    active_targets: HashSet<String>,
+    interruption_reason: String,
+    tasks: AgentTaskRegistry,
+    telemetry: DesktopTelemetry,
+    handle: tauri::AppHandle,
+) {
+    for (mut snapshot, abort_handle) in tasks
+        .interrupt_missing_targets(&active_targets, &interruption_reason)
+        .await
+    {
+        let task_id = snapshot.task_id.clone();
+        if snapshot.provider.as_deref() == Some("socai") && socai_core::cloud::pro_activated() {
+            if let Some(settlement) =
+                commands::settle_hosted_task_with_retry(&task_id, "interrupted").await
+            {
+                if let Some(updated) = tasks
+                    .update(&task_id, |task| {
+                        task.points_used =
+                            commands::visible_billed_points(task.provider.as_deref(), &settlement);
+                    })
+                    .await
+                {
+                    snapshot = updated;
+                }
+            }
+        }
+        if let Some(handle) = abort_handle {
+            handle.abort();
+        }
+        commands::persist_run_points_used(snapshot.run_dir.as_deref(), snapshot.points_used);
+        commands::record_interrupted_run(&snapshot, &interruption_reason);
+        if let Some(run_dir) = snapshot.run_dir.as_deref() {
+            commands::upload_terminal_run_trace(run_dir, "interrupted", &telemetry).await;
+        }
+        telemetry.capture(
+            "socai_agent_task_end",
+            json!({
+                "task_id": task_id.clone(),
+                "provider": snapshot.provider.clone(),
+                "run_id": snapshot.run_id.clone(),
+                "model": snapshot.model.clone(),
+                "outcome": "interrupted",
+                "steps": snapshot.steps,
+                "input_tokens": snapshot.input_tokens,
+                "output_tokens": snapshot.output_tokens,
+                "points_used": snapshot.points_used,
+                "duration_ms": duration_ms(snapshot.started_at, snapshot.finished_at),
+                "error": crate::telemetry::short_error(&interruption_reason),
+            }),
+        );
+        commands::emit_task_event(
+            &handle,
+            &tasks,
+            &task_id,
+            "interrupted",
+            interruption_reason.clone(),
+            Some(snapshot),
+        )
+        .await;
+    }
+}
 
 /// macOS: attach an empty unified toolbar so AppKit itself lays the native
 /// traffic lights out on a tall (~52px) titlebar, vertically centered — the
@@ -95,6 +165,8 @@ pub fn run() {
 
                 let mut rx = runtime.subscribe_browser_events();
                 let mut latest_disconnect_reason: Option<String> = None;
+                let mut recoverable_disconnect = false;
+                let browser_event_generation = Arc::new(AtomicU64::new(0));
                 while let Ok(event) = rx.recv().await {
                     match event {
                         RuntimeBrowserEvent::StatusChanged(payload) => {
@@ -107,7 +179,9 @@ pub fn run() {
                                     remote_remaining_seconds,
                                     ..
                                 } => {
+                                    browser_event_generation.fetch_add(1, Ordering::SeqCst);
                                     latest_disconnect_reason = None;
+                                    recoverable_disconnect = false;
                                     let profile = if *remote {
                                         "remote"
                                     } else if *managed {
@@ -146,89 +220,65 @@ pub fn run() {
                             }
                             let _ = handle.emit("cdp:status_changed", payload);
                         }
+                        RuntimeBrowserEvent::Interruption {
+                            interruption_kind,
+                            reason,
+                            ..
+                        } => {
+                            recoverable_disconnect = matches!(
+                                interruption_kind,
+                                socai_core::cdp::BrowserInterruptionKind::TransportDisconnected
+                                    | socai_core::cdp::BrowserInterruptionKind::RemoteLeaseExpired
+                            );
+                            latest_disconnect_reason = Some(reason.clone());
+                            let _ = handle.emit(
+                                "cdp:recovery_changed",
+                                json!({
+                                    "status": if recoverable_disconnect { "recovering" } else { "terminal" },
+                                    "kind": interruption_kind,
+                                    "reason": reason,
+                                    "grace_seconds": if recoverable_disconnect {
+                                        Some(BROWSER_RECOVERY_GRACE.as_secs())
+                                    } else {
+                                        None
+                                    },
+                                }),
+                            );
+                        }
                         RuntimeBrowserEvent::TargetsChanged(targets) => {
+                            let generation =
+                                browser_event_generation.fetch_add(1, Ordering::SeqCst) + 1;
                             let active_targets: HashSet<String> =
                                 targets.into_iter().map(|target| target.target_id).collect();
                             let interruption_reason = latest_disconnect_reason
                                 .clone()
                                 .unwrap_or_else(|| "chrome tab was closed".into());
-                            for (mut snapshot, abort_handle) in tasks
-                                .interrupt_missing_targets(&active_targets, &interruption_reason)
-                                .await
-                            {
-                                let task_id = snapshot.task_id.clone();
-                                // The registry marks the task interrupted before this
-                                // branch runs. Settle hosted usage while the runner still
-                                // holds the single-task permit, so a queued
-                                // task cannot race the server cleanup and receive a 409
-                                // for this now-terminal task.
-                                if snapshot.provider.as_deref() == Some("socai")
-                                    && socai_core::cloud::pro_activated()
-                                {
-                                    if let Some(settlement) =
-                                        commands::settle_hosted_task_with_retry(
-                                            &task_id,
-                                            "interrupted",
-                                        )
-                                        .await
-                                    {
-                                        if let Some(updated) = tasks
-                                            .update(&task_id, |task| {
-                                                task.points_used = commands::visible_billed_points(
-                                                    task.provider.as_deref(),
-                                                    &settlement,
-                                                );
-                                            })
-                                            .await
-                                        {
-                                            snapshot = updated;
-                                        }
+                            if active_targets.is_empty() && recoverable_disconnect {
+                                let generation_counter = browser_event_generation.clone();
+                                let delayed_tasks = tasks.clone();
+                                let delayed_telemetry = telemetry.clone();
+                                let delayed_handle = handle.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    tokio::time::sleep(BROWSER_RECOVERY_GRACE).await;
+                                    if generation_counter.load(Ordering::SeqCst) != generation {
+                                        return;
                                     }
-                                }
-                                if let Some(handle) = abort_handle {
-                                    handle.abort();
-                                }
-                                commands::persist_run_points_used(
-                                    snapshot.run_dir.as_deref(),
-                                    snapshot.points_used,
-                                );
-                                commands::record_interrupted_run(&snapshot, &interruption_reason);
-                                if let Some(run_dir) = snapshot.run_dir.as_deref() {
-                                    commands::upload_terminal_run_trace(
-                                        run_dir,
-                                        "interrupted",
-                                        &telemetry,
+                                    interrupt_missing_browser_targets(
+                                        active_targets,
+                                        interruption_reason,
+                                        delayed_tasks,
+                                        delayed_telemetry,
+                                        delayed_handle,
                                     )
                                     .await;
-                                }
-                                telemetry.capture(
-                                    "socai_agent_task_end",
-                                    json!({
-                                        "task_id": task_id.clone(),
-                                        "provider": snapshot.provider.clone(),
-                                        "run_id": snapshot.run_id.clone(),
-                                        "model": snapshot.model.clone(),
-                                        "outcome": "interrupted",
-                                        "steps": snapshot.steps,
-                                        "input_tokens": snapshot.input_tokens,
-                                        "output_tokens": snapshot.output_tokens,
-                                        "points_used": snapshot.points_used,
-                                        "duration_ms": duration_ms(
-                                            snapshot.started_at,
-                                            snapshot.finished_at,
-                                        ),
-                                        "error": crate::telemetry::short_error(
-                                            &interruption_reason,
-                                        ),
-                                    }),
-                                );
-                                commands::emit_task_event(
-                                    &handle,
-                                    &tasks,
-                                    &task_id,
-                                    "interrupted",
-                                    interruption_reason.clone(),
-                                    Some(snapshot),
+                                });
+                            } else {
+                                interrupt_missing_browser_targets(
+                                    active_targets,
+                                    interruption_reason,
+                                    tasks.clone(),
+                                    telemetry.clone(),
+                                    handle.clone(),
                                 )
                                 .await;
                             }

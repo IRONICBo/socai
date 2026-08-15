@@ -270,6 +270,19 @@ impl From<&CdpState> for StatusPayload {
 pub enum BrowserEvent {
     StatusChanged(StatusPayload),
     TargetsChanged(Vec<TargetInfo>),
+    Interruption {
+        interruption_kind: BrowserInterruptionKind,
+        reason: String,
+        target_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserInterruptionKind {
+    TargetClosedByUser,
+    TransportDisconnected,
+    RemoteLeaseExpired,
 }
 
 /// Connection state + event broadcast. Cheaply cloneable; each clone shares the

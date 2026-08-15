@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use tracing::{debug, warn};
 
 use crate::cdp::connection::{
-    page_list_from, BrowserEvent, BrowserOwner, Cdp, CdpState, ChromeConnectOptions, ChromeProfile,
-    RemoteSession, StatusPayload, TargetInfo,
+    page_list_from, BrowserEvent, BrowserInterruptionKind, BrowserOwner, Cdp, CdpState,
+    ChromeConnectOptions, ChromeProfile, RemoteSession, StatusPayload, TargetInfo,
 };
 use crate::cdp::endpoint::{self, Endpoint};
 use crate::cdp::launch;
@@ -495,7 +495,7 @@ async fn on_connection_lost(cdp: Cdp, transport_error: String) {
     if !matches!(*guard, CdpState::Connected { .. }) {
         return;
     }
-    let reason = match &*guard {
+    let interruption_kind = match &*guard {
         CdpState::Connected {
             owner: BrowserOwner::Remote(session),
             ..
@@ -504,11 +504,21 @@ async fn on_connection_lost(cdp: Cdp, transport_error: String) {
             .saturating_duration_since(std::time::Instant::now())
             <= Duration::from_secs(30) =>
         {
-            format!(
-                "remote browser session expired after {}s; transport error: {transport_error}",
-                session.timeout.as_secs()
-            )
+            BrowserInterruptionKind::RemoteLeaseExpired
         }
+        _ => BrowserInterruptionKind::TransportDisconnected,
+    };
+    let reason = match (&*guard, interruption_kind) {
+        (
+            CdpState::Connected {
+                owner: BrowserOwner::Remote(session),
+                ..
+            },
+            BrowserInterruptionKind::RemoteLeaseExpired,
+        ) => format!(
+            "remote browser session expired after {}s; transport error: {transport_error}",
+            session.timeout.as_secs()
+        ),
         _ => format!("cdp connection lost; transport error: {transport_error}"),
     };
     warn!(error = %reason, "cdp connection lost");
@@ -518,6 +528,15 @@ async fn on_connection_lost(cdp: Cdp, transport_error: String) {
     };
     *guard = CdpState::Disconnected { reason };
     let payload: StatusPayload = (&*guard).into();
+    let reason = match &payload {
+        StatusPayload::Disconnected { reason } => reason.clone(),
+        _ => String::new(),
+    };
+    cdp.emit(BrowserEvent::Interruption {
+        interruption_kind,
+        reason,
+        target_id: None,
+    });
     cdp.emit(BrowserEvent::StatusChanged(payload));
     cdp.emit(BrowserEvent::TargetsChanged(Vec::new()));
     drop(guard);
@@ -594,8 +613,15 @@ fn spawn_target_poll_loop(cdp: Cdp, browser_client: RawCdpClient) -> tokio::task
             match browser_ws_targets(&browser_client).await {
                 Ok(targets) => {
                     failures = 0;
-                    if let Some(pages) = replace_targets(&cdp, targets).await {
-                        cdp.emit(BrowserEvent::TargetsChanged(pages));
+                    if let Some(change) = replace_targets(&cdp, targets).await {
+                        for target_id in change.closed_page_ids {
+                            cdp.emit(BrowserEvent::Interruption {
+                                interruption_kind: BrowserInterruptionKind::TargetClosedByUser,
+                                reason: "chrome tab was closed by user".into(),
+                                target_id: Some(target_id),
+                            });
+                        }
+                        cdp.emit(BrowserEvent::TargetsChanged(change.pages));
                     }
                 }
                 Err(err) => {
@@ -614,10 +640,15 @@ fn spawn_target_poll_loop(cdp: Cdp, browser_client: RawCdpClient) -> tokio::task
 
 /// Replace cached targets. Returns the new visible page list when it changed;
 /// `None` means either no visible page change or the connection is inactive.
+struct TargetChange {
+    pages: Vec<TargetInfo>,
+    closed_page_ids: Vec<String>,
+}
+
 async fn replace_targets(
     cdp: &Cdp,
     next_targets: HashMap<String, TargetInfo>,
-) -> Option<Vec<TargetInfo>> {
+) -> Option<TargetChange> {
     let state = cdp.state();
     let mut guard = state.lock().await;
     let CdpState::Connected { targets, .. } = &mut *guard else {
@@ -625,8 +656,16 @@ async fn replace_targets(
     };
     let before = page_list_from(targets);
     let after = page_list_from(&next_targets);
+    let closed_page_ids = before
+        .iter()
+        .filter(|target| !next_targets.contains_key(&target.target_id))
+        .map(|target| target.target_id.clone())
+        .collect();
     *targets = next_targets;
-    (before != after).then_some(after)
+    (before != after).then_some(TargetChange {
+        pages: after,
+        closed_page_ids,
+    })
 }
 
 async fn browser_ws_targets(client: &RawCdpClient) -> anyhow::Result<HashMap<String, TargetInfo>> {
