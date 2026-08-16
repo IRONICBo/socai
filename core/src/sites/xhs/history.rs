@@ -1,9 +1,12 @@
-//! Cross-run XHS analysis history. Tracks which notes have already been
-//! analyzed (and at what level) in a project-local JSON file so the agent
-//! can skip repeats across separate runs.
+//! XHS analysis cache with conversation-scoped de-duplication. Note entities
+//! and enrichment coverage are stored once in a global asset map; each
+//! conversation stores only the note ids it has seen.
 //!
 //! - In-run dedup still lives on `ToolContext::processed_notes`; this store
-//!   only handles cross-run persistence.
+//!   carries the same decision across follow-up runs in one conversation.
+//! - A conversation reference gates de-duplication. A note seen only in a
+//!   different conversation remains eligible, while conversations that already
+//!   reference it reuse the latest global asset.
 //! - Besides the lookup metadata (`note_id`, `title`, `author`, `url`, `level`,
 //!   `include_media`, `analysis_count`, `first_seen_at`, `last_seen_at`) we also
 //!   cache the full last-read `entity` (body + comments + images + location), so
@@ -12,10 +15,10 @@
 //!   per-run logs and would mostly point at stale paths anyway.
 //! - File at `~/.socai/xhs/history.json` (overridable via `SOCAI_HOME`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -73,8 +76,37 @@ pub struct HistoryEntry {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct HistoryFile {
+    /// Schema version 0/1 used the global `notes` map alone; version 3 copied
+    /// complete entries into `session_notes`; version 4 keeps global assets and
+    /// conversation references separately.
+    #[serde(default)]
+    version: u32,
+    /// Canonical note assets. Existing version 0/1 files already use this
+    /// shape, so their entities stay readable without a destructive migration.
     #[serde(default)]
     notes: BTreeMap<String, HistoryEntry>,
+    /// Lightweight conversation pointers. Presence of a note id in this set
+    /// controls de-duplication; the corresponding entity lives in `notes`.
+    #[serde(default)]
+    session_refs: BTreeMap<String, BTreeSet<String>>,
+    /// Version 3 compatibility input. `normalize_loaded_entries` moves these
+    /// entries into `notes` + `session_refs`; the field is never serialized.
+    #[serde(default, rename = "session_notes", skip_serializing)]
+    legacy_session_notes: BTreeMap<String, BTreeMap<String, HistoryEntry>>,
+    /// Deleted conversation ids. A tombstone prevents a background download
+    /// that completed just after deletion from recreating that session.
+    #[serde(default)]
+    removed_sessions: BTreeSet<String>,
+}
+
+const HISTORY_VERSION: u32 = 4;
+
+/// All store instances in this process share the same history file. Serialize
+/// refresh/mutate/save sequences so foreground scans and background media
+/// completions cannot overwrite each other's newer snapshots.
+fn history_io_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 pub struct XhsHistoryStore {
@@ -101,6 +133,9 @@ impl XhsHistoryStore {
 
     pub fn open(path: impl AsRef<Path>) -> Self {
         let path = path.as_ref().to_path_buf();
+        let _io = history_io_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut inner = load_file(&path).unwrap_or_default();
         normalize_loaded_entries(&mut inner);
         Self {
@@ -109,12 +144,27 @@ impl XhsHistoryStore {
         }
     }
 
-    pub fn get(&self, note_id: &str) -> Option<HistoryEntry> {
+    pub fn get(&self, session_id: &str, note_id: &str) -> Option<HistoryEntry> {
+        let session_id = session_id.trim();
         let id = note_id.trim();
-        if id.is_empty() {
+        if session_id.is_empty() || id.is_empty() {
             return None;
         }
-        let guard = self.inner.lock().ok()?;
+        let _io = history_io_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        refresh_from_disk(&self.path, &mut guard);
+        if !guard
+            .session_refs
+            .get(session_id)
+            .is_some_and(|refs| refs.contains(id))
+        {
+            return None;
+        }
         guard.notes.get(id).cloned()
     }
 
@@ -122,25 +172,36 @@ impl XhsHistoryStore {
     /// return complete data). False for pre-upgrade entries that only stored
     /// lookup metadata — those should be re-read to backfill the cache.
     /// Cheap: checks presence without cloning the entity.
-    pub fn has_cached_entity(&self, note_id: &str) -> bool {
+    pub fn has_cached_entity(&self, session_id: &str, note_id: &str) -> bool {
+        let session_id = session_id.trim();
         let id = note_id.trim();
-        if id.is_empty() {
+        if session_id.is_empty() || id.is_empty() {
             return false;
         }
-        let Ok(guard) = self.inner.lock() else {
-            return false;
-        };
+        let _io = history_io_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        refresh_from_disk(&self.path, &mut guard);
         guard
-            .notes
-            .get(id)
-            .is_some_and(|entry| entry.entity.is_some())
+            .session_refs
+            .get(session_id)
+            .is_some_and(|refs| refs.contains(id))
+            && guard
+                .notes
+                .get(id)
+                .is_some_and(|entry| entry.entity.is_some())
     }
 
-    /// True when a prior analysis already covers what's being requested: recorded
-    /// level is >= requested AND every requested enrichment (vision, downloaded
-    /// media, OCR) was present in a prior read. This is what lets a repeated
-    /// search/scan reuse the cached entity instead of re-opening, re-downloading,
-    /// and re-OCR'ing the same note.
+    /// True when this session's prior analysis already covers what's being
+    /// requested: this conversation references the note, recorded level is >=
+    /// requested, and every requested enrichment (vision, downloaded media,
+    /// OCR) is available in the shared asset. Another conversation can enrich
+    /// that asset, but cannot create this conversation's reference or cause a
+    /// first-time note to be skipped here.
     ///
     /// A download request is additionally checked against the disk: cached
     /// `local_path`s point into the run dir that downloaded them, and run dirs
@@ -148,8 +209,10 @@ impl XhsHistoryStore {
     /// file is gone the request is not satisfied, so the note is re-read and
     /// re-downloaded into the current run instead of being archived media-less
     /// on every future reuse.
+    #[allow(clippy::too_many_arguments)]
     pub fn is_satisfied_by(
         &self,
+        session_id: &str,
         note_id: &str,
         level: &str,
         include_media: bool,
@@ -158,7 +221,7 @@ impl XhsHistoryStore {
         transcribe_audio: bool,
         min_comments: i64,
     ) -> bool {
-        let Some(prev) = self.get(note_id) else {
+        let Some(prev) = self.get(session_id, note_id) else {
             return false;
         };
         if level_value(&prev.level) < level_value(level) {
@@ -196,12 +259,24 @@ impl XhsHistoryStore {
     }
 
     /// Add `already_analyzed` / `history_level` / `history_include_media`
-    /// flags onto any card whose `note_id` is in the store. Mutates in place.
-    pub fn annotate_cards(&self, cards: &mut Value) {
-        let Ok(guard) = self.inner.lock() else {
+    /// flags onto cards previously seen in this session. Mutates in place.
+    pub fn annotate_cards(&self, session_id: &str, cards: &mut Value) {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return;
+        }
+        let _io = history_io_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        refresh_from_disk(&self.path, &mut guard);
+        let Some(refs) = guard.session_refs.get(session_id) else {
             return;
         };
-        annotate_cards_from(&guard.notes, cards);
+        annotate_cards_from_refs(&guard.notes, refs, cards);
     }
 
     /// Take an owned snapshot of all entries currently in the store. Use
@@ -209,17 +284,23 @@ impl XhsHistoryStore {
     /// `search` records every note it reads) but still wants to
     /// annotate output cards based on what was known *before* the call —
     /// otherwise the annotation reflects this run's own writes.
-    pub fn snapshot(&self) -> HistorySnapshot {
-        let entries = self
+    pub fn snapshot(&self, session_id: &str) -> HistorySnapshot {
+        let session_id = session_id.trim();
+        let _io = history_io_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self
             .inner
             .lock()
-            .map(|guard| guard.notes.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        refresh_from_disk(&self.path, &mut guard);
+        let entries = referenced_entries(&guard, session_id);
         HistorySnapshot { entries }
     }
 
-    /// Upsert an entry after a read. The cache is a growing union of
-    /// information per note, kept consistent by construction:
+    /// Add this note id to the conversation's references, then upsert its
+    /// global asset. The cache is a growing union of information per note,
+    /// kept consistent by construction:
     ///
     /// - `level` / `include_media` record the deepest *request* ever served
     ///   and never downgrade.
@@ -235,7 +316,11 @@ impl XhsHistoryStore {
     /// - Attempt outcomes (`*_error` fields) are never cached: an error says
     ///   nothing durable about the note, and the absent information already
     ///   makes the next request that needs it re-read.
-    pub fn record(&self, entity: &Value, level: &str, include_media: bool) {
+    pub fn record(&self, session_id: &str, entity: &Value, level: &str, include_media: bool) {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return;
+        }
         let Some(note_id) = entity
             .get("note_id")
             .and_then(Value::as_str)
@@ -252,85 +337,111 @@ impl XhsHistoryStore {
         let mut fresh = entity.clone();
         strip_error_fields(&mut fresh);
 
-        let snapshot = {
-            let Ok(mut guard) = self.inner.lock() else {
-                return;
-            };
-            let entry = guard.notes.entry(note_id.clone()).or_insert_with(|| {
-                let mut e = HistoryEntry::default();
-                e.note_id = note_id.clone();
-                e.first_seen_at = now.clone();
-                e
-            });
-            entry.note_id = note_id;
-            if !title.is_empty() {
-                entry.title = title;
-            }
-            if !author.is_empty() {
-                entry.author = author;
-            }
-            if !url.is_empty() {
-                entry.url = url;
-            }
-            if level_value(level) > level_value(&entry.level) {
-                entry.level = level.to_string();
-            }
-            if include_media {
-                entry.include_media = true;
-            }
-            let merged = match entry.entity.take() {
-                Some(prev) => merge_entities(&prev, fresh),
-                None => fresh,
-            };
-            entry.downloaded = entity_has_downloaded(&merged);
-            entry.ocr = entity_has_ocr(&merged);
-            entry.transcribed = entity_has_transcript(&merged);
-            entry.comments_loaded = entity_comment_count(&merged);
-            let total = entity_comment_total(&merged);
-            if total > entry.comments_total {
-                entry.comments_total = total;
-            }
-            entry.entity = Some(merged);
-            entry.analysis_count = entry.analysis_count.saturating_add(1);
-            entry.last_seen_at = now;
-            guard.clone()
+        let _io = history_io_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        refresh_from_disk(&self.path, &mut guard);
+        guard.version = HISTORY_VERSION;
+        if guard.removed_sessions.contains(session_id) {
+            return;
+        }
+        guard
+            .session_refs
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(note_id.clone());
+        let entry = guard.notes.entry(note_id.clone()).or_insert_with(|| {
+            let mut e = HistoryEntry::default();
+            e.note_id = note_id.clone();
+            e.first_seen_at = now.clone();
+            e
+        });
+        entry.note_id = note_id;
+        if !title.is_empty() {
+            entry.title = title;
+        }
+        if !author.is_empty() {
+            entry.author = author;
+        }
+        if !url.is_empty() {
+            entry.url = url;
+        }
+        if level_value(level) > level_value(&entry.level) {
+            entry.level = level.to_string();
+        }
+        if include_media {
+            entry.include_media = true;
+        }
+        let merged = match entry.entity.take() {
+            Some(prev) => merge_entities(&prev, fresh),
+            None => fresh,
         };
+        entry.downloaded = entity_has_downloaded(&merged);
+        entry.ocr = entity_has_ocr(&merged);
+        entry.transcribed = entity_has_transcript(&merged);
+        entry.comments_loaded = entity_comment_count(&merged);
+        let total = entity_comment_total(&merged);
+        if total > entry.comments_total {
+            entry.comments_total = total;
+        }
+        entry.entity = Some(merged);
+        entry.analysis_count = entry.analysis_count.saturating_add(1);
+        entry.last_seen_at = now;
 
         // Best-effort write. A failure here just means the next process
         // won't see this entry — agent still works.
-        let _ = save_file(&self.path, &snapshot);
+        let _ = save_file(&self.path, &guard);
     }
 
     /// Forget downloaded media that lived under run dirs being deleted: strip
     /// the cached entities' `local_path`s pointing into them and downgrade the
     /// `downloaded` flag, so the next request re-reads (and re-downloads) the
     /// note instead of trusting paths that no longer exist. Returns how many
-    /// entries were scrubbed. Best-effort hygiene: a concurrently running
-    /// agent holds its own store instance and its next record can clobber
-    /// this write — the disk check in `is_satisfied_by` is the backstop.
+    /// entries were scrubbed.
     pub fn scrub_media_under(&self, run_dirs: &[PathBuf]) -> usize {
-        let (snapshot, scrubbed) = {
-            let Ok(mut guard) = self.inner.lock() else {
-                return 0;
-            };
-            let mut scrubbed = 0usize;
-            for entry in guard.notes.values_mut() {
-                let Some(entity) = entry.entity.as_mut() else {
-                    continue;
-                };
-                if !scrub_entity_media_under(entity, run_dirs) {
-                    continue;
-                }
-                entry.downloaded = entity_has_downloaded(entity);
-                scrubbed += 1;
-            }
-            if scrubbed == 0 {
-                return 0;
-            }
-            (guard.clone(), scrubbed)
-        };
-        let _ = save_file(&self.path, &snapshot);
+        let _io = history_io_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        refresh_from_disk(&self.path, &mut guard);
+        let scrubbed = scrub_history_entries(&mut guard.notes, run_dirs);
+        if scrubbed == 0 {
+            return 0;
+        }
+        guard.version = HISTORY_VERSION;
+        let _ = save_file(&self.path, &guard);
         scrubbed
+    }
+
+    /// Drop all dedup state for a deleted conversation.
+    pub fn remove_session(&self, session_id: &str) -> bool {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return false;
+        }
+        let _io = history_io_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        refresh_from_disk(&self.path, &mut guard);
+        let removed = guard.session_refs.remove(session_id).is_some();
+        let tombstoned = guard.removed_sessions.insert(session_id.to_string());
+        if !removed && !tombstoned {
+            return false;
+        }
+        guard.version = HISTORY_VERSION;
+        let _ = save_file(&self.path, &guard);
+        true
     }
 }
 
@@ -347,6 +458,23 @@ impl HistorySnapshot {
 }
 
 fn annotate_cards_from(entries: &BTreeMap<String, HistoryEntry>, cards: &mut Value) {
+    annotate_cards_with(cards, |note_id| entries.get(note_id));
+}
+
+fn annotate_cards_from_refs(
+    notes: &BTreeMap<String, HistoryEntry>,
+    refs: &BTreeSet<String>,
+    cards: &mut Value,
+) {
+    annotate_cards_with(cards, |note_id| {
+        refs.contains(note_id).then(|| notes.get(note_id)).flatten()
+    });
+}
+
+fn annotate_cards_with<'a>(
+    cards: &mut Value,
+    mut lookup: impl FnMut(&str) -> Option<&'a HistoryEntry>,
+) {
     let Some(arr) = cards.as_array_mut() else {
         return;
     };
@@ -361,12 +489,44 @@ fn annotate_cards_from(entries: &BTreeMap<String, HistoryEntry>, cards: &mut Val
             .filter(|s| !s.is_empty())
             .map(str::to_string);
         let Some(note_id) = note_id else { continue };
-        if let Some(entry) = entries.get(&note_id) {
+        if let Some(entry) = lookup(&note_id) {
             map.insert("already_analyzed".into(), json!(true));
             map.insert("history_level".into(), json!(entry.level));
             map.insert("history_include_media".into(), json!(entry.include_media));
         }
     }
+}
+
+fn referenced_entries(data: &HistoryFile, session_id: &str) -> BTreeMap<String, HistoryEntry> {
+    data.session_refs
+        .get(session_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|note_id| {
+            data.notes
+                .get(note_id)
+                .cloned()
+                .map(|entry| (note_id.clone(), entry))
+        })
+        .collect()
+}
+
+fn scrub_history_entries(
+    entries: &mut BTreeMap<String, HistoryEntry>,
+    run_dirs: &[PathBuf],
+) -> usize {
+    let mut scrubbed = 0usize;
+    for entry in entries.values_mut() {
+        let Some(entity) = entry.entity.as_mut() else {
+            continue;
+        };
+        if !scrub_entity_media_under(entity, run_dirs) {
+            continue;
+        }
+        entry.downloaded = entity_has_downloaded(entity);
+        scrubbed += 1;
+    }
+    scrubbed
 }
 
 fn level_value(level: &str) -> i32 {
@@ -636,20 +796,245 @@ fn merge_entities(prev: &Value, mut fresh: Value) -> Value {
     fresh
 }
 
+/// Migration must retain fields from both serialized copies. The regular
+/// runtime merge intentionally lets a fresh read replace ordinary fields, but
+/// a schema conversion has no authoritative network read and must be lossless.
+fn merge_migrated_entities(prev: &Value, fresh: Value) -> Value {
+    let merged_images = match (
+        prev.get("images").and_then(Value::as_array),
+        fresh.get("images").and_then(Value::as_array),
+    ) {
+        (Some(prev), Some(fresh)) if !prev.is_empty() && !fresh.is_empty() => {
+            Some(merge_migrated_images(prev, fresh))
+        }
+        _ => None,
+    };
+    let mut merged = merge_entities(prev, fresh);
+    let (Some(prev), Some(merged_object)) = (prev.as_object(), merged.as_object_mut()) else {
+        return merged;
+    };
+    for (key, value) in prev {
+        merged_object
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
+    if let Some(images) = merged_images {
+        merged_object.insert("image_count".into(), json!(images.len()));
+        merged_object.insert("images".into(), Value::Array(images));
+    }
+    merged
+}
+
+fn merge_migrated_images(prev: &[Value], fresh: &[Value]) -> Vec<Value> {
+    let mut merged = fresh.to_vec();
+    let fresh_len = fresh.len();
+    for (prev_position, prev_image) in prev.iter().enumerate() {
+        let prev_index = image_index(prev_image);
+        let prev_url = image_url(prev_image);
+        let match_position = prev_index
+            .and_then(|index| {
+                merged
+                    .iter()
+                    .position(|fresh_image| image_index(fresh_image) == Some(index))
+            })
+            .or_else(|| {
+                prev_url.and_then(|url| {
+                    merged
+                        .iter()
+                        .position(|fresh_image| image_url(fresh_image) == Some(url))
+                })
+            })
+            .or_else(|| {
+                (prev_index.is_none()
+                    && prev_url.is_none()
+                    && prev_position < fresh_len
+                    && image_index(&merged[prev_position]).is_none()
+                    && image_url(&merged[prev_position]).is_none())
+                .then_some(prev_position)
+            });
+        if let Some(position) = match_position {
+            merged[position] = merge_migrated_object(prev_image, &merged[position]);
+        } else {
+            merged.push(prev_image.clone());
+        }
+    }
+    merged
+}
+
+fn merge_migrated_object(prev: &Value, fresh: &Value) -> Value {
+    let (Some(prev), Some(fresh)) = (prev.as_object(), fresh.as_object()) else {
+        return fresh.clone();
+    };
+    let mut merged = fresh.clone();
+    for (key, prev_value) in prev {
+        match merged.get_mut(key) {
+            Some(fresh_value) if prev_value.is_object() && fresh_value.is_object() => {
+                *fresh_value = merge_migrated_object(prev_value, fresh_value);
+            }
+            Some(_) => {}
+            None => {
+                merged.insert(key.clone(), prev_value.clone());
+            }
+        }
+    }
+    Value::Object(merged)
+}
+
+fn image_index(image: &Value) -> Option<i64> {
+    image.get("index").and_then(Value::as_i64)
+}
+
+fn image_url(image: &Value) -> Option<&str> {
+    image
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+}
+
+fn normalize_history_entry(note_id: &str, entry: &mut HistoryEntry) {
+    entry.note_id = note_id.to_string();
+    let Some(entity) = entry.entity.as_mut() else {
+        return;
+    };
+    strip_error_fields(entity);
+    let entity = &*entity;
+    entry.downloaded = entity_has_downloaded(entity);
+    entry.ocr = entity_has_ocr(entity);
+    entry.transcribed = entity_has_transcript(entity);
+    entry.comments_loaded = entry.comments_loaded.max(entity_comment_count(entity));
+    entry.comments_total = entry.comments_total.max(entity_comment_total(entity));
+}
+
+/// Fold a legacy or freshly loaded entry into the canonical global asset.
+/// Timestamps select which entity supplies conflicting ordinary fields, while
+/// all non-conflicting serialized fields are preserved from both copies.
+fn merge_history_entry(
+    notes: &mut BTreeMap<String, HistoryEntry>,
+    note_id: &str,
+    mut incoming: HistoryEntry,
+) {
+    normalize_history_entry(note_id, &mut incoming);
+    let Some(existing) = notes.get_mut(note_id) else {
+        notes.insert(note_id.to_string(), incoming);
+        return;
+    };
+
+    let incoming_is_newer = incoming.last_seen_at.as_str() >= existing.last_seen_at.as_str();
+    if existing.title.is_empty() || (incoming_is_newer && !incoming.title.is_empty()) {
+        existing.title = incoming.title.clone();
+    }
+    if existing.author.is_empty() || (incoming_is_newer && !incoming.author.is_empty()) {
+        existing.author = incoming.author.clone();
+    }
+    if existing.url.is_empty() || (incoming_is_newer && !incoming.url.is_empty()) {
+        existing.url = incoming.url.clone();
+    }
+    if level_value(&incoming.level) > level_value(&existing.level) {
+        existing.level = incoming.level.clone();
+    }
+    existing.include_media |= incoming.include_media;
+    existing.downloaded |= incoming.downloaded;
+    existing.ocr |= incoming.ocr;
+    existing.transcribed |= incoming.transcribed;
+    existing.comments_loaded = existing.comments_loaded.max(incoming.comments_loaded);
+    existing.comments_total = existing.comments_total.max(incoming.comments_total);
+    existing.analysis_count = existing
+        .analysis_count
+        .saturating_add(incoming.analysis_count);
+    if existing.first_seen_at.is_empty()
+        || (!incoming.first_seen_at.is_empty() && incoming.first_seen_at < existing.first_seen_at)
+    {
+        existing.first_seen_at = incoming.first_seen_at.clone();
+    }
+    if incoming.last_seen_at > existing.last_seen_at {
+        existing.last_seen_at = incoming.last_seen_at.clone();
+    }
+
+    existing.entity = match (existing.entity.take(), incoming.entity.take()) {
+        (Some(current), Some(incoming)) if incoming_is_newer => {
+            Some(merge_migrated_entities(&current, incoming))
+        }
+        (Some(current), Some(incoming)) => Some(merge_migrated_entities(&incoming, current)),
+        (Some(current), None) => Some(current),
+        (None, Some(incoming)) => Some(incoming),
+        (None, None) => None,
+    };
+    normalize_history_entry(note_id, existing);
+}
+
 /// Re-establish the cache invariants on entries written by older versions:
-/// cached entities must not carry attempt outcomes, and the information flags
-/// must state what the cached entity actually holds. In-memory only; the
-/// normalized state persists with the next regular save.
+/// - v0/v1 global `notes` remain the canonical assets;
+/// - v3 per-session entries are merged into those assets and replaced by id
+///   references;
+/// - cached entities drop attempt outcomes and their capability flags are
+///   re-derived.
+///
+/// This is in-memory and persists with the next regular save.
 fn normalize_loaded_entries(data: &mut HistoryFile) {
-    for entry in data.notes.values_mut() {
-        let Some(entity) = entry.entity.as_mut() else {
-            continue;
+    data.version = HISTORY_VERSION;
+
+    let mut notes = BTreeMap::new();
+    for (map_id, entry) in std::mem::take(&mut data.notes) {
+        let note_id = if map_id.trim().is_empty() {
+            entry.note_id.trim().to_string()
+        } else {
+            map_id.trim().to_string()
         };
-        strip_error_fields(entity);
-        let entity = &*entity;
-        entry.downloaded = entity_has_downloaded(entity);
-        entry.ocr = entity_has_ocr(entity);
-        entry.transcribed = entity_has_transcript(entity);
+        if !note_id.is_empty() {
+            merge_history_entry(&mut notes, &note_id, entry);
+        }
+    }
+    data.notes = notes;
+
+    for (session_id, entries) in std::mem::take(&mut data.legacy_session_notes) {
+        let session_id = session_id.trim();
+        if session_id.is_empty() || data.removed_sessions.contains(session_id) {
+            continue;
+        }
+        for (map_id, entry) in entries {
+            let note_id = if map_id.trim().is_empty() {
+                entry.note_id.trim().to_string()
+            } else {
+                map_id.trim().to_string()
+            };
+            if note_id.is_empty() {
+                continue;
+            }
+            merge_history_entry(&mut data.notes, &note_id, entry);
+            data.session_refs
+                .entry(session_id.to_string())
+                .or_default()
+                .insert(note_id);
+        }
+    }
+
+    let asset_ids = data.notes.keys().cloned().collect::<BTreeSet<_>>();
+    let mut session_refs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (session_id, refs) in std::mem::take(&mut data.session_refs) {
+        let session_id = session_id.trim();
+        if session_id.is_empty() || data.removed_sessions.contains(session_id) {
+            continue;
+        }
+        let refs = refs
+            .into_iter()
+            .map(|note_id| note_id.trim().to_string())
+            .filter(|note_id| !note_id.is_empty() && asset_ids.contains(note_id))
+            .collect::<BTreeSet<_>>();
+        if !refs.is_empty() {
+            session_refs
+                .entry(session_id.to_string())
+                .or_default()
+                .extend(refs);
+        }
+    }
+    data.session_refs = session_refs;
+}
+
+fn refresh_from_disk(path: &Path, current: &mut HistoryFile) {
+    if let Some(mut latest) = load_file(path) {
+        normalize_loaded_entries(&mut latest);
+        *current = latest;
     }
 }
 
@@ -664,7 +1049,7 @@ fn save_file(path: &Path, data: &HistoryFile) -> std::io::Result<()> {
     }
     let bytes = serde_json::to_vec_pretty(data)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     fs::write(&tmp, &bytes)?;
     fs::rename(&tmp, path)?;
     Ok(())
@@ -685,19 +1070,233 @@ mod tests {
         let store = XhsHistoryStore::open(&path);
 
         store.record(
+            "session-a",
             &json!({"note_id": "abc", "title": "T", "author": "A", "url": "u"}),
             "lite",
             false,
         );
-        let entry = store.get("abc").expect("entry present");
+        let entry = store.get("session-a", "abc").expect("entry present");
         assert_eq!(entry.note_id, "abc");
         assert_eq!(entry.level, "lite");
         assert_eq!(entry.analysis_count, 1);
         assert!(!entry.first_seen_at.is_empty());
+        assert!(store.get("session-b", "abc").is_none());
+        let persisted: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["version"], json!(HISTORY_VERSION));
+        assert!(persisted["notes"]["abc"].is_object());
+        assert_eq!(persisted["session_refs"]["session-a"], json!(["abc"]));
+        assert!(persisted.get("session_notes").is_none());
 
-        // Reopen from disk — entries persist.
+        // Reopen from disk — both the cache and session boundary persist.
         let store2 = XhsHistoryStore::open(&path);
-        assert!(store2.get("abc").is_some());
+        assert!(store2.get("session-a", "abc").is_some());
+        assert!(store2.get("session-b", "abc").is_none());
+
+        // Separate store instances (foreground/background tool factories)
+        // merge against the latest file instead of overwriting one another.
+        let writers = (0..4)
+            .map(|index| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    XhsHistoryStore::open(path).record(
+                        &format!("concurrent-{index}"),
+                        &json!({"note_id": format!("note-{index}")}),
+                        "lite",
+                        false,
+                    );
+                })
+            })
+            .collect::<Vec<_>>();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let merged = XhsHistoryStore::open(&path);
+        for index in 0..4 {
+            assert!(merged
+                .get(&format!("concurrent-{index}"), &format!("note-{index}"))
+                .is_some());
+        }
+
+        // A v1 global asset has no trustworthy conversation owner. It remains
+        // readable and merges with new reads, but cannot suppress a v4 session
+        // until that session records a reference itself.
+        let legacy_path = dir.path().join("legacy.json");
+        std::fs::write(
+            &legacy_path,
+            serde_json::to_vec(&json!({
+                "notes": {
+                    "legacy": {"note_id": "legacy", "level": "deep"}
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let legacy = XhsHistoryStore::open(&legacy_path);
+        assert!(legacy.get("session-a", "legacy").is_none());
+        legacy.record("session-a", &json!({"note_id": "legacy"}), "lite", false);
+        assert_eq!(legacy.get("session-a", "legacy").unwrap().level, "deep");
+
+        // A v3 file copied complete entries into every session. Opening it
+        // folds those entries into global assets and keeps only id pointers;
+        // the next normal write persists the v4 shape without data loss.
+        let v3_path = dir.path().join("v3.json");
+        std::fs::write(
+            &v3_path,
+            serde_json::to_vec(&json!({
+                "version": 3,
+                "notes": {
+                    "from-v3": {
+                        "note_id": "from-v3",
+                        "level": "lite",
+                        "entity": {
+                            "note_id": "from-v3",
+                            "global_field": "preserved global content",
+                            "images": [
+                                {
+                                    "index": 0,
+                                    "url": "https://img.example/0.jpg",
+                                    "local_path": "/tmp/preserved-image.jpg"
+                                },
+                                {
+                                    "index": 1,
+                                    "url": "https://img.example/old.jpg",
+                                    "local_path": "/tmp/old-image.jpg"
+                                }
+                            ]
+                        }
+                    }
+                },
+                "session_notes": {
+                    "session-v3": {
+                        "from-v3": {
+                            "note_id": "from-v3",
+                            "level": "deep",
+                            "ocr": true,
+                            "entity": {
+                                "note_id": "from-v3",
+                                "desc": "preserved v3 content",
+                                "ocr_text": ["preserved OCR"],
+                                "images": [
+                                    {
+                                        "index": 0,
+                                        "url": "https://img.example/0.jpg",
+                                        "ocr_text": "preserved image OCR"
+                                    },
+                                    {
+                                        "index": 2,
+                                        "url": "https://img.example/new.jpg",
+                                        "ocr_text": "new image OCR"
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let v3 = XhsHistoryStore::open(&v3_path);
+        let migrated = v3.get("session-v3", "from-v3").unwrap();
+        assert_eq!(
+            migrated.entity.unwrap()["desc"],
+            json!("preserved v3 content")
+        );
+        assert_eq!(
+            v3.get("session-v3", "from-v3").unwrap().entity.unwrap()["global_field"],
+            json!("preserved global content")
+        );
+        let migrated_image = &v3.get("session-v3", "from-v3").unwrap().entity.unwrap()["images"][0];
+        assert_eq!(
+            migrated_image["local_path"],
+            json!("/tmp/preserved-image.jpg")
+        );
+        assert_eq!(migrated_image["ocr_text"], json!("preserved image OCR"));
+        let migrated_images = v3.get("session-v3", "from-v3").unwrap().entity.unwrap()["images"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(migrated_images.len(), 3);
+        assert!(migrated_images[1].get("local_path").is_none());
+        assert_eq!(
+            migrated_images[2]["local_path"],
+            json!("/tmp/old-image.jpg")
+        );
+        assert!(v3.get("another-session", "from-v3").is_none());
+        v3.record(
+            "session-v3",
+            &json!({"note_id": "new-v4-asset"}),
+            "lite",
+            false,
+        );
+        let migrated_file: Value =
+            serde_json::from_slice(&std::fs::read(&v3_path).unwrap()).unwrap();
+        assert!(migrated_file.get("session_notes").is_none());
+        assert_eq!(
+            migrated_file["session_refs"]["session-v3"],
+            json!(["from-v3", "new-v4-asset"])
+        );
+        assert_eq!(
+            migrated_file["notes"]["from-v3"]["entity"]["desc"],
+            json!("preserved v3 content")
+        );
+        assert_eq!(
+            migrated_file["notes"]["from-v3"]["entity"]["global_field"],
+            json!("preserved global content")
+        );
+        assert_eq!(
+            migrated_file["notes"]["from-v3"]["entity"]["images"][0]["local_path"],
+            json!("/tmp/preserved-image.jpg")
+        );
+        assert_eq!(
+            migrated_file["notes"]["from-v3"]["entity"]["images"][0]["ocr_text"],
+            json!("preserved image OCR")
+        );
+        // Reopening and normalizing the persisted v4 file is idempotent.
+        let reopened = XhsHistoryStore::open(&v3_path);
+        let reopened_image = &reopened
+            .get("session-v3", "from-v3")
+            .unwrap()
+            .entity
+            .unwrap()["images"][0];
+        assert_eq!(
+            reopened_image["local_path"],
+            json!("/tmp/preserved-image.jpg")
+        );
+        assert_eq!(reopened_image["ocr_text"], json!("preserved image OCR"));
+        let reopened_images = reopened
+            .get("session-v3", "from-v3")
+            .unwrap()
+            .entity
+            .unwrap()["images"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(reopened_images.len(), 3);
+        assert!(reopened_images[1].get("local_path").is_none());
+        assert_eq!(
+            reopened_images[2]["local_path"],
+            json!("/tmp/old-image.jpg")
+        );
+
+        assert!(store2.remove_session("session-a"));
+        // A detached background completion arriving after deletion cannot
+        // recreate the removed conversation's history.
+        store2.record(
+            "session-a",
+            &json!({"note_id": "late-background-write"}),
+            "deep",
+            true,
+        );
+        assert!(XhsHistoryStore::open(&path)
+            .get("session-a", "abc")
+            .is_none());
+        assert!(XhsHistoryStore::open(&path)
+            .get("session-a", "late-background-write")
+            .is_none());
+        let after_delete: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(after_delete["notes"]["abc"].is_object());
+        assert!(after_delete["session_refs"].get("session-a").is_none());
     }
 
     #[test]
@@ -705,9 +1304,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = XhsHistoryStore::open(dir.path().join("h.json"));
 
-        store.record(&json!({"note_id": "n1"}), "deep", true);
-        store.record(&json!({"note_id": "n1"}), "lite", false);
-        let entry = store.get("n1").unwrap();
+        store.record("session", &json!({"note_id": "n1"}), "deep", true);
+        store.record("session", &json!({"note_id": "n1"}), "lite", false);
+        let entry = store.get("session", "n1").unwrap();
         assert_eq!(entry.level, "deep");
         assert!(entry.include_media);
         assert_eq!(entry.analysis_count, 2);
@@ -717,17 +1316,51 @@ mod tests {
     fn satisfied_when_prior_is_deeper_or_equal() {
         let dir = tempdir().unwrap();
         let store = XhsHistoryStore::open(dir.path().join("h.json"));
-        store.record(&json!({"note_id": "n1"}), "lite", false);
+        store.record("session", &json!({"note_id": "n1"}), "lite", false);
 
-        assert!(store.is_satisfied_by("n1", "card", false, false, false, false, 0));
-        assert!(store.is_satisfied_by("n1", "lite", false, false, false, false, 0));
-        assert!(!store.is_satisfied_by("n1", "deep", false, false, false, false, 0));
-        assert!(!store.is_satisfied_by("n1", "lite", true, false, false, false, 0));
-        assert!(!store.is_satisfied_by("unknown", "card", false, false, false, false, 0));
+        assert!(store.is_satisfied_by("session", "n1", "card", false, false, false, false, 0));
+        assert!(store.is_satisfied_by("session", "n1", "lite", false, false, false, false, 0));
+        assert!(!store.is_satisfied_by(
+            "other-session",
+            "n1",
+            "lite",
+            false,
+            false,
+            false,
+            false,
+            0
+        ));
+        assert!(!store.is_satisfied_by("session", "n1", "deep", false, false, false, false, 0));
+        assert!(!store.is_satisfied_by("session", "n1", "lite", true, false, false, false, 0));
+        assert!(!store.is_satisfied_by("session", "unknown", "card", false, false, false, false, 0));
         // download / ocr dimensions: a plain read doesn't satisfy them.
-        assert!(!store.is_satisfied_by("n1", "lite", false, true, false, false, 0));
-        assert!(!store.is_satisfied_by("n1", "lite", false, false, true, false, 0));
-        assert!(!store.is_satisfied_by("n1", "lite", false, false, false, true, 0));
+        assert!(!store.is_satisfied_by("session", "n1", "lite", false, true, false, false, 0));
+        assert!(!store.is_satisfied_by("session", "n1", "lite", false, false, true, false, 0));
+        assert!(!store.is_satisfied_by("session", "n1", "lite", false, false, false, true, 0));
+
+        // The second conversation must establish its own pointer before it can
+        // skip. Once referenced, both conversations reuse the richer shared
+        // asset rather than storing duplicate entities.
+        store.record(
+            "other-session",
+            &json!({"note_id": "n1", "ocr_text": ["other session"]}),
+            "deep",
+            true,
+        );
+        assert!(store.is_satisfied_by("other-session", "n1", "deep", true, false, true, false, 0));
+        assert!(store.is_satisfied_by("session", "n1", "deep", false, false, false, false, 0));
+        assert!(store.is_satisfied_by("session", "n1", "lite", true, false, false, false, 0));
+        assert!(store.is_satisfied_by("session", "n1", "lite", false, false, true, false, 0));
+        assert!(!store.is_satisfied_by(
+            "third-session",
+            "n1",
+            "lite",
+            false,
+            false,
+            false,
+            false,
+            0
+        ));
     }
 
     #[test]
@@ -737,6 +1370,7 @@ mod tests {
         let media = dir.path().join("x.jpg");
         std::fs::write(&media, b"jpg").unwrap();
         store.record(
+            "session",
             &json!({
                 "note_id": "n2",
                 "ocr_text": ["cover text", ""],
@@ -746,8 +1380,8 @@ mod tests {
             false,
         );
 
-        assert!(store.is_satisfied_by("n2", "deep", false, true, true, false, 0));
-        let entry = store.get("n2").unwrap();
+        assert!(store.is_satisfied_by("session", "n2", "deep", false, true, true, false, 0));
+        let entry = store.get("session", "n2").unwrap();
         assert!(entry.downloaded);
         assert!(entry.ocr);
 
@@ -755,19 +1389,19 @@ mod tests {
         // must be re-read, not resurrected with a dead path) — while text-only
         // coverage is untouched.
         std::fs::remove_file(&media).unwrap();
-        assert!(!store.is_satisfied_by("n2", "deep", false, true, true, false, 0));
-        assert!(store.is_satisfied_by("n2", "deep", false, false, true, false, 0));
+        assert!(!store.is_satisfied_by("session", "n2", "deep", false, true, true, false, 0));
+        assert!(store.is_satisfied_by("session", "n2", "deep", false, false, true, false, 0));
     }
 
     #[test]
     fn snapshot_freezes_pre_call_state() {
         let dir = tempdir().unwrap();
         let store = XhsHistoryStore::open(dir.path().join("h.json"));
-        store.record(&json!({"note_id": "old"}), "lite", false);
+        store.record("session", &json!({"note_id": "old"}), "lite", false);
 
-        let pre = store.snapshot();
+        let pre = store.snapshot("session");
         // Writes after the snapshot must not show up when annotating with it.
-        store.record(&json!({"note_id": "new_this_run"}), "deep", true);
+        store.record("session", &json!({"note_id": "new_this_run"}), "deep", true);
 
         let mut cards = json!([
             {"note_id": "old"},
@@ -783,13 +1417,18 @@ mod tests {
     fn annotate_cards_marks_known_notes() {
         let dir = tempdir().unwrap();
         let store = XhsHistoryStore::open(dir.path().join("h.json"));
-        store.record(&json!({"note_id": "seen", "title": "x"}), "deep", true);
+        store.record(
+            "session",
+            &json!({"note_id": "seen", "title": "x"}),
+            "deep",
+            true,
+        );
 
         let mut cards = json!([
             {"note_id": "seen", "title": "x"},
             {"note_id": "fresh", "title": "y"},
         ]);
-        store.annotate_cards(&mut cards);
+        store.annotate_cards("session", &mut cards);
         let arr = cards.as_array().unwrap();
         assert_eq!(arr[0]["already_analyzed"], json!(true));
         assert_eq!(arr[0]["history_level"], json!("deep"));

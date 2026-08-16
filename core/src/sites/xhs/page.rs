@@ -456,22 +456,46 @@ impl<'a> XhsPageRuntime<'a> {
             .await
     }
 
-    /// Poll `extract_search_cards` until the count grows past `baseline` or
-    /// `timeout` elapses; returns the latest cards either way.
-    async fn wait_for_card_growth(
+    /// Poll `extract_search_cards` until the visible card identities change or
+    /// `timeout` elapses. Identity comparison also handles virtualized feeds
+    /// that replace a fixed-size DOM window instead of increasing its length.
+    async fn wait_for_card_change(
         &self,
-        baseline: usize,
+        baseline: &HashSet<String>,
         timeout: Duration,
-    ) -> Result<Vec<XhsNoteCard>> {
+    ) -> Result<(Vec<XhsNoteCard>, bool)> {
         const POLL: Duration = Duration::from_millis(400);
         let deadline = Instant::now() + timeout;
         loop {
             sleep_ms(POLL.as_millis() as u64).await;
             let cards = self.extract_search_cards().await?;
-            if cards.len() > baseline || Instant::now() >= deadline {
-                return Ok(cards);
+            let changed = cards
+                .iter()
+                .map(search_card_key)
+                .any(|key| !baseline.contains(&key));
+            if changed || Instant::now() >= deadline {
+                return Ok((cards, changed));
             }
         }
+    }
+
+    /// Request one more search-results page and return the latest visible
+    /// cards. A reverse nudge retries an ignored bottom jump before the caller
+    /// treats the feed as stalled.
+    pub async fn load_more_search_cards(&self) -> Result<(Vec<XhsNoteCard>, bool)> {
+        const PRE_SCROLL_DELAY: Duration = Duration::from_millis(1500);
+        const SETTLE_TIMEOUT: Duration = Duration::from_millis(5000);
+
+        let before = self.extract_search_cards().await?;
+        let baseline: HashSet<String> = before.iter().map(search_card_key).collect();
+        sleep_ms(PRE_SCROLL_DELAY.as_millis() as u64).await;
+        self.scroll_feed(false).await?;
+        let (mut cards, mut changed) = self.wait_for_card_change(&baseline, SETTLE_TIMEOUT).await?;
+        if !changed {
+            self.scroll_feed(true).await?;
+            (cards, changed) = self.wait_for_card_change(&baseline, SETTLE_TIMEOUT).await?;
+        }
+        Ok((cards, changed))
     }
 
     /// Collect search cards up to `target`, scrolling the feed and waiting for
@@ -480,32 +504,19 @@ impl<'a> XhsPageRuntime<'a> {
     /// results). Returns at most `target` cards in feed order.
     async fn collect_search_cards(&self, target: usize) -> Result<Vec<XhsNoteCard>> {
         // XHS sometimes ignores a too-fast jump to the bottom and won't fetch
-        // more, so pause before each jump; if a jump still loads nothing within
-        // SETTLE_TIMEOUT, a small reverse (upward) scroll reliably re-triggers
-        // the lazy load. Give up only after MAX_STALLS rounds where even the
-        // nudge fails (the real end of results).
-        const PRE_SCROLL_DELAY: Duration = Duration::from_millis(1500);
-        const SETTLE_TIMEOUT: Duration = Duration::from_millis(5000);
+        // more, so load_more_search_cards pauses before each jump and retries
+        // with a reverse nudge. Give up only after MAX_STALLS rounds without a
+        // new identity (the real end of results).
         const MAX_STALLS: usize = 3;
 
         let mut cards = self.extract_search_cards().await?;
+        let mut seen: HashSet<String> = cards.iter().map(search_card_key).collect();
         let mut stalls = 0usize;
         while cards.len() < target {
             let before = cards.len();
-
-            // 1) Deliberate pause, then jump to the bottom to request more.
-            sleep_ms(PRE_SCROLL_DELAY.as_millis() as u64).await;
-            self.scroll_feed(false).await?;
-            cards = self.wait_for_card_growth(before, SETTLE_TIMEOUT).await?;
-
-            // 2) Nothing loaded in time — nudge back up to jog the observer and
-            //    wait once more before counting this round as a stall.
-            if cards.len() <= before {
-                self.scroll_feed(true).await?;
-                cards = self.wait_for_card_growth(before, SETTLE_TIMEOUT).await?;
-            }
-
-            if cards.len() <= before {
+            let (page, _) = self.load_more_search_cards().await?;
+            merge_unique_search_cards(&mut cards, &mut seen, page);
+            if cards.len() == before {
                 stalls += 1;
                 if stalls >= MAX_STALLS {
                     break;
@@ -1591,7 +1602,8 @@ impl<'a> XhsPageRuntime<'a> {
 
         if options.include_media {
             let t_enrich = Instant::now();
-            self.enrich_note_media(&mut note, options.max_images).await?;
+            self.enrich_note_media(&mut note, options.max_images)
+                .await?;
             perf.insert(
                 "enrich_ms".into(),
                 json!(t_enrich.elapsed().as_millis() as u64),
@@ -2156,6 +2168,30 @@ fn value_type(value: &Value) -> &'static str {
     }
 }
 
+fn search_card_key(card: &XhsNoteCard) -> String {
+    if !card.note_id.is_empty() {
+        return format!("id:{}", card.note_id);
+    }
+    if !card.link.is_empty() {
+        return format!("link:{}", card.link);
+    }
+    format!("position:{}:{}", card.position, card.title)
+}
+
+fn merge_unique_search_cards(
+    cards: &mut Vec<XhsNoteCard>,
+    seen: &mut HashSet<String>,
+    page: Vec<XhsNoteCard>,
+) -> usize {
+    let before = cards.len();
+    for card in page {
+        if seen.insert(search_card_key(&card)) {
+            cards.push(card);
+        }
+    }
+    cards.len().saturating_sub(before)
+}
+
 async fn sleep_ms(ms: u64) {
     tokio::time::sleep(Duration::from_millis(ms)).await;
 }
@@ -2261,5 +2297,35 @@ mod tests {
         apply_video_poster_fallback(&mut video, "https://img.example/cover.jpg");
 
         assert_eq!(video["poster_url"], "https://img.example/poster.jpg");
+    }
+
+    #[test]
+    fn merge_search_cards_keeps_virtualized_replacements() {
+        let mut cards = vec![XhsNoteCard {
+            note_id: "note-a".into(),
+            position: 0,
+            ..Default::default()
+        }];
+        let mut seen: HashSet<String> = cards.iter().map(search_card_key).collect();
+        let added = merge_unique_search_cards(
+            &mut cards,
+            &mut seen,
+            vec![
+                XhsNoteCard {
+                    note_id: "note-a".into(),
+                    position: 0,
+                    ..Default::default()
+                },
+                XhsNoteCard {
+                    note_id: "note-b".into(),
+                    position: 0,
+                    ..Default::default()
+                },
+            ],
+        );
+
+        assert_eq!(added, 1);
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[1].note_id, "note-b");
     }
 }

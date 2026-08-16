@@ -142,6 +142,10 @@ impl From<&str> for ToolResult {
 pub struct ToolContext {
     pub run_id: String,
     pub run_dir: PathBuf,
+    /// Stable conversation identifier. Reused across follow-up runs so tools
+    /// can scope durable de-duplication to one conversation. Standalone calls
+    /// leave this unset and use their unique run id as the scope.
+    session_id: Option<String>,
     pub step: u32,
     pub active_tool_name: String,
     /// Desktop user-turn generation used to cancel background media work when
@@ -202,6 +206,7 @@ impl ToolContext {
         Self {
             run_id: run_id.into(),
             run_dir: run_dir.as_ref().to_path_buf(),
+            session_id: None,
             step: 0,
             active_tool_name: String::new(),
             background_media_generation: None,
@@ -230,6 +235,17 @@ impl ToolContext {
     pub fn with_billing_task_id(mut self, task_id: Option<String>) -> Self {
         self.billing_task_id = task_id;
         self
+    }
+
+    pub fn with_session_id(mut self, session_id: Option<String>) -> Self {
+        self.session_id = session_id.filter(|value| !value.trim().is_empty());
+        self
+    }
+
+    /// Scope key for durable tool de-duplication. Follow-up turns share their
+    /// conversation id; one-shot commands get an isolated run id.
+    pub fn dedup_session_id(&self) -> &str {
+        self.session_id.as_deref().unwrap_or(&self.run_id)
     }
 
     /// Best-effort progress delivery. A closed receiver must never fail the

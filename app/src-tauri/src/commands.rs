@@ -21,7 +21,7 @@ use socai_core::telemetry::tool_call::{summarize_tool_args, summarize_tool_resul
 use socai_core::telemetry::trace::mark_run_trace_status;
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -1042,8 +1042,17 @@ pub async fn agent_task_delete(
         socai_core::media::cancel_background_media_for_run(run_dir);
     }
     let mut dirs: Vec<String> = Vec::new();
+    // Conversation ids are their directory basenames. Derive that first so a
+    // corrupt/missing conversation.json cannot leave orphaned dedup state.
+    let mut history_session_id = snapshot.session_dir.as_deref().and_then(|session_dir| {
+        Path::new(session_dir)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+    });
     if let Some(session_dir) = &snapshot.session_dir {
         if let Ok(conversation) = Conversation::load(session_dir) {
+            history_session_id = Some(conversation.id.clone());
             dirs.extend(conversation.runs.iter().map(|run| run.run_dir.clone()));
         }
         dirs.push(session_dir.clone());
@@ -1087,7 +1096,11 @@ pub async fn agent_task_delete(
             // XHS history caches absolute media paths into these run dirs; scrub
             // them so cross-run dedupe re-downloads instead of resurrecting dead paths.
             let run_dirs: Vec<PathBuf> = dirs.iter().map(PathBuf::from).collect();
-            let scrubbed = XhsHistoryStore::open_default().scrub_media_under(&run_dirs);
+            let history = XhsHistoryStore::open_default();
+            if let Some(session_id) = history_session_id {
+                history.remove_session(&session_id);
+            }
+            let scrubbed = history.scrub_media_under(&run_dirs);
             if scrubbed > 0 {
                 eprintln!("forgot cached media for {scrubbed} notes under deleted task {task_id}");
             }

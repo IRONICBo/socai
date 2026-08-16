@@ -5,6 +5,7 @@
 //! visible, note modal open, etc.). The caller is responsible for creating
 //! the page and closing it after `run_agent` returns.
 
+use std::collections::VecDeque;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -852,7 +853,7 @@ fn read_note_options(input: &Value) -> ReadNoteOptions {
     ReadNoteOptions {
         // `level` is no longer a user-facing knob (body content is identical
         // across tiers; media is gated by include_media/download_media). It now
-        // only feeds the cross-run history dedup key.
+        // only feeds the current conversation's history dedup key.
         level: "lite".to_string(),
         include_media: get_bool(input, "include_media", false),
         download_media,
@@ -986,8 +987,13 @@ async fn attach_top_comments(xhs: &XhsPageRuntime<'_>, note: &mut Value) {
 /// compact provenance summary (no title/author/url repeat — those are in
 /// `entity`). Falls back to the card when history has no cached entity (e.g. a
 /// pre-upgrade entry, or one only ever seen as a card).
-fn skipped_note_entry(card: &XhsNoteCard, reason: &str, history: &XhsHistoryStore) -> Value {
-    let entry = history.get(&card.note_id);
+fn skipped_note_entry(
+    card: &XhsNoteCard,
+    reason: &str,
+    history: &XhsHistoryStore,
+    session_id: &str,
+) -> Value {
+    let entry = history.get(session_id, &card.note_id);
     let entity = entry
         .as_ref()
         .and_then(|e| e.entity.clone())
@@ -1018,7 +1024,7 @@ fn recorded_skip_entry(
     ctx: &ToolContext,
     level: &str,
 ) -> Value {
-    let entry = skipped_note_entry(card, reason, history);
+    let entry = skipped_note_entry(card, reason, history, ctx.dedup_session_id());
     if let Some(entity) = entry.get("entity").filter(|v| v.is_object()) {
         // note_data_record expects an ok-shaped entry (the media-manifest
         // builder ignores anything that isn't `ok: true`).
@@ -1147,7 +1153,7 @@ impl ScanProgress {
 }
 
 /// Open one already-selected card, read its body at `level`, attach top
-/// comments, and record it in run + cross-run history. Shared by `search`
+/// comments, and record it in run + conversation history. Shared by `search`
 /// (cards from search) and `author_scan` (cards from a profile page) — the only
 /// difference between those macros is where the cards come from, not how each
 /// note is read. Returns the per-note entry; the caller pushes it and closes
@@ -1163,6 +1169,26 @@ fn recovery_blocker(value: &Value) -> Option<&'static str> {
         })
 }
 
+fn fresh_scan_success(value: &Value) -> bool {
+    value.get("ok").and_then(Value::as_bool) == Some(true)
+}
+
+fn search_card_dedup_key(card: &XhsNoteCard) -> String {
+    if !card.note_id.is_empty() {
+        card.note_id.clone()
+    } else if !card.link.is_empty() {
+        card.link.clone()
+    } else {
+        format!("pos:{}:{}", card.position, card.title)
+    }
+}
+
+fn retain_fresh_scan_notes(payload: &mut Value) {
+    if let Some(notes) = payload.get_mut("notes").and_then(Value::as_array_mut) {
+        notes.retain(fresh_scan_success);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn scan_card_note(
     xhs: &XhsPageRuntime<'_>,
@@ -1176,7 +1202,7 @@ async fn scan_card_note(
     // Whether the caller explicitly asked for media downloads (as opposed to
     // OCR forcing `download_media` on for its own reads). Controls fetching a
     // video note's video file — an OCR-only run downloads just the poster —
-    // and is the download requirement checked against cross-run history.
+    // and is the download requirement checked against conversation history.
     download_media_requested: bool,
     // Desktop macro scans return after downloading the poster and enqueue the
     // full video separately. TUI/CLI downloads and transcription requests keep
@@ -1203,6 +1229,7 @@ async fn scan_card_note(
         !card.note_id.is_empty() && ctx.has_processed_note(&card.note_id, level, requested_media);
     if !card.note_id.is_empty()
         && history.is_satisfied_by(
+            ctx.dedup_session_id(),
             &card.note_id,
             level,
             requested_media,
@@ -1214,7 +1241,7 @@ async fn scan_card_note(
         // Only short-circuit when we actually have the cached entity to return;
         // a pre-upgrade entry without one is re-read so it backfills the cache
         // instead of degrading to a bare card.
-        && history.has_cached_entity(&card.note_id)
+        && history.has_cached_entity(ctx.dedup_session_id(), &card.note_id)
     {
         ctx.mark_processed_note(&card.note_id, level, requested_media);
         let reason = if processed_in_run {
@@ -1356,13 +1383,14 @@ async fn scan_card_note(
     // The note-level `ocr_text` array is derived at lean-trim time from each
     // image's ocr_text (see lean_scan_note), so nothing to attach here.
 
-    // Mark processed in-run + record in cross-run history.
+    // Mark processed in-run, add this conversation's note-id reference, and
+    // merge the complete entity into the shared history asset.
     if !card.note_id.is_empty() {
         ctx.mark_processed_note(&card.note_id, level, requested_media);
     }
     if entry.get("ok").and_then(Value::as_bool).unwrap_or(false) {
         if let Some(entity) = entry.get("entity") {
-            history.record(entity, level, requested_media);
+            history.record(ctx.dedup_session_id(), entity, level, requested_media);
         }
         // Archive the fully-read note (full content + resolved local media) so
         // the desktop app can render it as a rich, locally-served card without
@@ -1530,6 +1558,7 @@ async fn join_note_ocr(
     notes: &mut [Value],
     pending: Vec<(usize, tokio::task::JoinHandle<NoteOcrResult>)>,
     history: &XhsHistoryStore,
+    session_id: &str,
     level: &str,
     include_media: bool,
 ) -> Vec<NoteOcrTiming> {
@@ -1559,7 +1588,7 @@ async fn join_note_ocr(
         // the per-image OCR.
         if note.get("ok").and_then(Value::as_bool) == Some(true) {
             if let Some(entity) = note.get("entity") {
-                history.record(entity, level, include_media);
+                history.record(session_id, entity, level, include_media);
             }
         }
     }
@@ -1672,7 +1701,7 @@ async fn join_note_transcribe(
         }
         if note.get("ok").and_then(Value::as_bool) == Some(true) {
             if let Some(entity) = note.get("entity") {
-                history.record(entity, level, include_media);
+                history.record(ctx.dedup_session_id(), entity, level, include_media);
             }
             // Refresh the archived record (built before the transcript existed)
             // so the desktop app's note card shows the transcript.
@@ -2098,7 +2127,7 @@ fn spawn_background_video_downloads(
         // Re-check history at enqueue time (later than scan_card_note's cache
         // check) and reuse that file instead of fetching the same video twice.
         let completed_elsewhere = history
-            .get(&note_id)
+            .get(ctx.dedup_session_id(), &note_id)
             .and_then(|entry| entry.entity)
             .and_then(|entity| entity.get("video").cloned())
             .and_then(|video| {
@@ -2212,7 +2241,7 @@ fn spawn_background_video_downloads(
             if let Some(map) = entity.as_object_mut() {
                 map.insert("video".into(), completed_video);
             }
-            history.record(&entity, &level, include_media);
+            history.record(ctx.dedup_session_id(), &entity, &level, include_media);
 
             let src = run_relative_path(&local_path, &ctx.run_dir);
             let updated = ctx.update_recorded_note(&note_id, |record| {
@@ -2934,6 +2963,28 @@ fn direct_note_refs(input: &Value) -> anyhow::Result<Vec<DirectNoteRef>> {
 /// Open a tokenized full-screen note route, extract the same entity shape used
 /// by search/author scans, attach comments, and record it in run/history.
 #[allow(clippy::too_many_arguments)]
+fn direct_note_is_satisfied(
+    history: &XhsHistoryStore,
+    ctx: &ToolContext,
+    target: &DirectNoteRef,
+    comment_count: i64,
+    download_media_requested: bool,
+    ocr: bool,
+    transcribe_audio: bool,
+) -> bool {
+    history.is_satisfied_by(
+        ctx.dedup_session_id(),
+        &target.note_id,
+        "deep",
+        false,
+        download_media_requested,
+        ocr,
+        transcribe_audio,
+        comment_count,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn scan_direct_note(
     xhs: &XhsPageRuntime<'_>,
     history: &XhsHistoryStore,
@@ -2942,11 +2993,49 @@ async fn scan_direct_note(
     position: usize,
     comment_count: i64,
     download_media: bool,
+    download_media_requested: bool,
     download_video_file_inline: bool,
     background_video_downloads: bool,
     ocr: bool,
     defer_ocr: bool,
+    transcribe_audio: bool,
 ) -> Value {
+    if direct_note_is_satisfied(
+        history,
+        ctx,
+        target,
+        comment_count,
+        download_media_requested,
+        ocr,
+        transcribe_audio,
+    ) {
+        let cached = history
+            .get(ctx.dedup_session_id(), &target.note_id)
+            .unwrap_or_default();
+        let entity = cached
+            .entity
+            .clone()
+            .unwrap_or_else(|| json!({ "note_id": target.note_id }));
+        let entry = json!({
+            "source_position": position,
+            "ok": true,
+            "skipped": {
+                "reason": "already_analyzed",
+                "level": cached.level,
+                "analysis_count": cached.analysis_count,
+                "first_seen_at": cached.first_seen_at,
+                "last_seen_at": cached.last_seen_at,
+            },
+            "entity": entity,
+            "scan_perf": { "cache_hit": true },
+        });
+        ctx.mark_processed_note(&target.note_id, "deep", false);
+        if let Some((note_id, record)) = build_note_record(&entry, ctx, "deep") {
+            ctx.record_note(&note_id, record);
+        }
+        return entry;
+    }
+
     let mut perf = Map::new();
     let t_open = std::time::Instant::now();
     let open = xhs
@@ -3091,7 +3180,7 @@ async fn scan_direct_note(
     }
 
     ctx.mark_processed_note(&target.note_id, "deep", false);
-    history.record(&entity, "deep", false);
+    history.record(ctx.dedup_session_id(), &entity, "deep", false);
     let mut entry = json!({
         "source_position": position,
         "ok": true,
@@ -3128,9 +3217,9 @@ impl Tool for GetNotesTool {
     fn description(&self) -> &str {
         "Read one or more Xiaohongshu notes directly from note_id + xsec_token pairs. \
          Use tokens returned by search or author_scan when you need to revisit \
-         specific notes without repeating the search/profile click flow. Opens \
-         one full-screen detail route per item and returns body + top comments; \
-         latency scales with the number of notes."
+         specific notes without repeating the search/profile click flow. Reuses \
+         sufficiently complete notes already read in this conversation; otherwise \
+         opens one full-screen detail route and returns body + top comments."
     }
 
     fn input_schema(&self) -> Value {
@@ -3190,30 +3279,6 @@ impl Tool for GetNotesTool {
     async fn call(&self, mut input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let asr_skipped = !self.asr_enabled && strip_hosted_agent_input(&mut input);
         let targets = direct_note_refs(&input)?;
-        let gate = XhsPageRuntime::new(&self.page);
-        let login = match gate.login_gate(true).await {
-            Ok(login) => login,
-            Err(err) => {
-                let mut payload = json!({
-                    "ok": false,
-                    "notes": [],
-                    "reason": "page_access_failed",
-                    "error": format!("{err:#}"),
-                });
-                gate.attach_page_failure_diagnostic(&mut payload).await;
-                return Ok(json_result(&payload));
-            }
-        };
-        if login == LoginGate::Required {
-            let mut payload = json!({
-                "ok": false,
-                "notes": [],
-                "reason": "login_required",
-            });
-            annotate_remote_login_gate(&self.page, &mut payload);
-            return Ok(json_result(&payload));
-        }
-
         let comment_count = get_i64(&input, "num_comments", TOP_COMMENTS_PER_NOTE).max(0);
         let ocr = self.always_ocr || get_bool(&input, "ocr", false);
         let transcribe_audio = get_bool(&input, "transcribe_audio", false);
@@ -3225,16 +3290,60 @@ impl Tool for GetNotesTool {
             && ctx.background_media_generation.is_some()
             && download_media_requested
             && !transcribe_audio;
-        if ocr {
+        let all_cached = targets.iter().all(|target| {
+            direct_note_is_satisfied(
+                &self.history,
+                ctx,
+                target,
+                comment_count,
+                download_media_requested,
+                ocr,
+                transcribe_audio,
+            )
+        });
+
+        // A fully cached request needs no live page, login, OCR model, or media
+        // processor. Mixed requests still preflight once before fresh reads.
+        if !all_cached {
+            let gate = XhsPageRuntime::new(&self.page);
+            let login = match gate.login_gate(true).await {
+                Ok(login) => login,
+                Err(err) => {
+                    let mut payload = json!({
+                        "ok": false,
+                        "notes": [],
+                        "reason": "page_access_failed",
+                        "error": format!("{err:#}"),
+                    });
+                    gate.attach_page_failure_diagnostic(&mut payload).await;
+                    return Ok(json_result(&payload));
+                }
+            };
+            if login == LoginGate::Required {
+                let mut payload = json!({
+                    "ok": false,
+                    "notes": [],
+                    "reason": "login_required",
+                });
+                annotate_remote_login_gate(&self.page, &mut payload);
+                return Ok(json_result(&payload));
+            }
+        }
+
+        if ocr && !all_cached {
             tokio::task::spawn_blocking(ocr_warm_up);
         }
 
-        let media = media_for(
-            ctx,
-            self.llm_provider.clone(),
-            download_media,
-            transcribe_audio,
-        )?;
+        let media = if all_cached {
+            None
+        } else {
+            media_for(
+                ctx,
+                self.llm_provider.clone(),
+                download_media,
+                transcribe_audio,
+            )?
+        };
         let media_baseline = media.as_ref().map(|value| value.timing().snapshot());
         let xhs = XhsPageRuntime::new_with_media(&self.page, media.clone());
         let mut notes = Vec::with_capacity(targets.len());
@@ -3261,16 +3370,23 @@ impl Tool for GetNotesTool {
                 position,
                 comment_count,
                 download_media,
+                download_media_requested,
                 download_media_requested && !background_video_downloads,
                 background_video_downloads,
                 ocr,
                 ocr,
+                transcribe_audio,
             )
             .await;
             let blocker = recovery_blocker(&entry);
+            let reused = entry
+                .get("skipped")
+                .and_then(|value| value.get("reason"))
+                .and_then(Value::as_str)
+                == Some("already_analyzed");
             notes.push(entry);
             let idx = notes.len() - 1;
-            if ocr {
+            if ocr && !reused {
                 if let Some(handle) = spawn_note_ocr(
                     &media,
                     &ocr_sem,
@@ -3284,8 +3400,10 @@ impl Tool for GetNotesTool {
                 } else {
                     scan_progress.ocr_completed(item_index, title.clone());
                 }
+            } else if ocr {
+                scan_progress.ocr_completed(item_index, title.clone());
             }
-            if transcribe_audio {
+            if transcribe_audio && !reused {
                 if let Some(handle) =
                     spawn_note_transcribe(&media, &asr_sem, &notes[idx], browse_t0)
                 {
@@ -3309,8 +3427,15 @@ impl Tool for GetNotesTool {
 
         scan_progress.finish_reading(notes.len());
         let browse_ms = browse_t0.elapsed().as_millis() as u64;
-        let ocr_timings =
-            join_note_ocr(&mut notes, pending_ocr, &self.history, "deep", false).await;
+        let ocr_timings = join_note_ocr(
+            &mut notes,
+            pending_ocr,
+            &self.history,
+            ctx.dedup_session_id(),
+            "deep",
+            false,
+        )
+        .await;
         join_note_transcribe(
             &mut notes,
             pending_transcribe,
@@ -3456,12 +3581,14 @@ impl Tool for ReadNoteTool {
         let wait_seconds = get_f64(&input, "wait_seconds", 6.0);
         let options = read_note_options(&input);
 
-        // Cross-run dedup: short-circuit when a previous run already covers
-        // this note at the requested level + enrichments (vision, downloaded
-        // media, OCR). Only fires when note_id is known up front; the cached
-        // entity already carries any prior local_path / ocr_text.
+        // Conversation-scoped dedup: short-circuit when this session already
+        // covers the note at the requested level + enrichments (vision,
+        // downloaded media, OCR). Another session still reads it normally.
+        // Only fires when note_id is known up front; the cached entity already
+        // carries any prior local_path / ocr_text.
         if let Some(id) = note_id.as_deref().filter(|s| !s.trim().is_empty()) {
             if self.history.is_satisfied_by(
+                ctx.dedup_session_id(),
                 id,
                 &options.level,
                 options.include_media,
@@ -3470,7 +3597,10 @@ impl Tool for ReadNoteTool {
                 options.transcribe_audio,
                 TOP_COMMENTS_PER_NOTE,
             ) {
-                let entry = self.history.get(id).unwrap_or_default();
+                let entry = self
+                    .history
+                    .get(ctx.dedup_session_id(), id)
+                    .unwrap_or_default();
                 return Ok(json_result(&json!({
                     "ok": true,
                     "skipped": true,
@@ -3517,8 +3647,12 @@ impl Tool for ReadNoteTool {
                 perf.insert("comments_ms".into(), json!(ms));
             }
             if let Some(entity) = value.get("entity") {
-                self.history
-                    .record(entity, &options.level, options.include_media);
+                self.history.record(
+                    ctx.dedup_session_id(),
+                    entity,
+                    &options.level,
+                    options.include_media,
+                );
             }
         }
         // Phase timing is a debug record, not analysis input: move it out of
@@ -3589,8 +3723,12 @@ impl Tool for ExtractNoteTool {
         // Always attach top comments — the note is already open, so reading them
         // is one extra DOM read with no extra navigation.
         attach_top_comments(&xhs, &mut value).await;
-        self.history
-            .record(&value, &options.level, options.include_media);
+        self.history.record(
+            ctx.dedup_session_id(),
+            &value,
+            &options.level,
+            options.include_media,
+        );
         attach_hosted_agent_skip_note(&mut value, asr_skipped);
         Ok(json_result(&value))
     }
@@ -3816,11 +3954,12 @@ impl Tool for ExtractSearchCardsTool {
         json!({"type": "object", "properties": {}})
     }
 
-    async fn call(&self, _input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn call(&self, _input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let xhs = XhsPageRuntime::new(&self.page);
         let cards = xhs.extract_search_cards().await?;
         let mut value = serde_json::to_value(&cards)?;
-        self.history.annotate_cards(&mut value);
+        self.history
+            .annotate_cards(ctx.dedup_session_id(), &mut value);
         Ok(json_result(&value))
     }
 }
@@ -4012,8 +4151,8 @@ impl Tool for ExtractProfileTool {
 /// search(query, filters?, num_notes?, download_media?, preview?) -> aggregated bundle
 ///
 /// The single Xiaohongshu search tool. Composite macro: search → optional
-/// search filters → collect up to `num_notes` cards in page order (scrolling
-/// the feed only when the first page is too small) → open each note and extract
+/// search filters → collect up to `num_notes` valid new notes in page order
+/// (actively scrolling when loaded cards are exhausted) → open each note and extract
 /// its body + top comments → bundle into one artifact. Prefer this for any
 /// "research a topic on XHS" task — it returns search results plus the note
 /// bodies plus comments in one tool call, so the agent doesn't have to chain
@@ -4081,8 +4220,8 @@ impl Tool for SearchTool {
 
     fn description(&self) -> &str {
         "Xiaohongshu search — the single XHS search tool. Default (full scan): \
-         search → optional search filters → collect up to `num_notes` cards in \
-         page order (scrolling only if the first page is too small) → open each \
+         search → optional search filters → collect up to `num_notes` valid new \
+         notes in page order (actively scrolling when loaded cards are exhausted) → open each \
          note and read its body + top comments → return one compact bundle \
          (search results + selected cards + note bodies + comments). Pass \
          `download_media=true` to download note images/videos into the run dir, \
@@ -4106,7 +4245,7 @@ impl Tool for SearchTool {
                 "filters": search_filters_schema(),
                 "num_notes": {
                     "type": "integer",
-                    "description": "Number of notes to read (body + top comments each). The first results page is used directly; only if it holds fewer than this does the feed scroll for more. Each note is opened, so latency scales with this. In preview mode, the number of cards to collect by scrolling.",
+                    "description": "Number of valid new notes to read (body + top comments each). Failed reads and history hits from this conversation do not consume this target; notes seen only in other conversations remain eligible. The feed scrolls when loaded cards are exhausted. Each note is opened, so latency scales with this. In preview mode, the number of cards to collect by scrolling.",
                     "default": DEFAULT_NUM_NOTES,
                     "minimum": 1
                 },
@@ -4198,7 +4337,7 @@ impl Tool for SearchTool {
             };
             promote_page_diagnostic(&mut value);
             if let Some(cards) = value.get_mut("cards") {
-                self.history.annotate_cards(cards);
+                self.history.annotate_cards(ctx.dedup_session_id(), cards);
             }
             // Preview OCR: read each result card's cover image (like a human
             // glancing at the results page). Covers are fetched to memory and
@@ -4329,7 +4468,7 @@ impl Tool for SearchTool {
         // record notes into the live store, but final-payload annotations
         // should reflect the state going in — otherwise a first-time scan
         // labels its own freshly-read cards as `already_analyzed`.
-        let history_snapshot = self.history.snapshot();
+        let history_snapshot = self.history.snapshot(ctx.dedup_session_id());
 
         // Filters are applied after the initial search below, so don't pass
         // them here.
@@ -4405,17 +4544,18 @@ impl Tool for SearchTool {
         let comment_count = get_i64(&input, "num_comments", AGENT_TOP_COMMENTS_PER_NOTE).max(0);
         let want = num_notes.max(1) as usize;
 
-        // Read top-to-bottom: pull cards from the results state (which only
-        // grows) in feed order and open each. Opening a card scrolls it into
-        // view, which pages the later cards in on its own — there's no
-        // separate "scroll to the bottom and collect everything first" phase.
-        // When we've consumed every loaded card, wait briefly for that async
-        // paging to land; if nothing more loads after a few tries, stop.
+        // Read top-to-bottom. When every visible card has been consumed, ask
+        // the existing page runtime to scroll the real feed container and load
+        // another page. Track identities independently from array positions so
+        // a fixed-size virtualized DOM can replace old cards with new ones.
         let mut notes: Vec<Value> = Vec::new();
         let mut selected: Vec<XhsNoteCard> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut cursor = 0usize;
+        let mut pending: VecDeque<XhsNoteCard> = VecDeque::new();
         let mut stalls = 0usize;
+        let mut successful = 0usize;
+        let mut skipped_existing = 0usize;
+        let mut failed = 0usize;
         // OCR and cloud ASR run in the background so they overlap the next
         // note's read + download; tasks are joined after the browse loop.
         let ocr_sem = Arc::new(tokio::sync::Semaphore::new(OCR_PIPELINE_CONCURRENCY));
@@ -4435,7 +4575,7 @@ impl Tool for SearchTool {
         let scan_deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(SEARCH_SCAN_TIMEOUT_SECONDS);
 
-        while notes.len() < want {
+        while successful < want {
             if std::time::Instant::now() >= scan_deadline {
                 stop_reason = "search_timeout".to_string();
                 page_error = Some(format!(
@@ -4513,7 +4653,7 @@ impl Tool for SearchTool {
                                     .cloned()
                                     .unwrap_or_else(|| Value::Object(Map::new()));
                                 search = recovered;
-                                cursor = 0;
+                                pending.clear();
                                 stalls = 0;
                                 append_search_debug_event(
                                     ctx,
@@ -4559,7 +4699,32 @@ impl Tool for SearchTool {
                     break;
                 }
             };
-            if cursor >= cards.len() {
+            if pending.is_empty() {
+                pending.extend(
+                    cards
+                        .into_iter()
+                        .filter(|card| !seen.contains(&search_card_dedup_key(card))),
+                );
+            }
+            if pending.is_empty() {
+                let (cards, _) = match xhs.load_more_search_cards().await {
+                    Ok(result) => result,
+                    Err(err) => {
+                        stop_reason = "search_pagination_failed".to_string();
+                        page_error = Some(format!("{err:#}"));
+                        break;
+                    }
+                };
+                pending.extend(
+                    cards
+                        .into_iter()
+                        .filter(|card| !seen.contains(&search_card_dedup_key(card))),
+                );
+                if pending.is_empty() {
+                    stalls += 1;
+                } else {
+                    stalls = 0;
+                }
                 if stalls >= 3 {
                     let mut diagnostic = json!({ "ok": false });
                     xhs.attach_page_failure_diagnostic(&mut diagnostic).await;
@@ -4580,23 +4745,30 @@ impl Tool for SearchTool {
                                 "notes_attempted": notes.len(),
                             }),
                         );
+                    } else {
+                        stop_reason = "results_exhausted".to_string();
+                        append_search_debug_event(
+                            ctx,
+                            json!({
+                                "event": "search_results_exhausted",
+                                "elapsed_ms": browse_t0.elapsed().as_millis() as u64,
+                                "requested": want,
+                                "successful": successful,
+                                "selected": selected.len(),
+                                "skipped_existing": skipped_existing,
+                                "failed": failed,
+                            }),
+                        );
                     }
                     break;
                 }
-                stalls += 1;
-                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
                 continue;
             }
             stalls = 0;
-            let card = cards[cursor].clone();
-            cursor += 1;
-            let dedup = if !card.note_id.is_empty() {
-                card.note_id.clone()
-            } else if !card.link.is_empty() {
-                card.link.clone()
-            } else {
-                format!("pos:{}", card.position)
+            let Some(card) = pending.pop_front() else {
+                continue;
             };
+            let dedup = search_card_dedup_key(&card);
             if !seen.insert(dedup) {
                 continue;
             }
@@ -4641,12 +4813,19 @@ impl Tool for SearchTool {
             )
             .await;
             let blocker = recovery_blocker(&entry);
-            if entry.get("ok").and_then(Value::as_bool) == Some(true)
-                || entry.get("skipped").is_some()
-            {
+            let fresh_success = fresh_scan_success(&entry);
+            let skipped = entry.get("skipped").is_some();
+            if fresh_success || skipped {
                 consecutive_note_failures = 0;
             } else {
                 consecutive_note_failures = consecutive_note_failures.saturating_add(1);
+            }
+            if fresh_success {
+                successful = successful.saturating_add(1);
+            } else if skipped {
+                skipped_existing = skipped_existing.saturating_add(1);
+            } else {
+                failed = failed.saturating_add(1);
             }
             let failure_limit_reached =
                 blocker.is_none() && consecutive_note_failures >= MAX_CONSECUTIVE_NOTE_FAILURES;
@@ -4731,12 +4910,19 @@ impl Tool for SearchTool {
             }
         }
 
-        scan_progress.finish_reading(notes.len());
+        scan_progress.finish_reading(successful);
         let browse_ms = browse_t0.elapsed().as_millis() as u64;
         // Join background OCR (epoch = browse start, so the timings line up with
         // browse_ms) and merge results back into the notes in place.
-        let ocr_timings =
-            join_note_ocr(&mut notes, pending_ocr, &self.history, level, include_media).await;
+        let ocr_timings = join_note_ocr(
+            &mut notes,
+            pending_ocr,
+            &self.history,
+            ctx.dedup_session_id(),
+            level,
+            include_media,
+        )
+        .await;
         // Join background ASR after OCR: both pipelines write into the video
         // object, and the transcribe join copies only its own fields.
         join_note_transcribe(
@@ -4763,7 +4949,7 @@ impl Tool for SearchTool {
         // separate debug file; the JSON artifact stays LLM-facing.
         write_scan_perf(ctx, &notes, browse_ms, &ocr_timings, &note_perfs);
         if ocr {
-            scan_progress.finish_ocr(notes.len());
+            scan_progress.finish_ocr(successful);
         }
 
         let mut media_timing = match (&media, &media_baseline) {
@@ -4799,13 +4985,17 @@ impl Tool for SearchTool {
 
         let mut payload = json!({
             "ok": search.get("ok").and_then(Value::as_bool).unwrap_or(false)
-                && stop_reason.is_empty(),
+                && stop_reason.is_empty()
+                && successful >= want,
             "query": query,
             "search": search,
             "notes": notes,
             "sampling": {
                 "num_notes": num_notes,
                 "selected": selected.len(),
+                "successful": successful,
+                "skipped_existing": skipped_existing,
+                "failed": failed,
                 "comments_per_note": comment_count,
                 "include_media": include_media,
                 "download_media": download_media,
@@ -4873,6 +5063,9 @@ impl Tool for SearchTool {
 
         // Artifact above keeps the full bundle; trim what we return so the
         // agent/CLI output stays small, then point at the artifact for the rest.
+        // Failed attempts and history hits remain in the artifact for diagnosis
+        // but do not masquerade as newly collected notes in the model result.
+        retain_fresh_scan_notes(&mut payload);
         lean_scan_payload(&mut payload);
         attach_artifact_pointer(&mut payload, artifact_path, ARTIFACT_EXTRA_NOTE_PROPERTIES);
         attach_hosted_agent_skip_note(&mut payload, asr_skipped);
@@ -5025,7 +5218,7 @@ impl Tool for AuthorScanTool {
         let xhs = XhsPageRuntime::new_with_media(&self.page, media.clone());
         // Snapshot history before reading so card annotations reflect "known
         // before this scan" rather than this scan's own writes.
-        let history_snapshot = self.history.snapshot();
+        let history_snapshot = self.history.snapshot(ctx.dedup_session_id());
 
         let open = xhs.open_profile(&author_id, 8.0).await?;
         if !open.get("ok").and_then(Value::as_bool).unwrap_or(false) {
@@ -5174,8 +5367,15 @@ impl Tool for AuthorScanTool {
             }
             scan_progress.finish_reading(notes.len());
             let browse_ms = browse_t0.elapsed().as_millis() as u64;
-            let ocr_timings =
-                join_note_ocr(&mut notes, pending_ocr, &self.history, "deep", false).await;
+            let ocr_timings = join_note_ocr(
+                &mut notes,
+                pending_ocr,
+                &self.history,
+                ctx.dedup_session_id(),
+                "deep",
+                false,
+            )
+            .await;
             join_note_transcribe(
                 &mut notes,
                 pending_transcribe,
@@ -5434,5 +5634,21 @@ mod tests {
         assert!(!strip_hosted_agent_input(&mut plain));
         let mut off = json!({ "query": "咖啡", "transcribe_audio": false });
         assert!(!strip_hosted_agent_input(&mut off));
+    }
+
+    #[test]
+    fn fresh_scan_result_excludes_failures_and_history_hits() {
+        let mut payload = json!({
+            "notes": [
+                { "ok": true, "entity": { "note_id": "fresh" } },
+                { "ok": false, "entity": { "note_id": "failed" } },
+                { "skipped": { "reason": "already_analyzed" }, "entity": { "note_id": "seen" } }
+            ]
+        });
+
+        retain_fresh_scan_notes(&mut payload);
+
+        assert_eq!(payload["notes"].as_array().map(Vec::len), Some(1));
+        assert_eq!(payload["notes"][0]["entity"]["note_id"], "fresh");
     }
 }

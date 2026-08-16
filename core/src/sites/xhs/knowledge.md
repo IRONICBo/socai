@@ -167,10 +167,12 @@ lives locally in the run directory and is referenced from manifests.
 
 Some cards or note entries may be marked as previously analyzed (for example
 `already_analyzed`, `history_level`, `history_include_media`, `skipped`, or a
-`history` object). That means socai has durable cached evidence for that note
-from this or an earlier run. Use the returned cached entity/history as evidence
-instead of assuming the note was ignored. Only rerun with deeper settings when
-the cached level/media setting is insufficient for the current task.
+`history` object). That means the current conversation has durable cached
+evidence for that note from this or an earlier turn. Use the returned cached
+entity/history as evidence instead of assuming the note was ignored. Notes
+seen only in another conversation remain eligible here. Only rerun with deeper
+settings when the cached level/media setting is insufficient for the current
+task.
 
 ## Evidence Rules
 

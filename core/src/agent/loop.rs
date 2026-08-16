@@ -197,6 +197,7 @@ pub async fn run_agent_with_events(
     );
 
     let mut ctx = ToolContext::new(&run_id, &run_dir)
+        .with_session_id(options.session_id.clone())
         .with_run_state(Arc::clone(&run_state))
         .with_background_media_generation(options.background_media_generation)
         .with_billing_task_id(options.billing_task_id);
