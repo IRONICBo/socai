@@ -24,6 +24,28 @@ pub struct MachineInfo {
     pub os_kernel_version: String,
 }
 
+/// Process-free platform snapshot for latency-sensitive prompt construction.
+/// Unlike [`machine_info`], this never launches host commands: Linux reads
+/// procfs/os-release, macOS reads SystemVersion.plist and calls `uname(2)`, and
+/// Windows reads its version through `RtlGetVersion`.
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimePlatformInfo {
+    pub os: &'static str,
+    pub arch: &'static str,
+    pub os_version: String,
+    pub os_kernel_version: String,
+}
+
+pub(crate) fn runtime_platform_info() -> &'static RuntimePlatformInfo {
+    static INFO: OnceLock<RuntimePlatformInfo> = OnceLock::new();
+    INFO.get_or_init(|| RuntimePlatformInfo {
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        os_version: runtime_os_version(),
+        os_kernel_version: runtime_kernel_version(),
+    })
+}
+
 /// Process-global machine info, collected on first use.
 pub fn machine_info() -> &'static MachineInfo {
     static INFO: OnceLock<MachineInfo> = OnceLock::new();
@@ -128,6 +150,96 @@ fn os_kernel_version() -> String {
         return command_output("cmd", &["/C", "ver"]);
     }
     #[allow(unreachable_code)]
+    String::new()
+}
+
+#[cfg(target_os = "macos")]
+fn runtime_os_version() -> String {
+    let Ok(text) = std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist")
+    else {
+        return String::new();
+    };
+    let Some(after_key) = text
+        .split_once("<key>ProductVersion</key>")
+        .map(|(_, rest)| rest)
+    else {
+        return String::new();
+    };
+    let Some(after_open) = after_key.split_once("<string>").map(|(_, rest)| rest) else {
+        return String::new();
+    };
+    after_open
+        .split_once("</string>")
+        .map(|(value, _)| value.trim().to_string())
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn runtime_os_version() -> String {
+    linux_pretty_name().unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+fn runtime_os_version() -> String {
+    #[repr(C)]
+    struct OsVersionInfoW {
+        size: u32,
+        major: u32,
+        minor: u32,
+        build: u32,
+        platform_id: u32,
+        service_pack: [u16; 128],
+    }
+
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn RtlGetVersion(version: *mut OsVersionInfoW) -> i32;
+    }
+
+    let mut version = OsVersionInfoW {
+        size: std::mem::size_of::<OsVersionInfoW>() as u32,
+        major: 0,
+        minor: 0,
+        build: 0,
+        platform_id: 0,
+        service_pack: [0; 128],
+    };
+    if unsafe { RtlGetVersion(&mut version) } == 0 {
+        format!("{}.{}.{}", version.major, version.minor, version.build)
+    } else {
+        String::new()
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn runtime_os_version() -> String {
+    String::new()
+}
+
+#[cfg(target_os = "linux")]
+fn runtime_kernel_version() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn runtime_kernel_version() -> String {
+    use std::ffi::CStr;
+
+    let mut info = std::mem::MaybeUninit::<libc::utsname>::zeroed();
+    if unsafe { libc::uname(info.as_mut_ptr()) } != 0 {
+        return String::new();
+    }
+    let info = unsafe { info.assume_init() };
+    unsafe { CStr::from_ptr(info.release.as_ptr()) }
+        .to_string_lossy()
+        .trim()
+        .to_string()
+}
+
+#[cfg(not(unix))]
+fn runtime_kernel_version() -> String {
     String::new()
 }
 
