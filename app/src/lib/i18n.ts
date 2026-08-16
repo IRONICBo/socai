@@ -397,6 +397,93 @@ const messages = {
     zh: "连接 chrome 后可继续追问",
   },
   "task.replySend": { en: "send", zh: "发送" },
+  "task.preflightModelConfig": {
+    en: "the selected model is not ready. configure its api key or account connection in the model menu, then try again.",
+    zh: "当前模型尚未完成配置。请在右上角模型菜单中添加 API Key 或完成账号连接，然后重试。",
+  },
+  "task.preflightAuth": {
+    en: "your socai account is signed out. sign in, then send the task again.",
+    zh: "当前 socai 账号尚未登录。请先登录账号，然后重新发送任务。",
+  },
+  "task.preflightBalance": {
+    en: "your socai account does not have enough points. recharge or switch to another configured model, then try again.",
+    zh: "当前 socai 账号点数不足。请充值点数或切换到其他已配置的模型，然后重试。",
+  },
+  "task.preflightAccount": {
+    en: "socai could not verify your account and point balance. check the network and account region, then try again.",
+    zh: "socai 无法验证当前账号和点数。请检查网络以及账号区域，然后重试。",
+  },
+  "task.preflightSite": {
+    en: "socai could not initialize xiaohongshu support. restart the app and update it if the problem continues.",
+    zh: "socai 无法初始化小红书运行环境。请重启应用；问题持续时请更新到最新版本。",
+  },
+  "task.preflightBrowserConfig": {
+    en: "socai could not read the chrome configuration. choose the browser source again in settings, then try again.",
+    zh: "socai 无法读取 chrome 配置。请在设置中重新选择浏览器来源，然后重试。",
+  },
+  "task.preflightBrowser": {
+    en: "socai could not prepare chrome. check the browser source in settings, keep chrome open, and reconnect.",
+    zh: "socai 无法准备 chrome 浏览器。请检查设置中的浏览器来源，保持 chrome 运行并重新连接。",
+  },
+  "task.preflightBrowserRemote": {
+    en: "socai could not connect to the hosted browser. check your network and socai account, then try again.",
+    zh: "socai 无法连接云端浏览器。请检查网络和 socai 账号状态，然后重试。",
+  },
+  "task.preflightXhsLogin": {
+    en: "xiaohongshu is signed out in the connected chrome profile. complete sign-in there, then try again.",
+    zh: "当前 chrome 配置文件尚未登录小红书。请在已连接的 chrome 中完成登录，然后重试。",
+  },
+  "task.preflightXhsSession": {
+    en: "the hosted xiaohongshu session is unavailable. reconnect the hosted browser and try again; contact support if it continues.",
+    zh: "云端小红书会话暂时不可用。请重新连接云端浏览器后重试；问题持续时请联系支持。",
+  },
+  "task.preflightUnknown": {
+    en: "socai could not complete the checks required to start this task. try again and share the error code if it continues.",
+    zh: "socai 无法完成任务启动检查。请重试；问题持续时请提供错误码。",
+  },
+  "task.preflightFailedTitle": {
+    en: "task cannot start yet",
+    zh: "任务暂时无法开始",
+  },
+  "task.errorCode": { en: "error code: {code}", zh: "错误码：{code}" },
+  "task.apiErrorAuthTitle": { en: "model authentication failed", zh: "模型认证失败" },
+  "task.apiErrorAuth": {
+    en: "{provider} rejected the current API key. update it in the model menu at the top right, then send the task again.",
+    zh: "{provider} 拒绝了当前 API Key。请在右上角模型菜单中更新 API Key，然后重新发送任务。",
+  },
+  "task.apiErrorBalanceTitle": { en: "model balance is insufficient", zh: "模型余额不足" },
+  "task.apiErrorBalance": {
+    en: "{provider} reported insufficient balance or quota. recharge the account or switch to another configured model, then try again.",
+    zh: "{provider} 返回余额或额度不足。请充值对应账号或切换到其他已配置的模型，然后重试。",
+  },
+  "task.apiErrorForbiddenTitle": { en: "model access was denied", zh: "模型访问被拒绝" },
+  "task.apiErrorForbidden": {
+    en: "{provider} denied access to this model. check the model permission and account region, or switch models.",
+    zh: "{provider} 拒绝访问当前模型。请检查模型权限和账号区域，或切换其他模型。",
+  },
+  "task.apiErrorRateLimitTitle": { en: "model requests are too frequent", zh: "模型请求过于频繁" },
+  "task.apiErrorRateLimit": {
+    en: "{provider} is rate limiting requests. wait briefly and send the task again, or switch models.",
+    zh: "{provider} 正在限制请求频率。请稍后重新发送任务，或切换其他模型。",
+  },
+  "task.apiErrorUnavailableTitle": { en: "model service is unavailable", zh: "模型服务暂时不可用" },
+  "task.apiErrorUnavailable": {
+    en: "{provider} is temporarily unavailable. wait briefly and send the task again.",
+    zh: "{provider} 服务暂时不可用。请稍后重新发送任务。",
+  },
+  "task.apiErrorNetworkTitle": { en: "model connection failed", zh: "模型连接失败" },
+  "task.apiErrorNetwork": {
+    en: "socai could not reach {provider}. check the network and proxy settings, then try again.",
+    zh: "socai 无法连接 {provider}。请检查网络和代理设置，然后重试。",
+  },
+  "task.apiErrorGenericTitle": { en: "model request failed", zh: "模型请求失败" },
+  "task.apiErrorGeneric": {
+    en: "{provider} could not complete the request. try again or switch to another configured model.",
+    zh: "{provider} 无法完成当前请求。请重试或切换到其他已配置的模型。",
+  },
+  "task.apiErrorDismissAria": { en: "dismiss error", zh: "关闭错误提示" },
+  "task.apiErrorRequestId": { en: "request {id}", zh: "请求 {id}" },
+  "task.apiErrorProvider": { en: "the model provider", zh: "模型服务" },
 
   "feishu.export": { en: "export to feishu", zh: "导出到飞书" },
   "feishu.dialogAria": { en: "export to feishu", zh: "导出到飞书" },
@@ -524,6 +611,133 @@ export function t(
     message = message.replaceAll(`{${name}}`, `${value}`);
   }
   return message;
+}
+
+const taskPreflightMessages = {
+  preflight_model_config: "task.preflightModelConfig",
+  preflight_auth: "task.preflightAuth",
+  preflight_balance: "task.preflightBalance",
+  preflight_region_or_account: "task.preflightAccount",
+  preflight_site: "task.preflightSite",
+  preflight_browser_config: "task.preflightBrowserConfig",
+  preflight_browser: "task.preflightBrowser",
+  preflight_browser_remote: "task.preflightBrowserRemote",
+  preflight_xhs_login: "task.preflightXhsLogin",
+  preflight_xhs_session: "task.preflightXhsSession",
+} as const satisfies Record<string, MessageKey>;
+
+export function formatTaskCommandError(error: unknown): string {
+  const presentation = formatTaskCommandErrorPresentation(error);
+  if (!presentation) return String(error);
+  return `${presentation.message}\n${presentation.meta}`;
+}
+
+export function formatTaskCommandErrorPresentation(
+  error: unknown,
+): TaskApiErrorPresentation | null {
+  const payload = parseTaskCommandError(error);
+  if (!payload) return null;
+  const messageKey = taskPreflightMessages[payload.code as keyof typeof taskPreflightMessages]
+    ?? "task.preflightUnknown";
+  return {
+    title: t("task.preflightFailedTitle"),
+    message: t(messageKey),
+    meta: t("task.errorCode", { code: payload.code }),
+    fingerprint: `${payload.code}:${payload.detail}`,
+  };
+}
+
+export interface TaskApiErrorPresentation {
+  title: string;
+  message: string;
+  meta: string;
+  fingerprint: string;
+}
+
+export function formatTaskApiError(error: string): TaskApiErrorPresentation {
+  const segments = error.split(/\s+\|\s+/);
+  const providerMatch = segments.shift()?.match(/^(.+?)\s+API error$/i);
+  const providerValue = providerMatch?.[1]?.trim() ?? "";
+  const provider = providerValue
+    ? `${providerValue.charAt(0).toUpperCase()}${providerValue.slice(1)}`
+    : t("task.apiErrorProvider");
+  const fields = new Map<string, string>();
+  for (const segment of segments) {
+    const separator = segment.indexOf("=");
+    if (separator <= 0) continue;
+    fields.set(segment.slice(0, separator).trim().toLowerCase(), segment.slice(separator + 1).trim());
+  }
+
+  const statusText = fields.get("status") ?? "";
+  const status = Number.parseInt(statusText, 10);
+  const type = fields.get("type") ?? "";
+  const detail = fields.get("message") ?? error;
+  const requestId = fields.get("request_id") ?? "";
+  const signal = `${type} ${detail}`.toLowerCase();
+  let titleKey: MessageKey;
+  let messageKey: MessageKey;
+  if (status === 401 || /auth|unauthor|invalid.*(?:api|x-api).*key/.test(signal)) {
+    titleKey = "task.apiErrorAuthTitle";
+    messageKey = "task.apiErrorAuth";
+  } else if (status === 402 || /insufficient.*(?:balance|point|credit|quota)/.test(signal)) {
+    titleKey = "task.apiErrorBalanceTitle";
+    messageKey = "task.apiErrorBalance";
+  } else if (status === 403 || /forbidden|permission|access denied/.test(signal)) {
+    titleKey = "task.apiErrorForbiddenTitle";
+    messageKey = "task.apiErrorForbidden";
+  } else if (status === 429 || /rate.?limit|too many requests/.test(signal)) {
+    titleKey = "task.apiErrorRateLimitTitle";
+    messageKey = "task.apiErrorRateLimit";
+  } else if (status >= 500) {
+    titleKey = "task.apiErrorUnavailableTitle";
+    messageKey = "task.apiErrorUnavailable";
+  } else if (/network|connect|timeout|timed out|dns/.test(signal)) {
+    titleKey = "task.apiErrorNetworkTitle";
+    messageKey = "task.apiErrorNetwork";
+  } else {
+    titleKey = "task.apiErrorGenericTitle";
+    messageKey = "task.apiErrorGeneric";
+  }
+
+  const errorCode = type || (Number.isFinite(status) ? `http_${status}` : "api_error");
+  const meta = [
+    t("task.errorCode", { code: errorCode }),
+    Number.isFinite(status) ? `HTTP ${status}` : "",
+    requestId ? t("task.apiErrorRequestId", { id: requestId }) : "",
+  ].filter(Boolean).join(" · ");
+  return {
+    title: t(titleKey),
+    message: t(messageKey, { provider }),
+    meta,
+    fingerprint: requestId || `${provider}:${statusText}:${type}:${detail}`,
+  };
+}
+
+function parseTaskCommandError(error: unknown): { code: string; detail: string } | null {
+  if (typeof error === "object" && error !== null) {
+    const payload = error as Record<string, unknown>;
+    if (typeof payload.code === "string" && payload.code.startsWith("preflight_")) {
+      return {
+        code: payload.code,
+        detail: typeof payload.detail === "string" ? payload.detail : "",
+      };
+    }
+  }
+
+  const raw = error instanceof Error ? error.message : String(error);
+  try {
+    const payload = JSON.parse(raw) as Record<string, unknown>;
+    if (typeof payload.code === "string" && payload.code.startsWith("preflight_")) {
+      return {
+        code: payload.code,
+        detail: typeof payload.detail === "string" ? payload.detail : "",
+      };
+    }
+  } catch {
+    const legacy = raw.match(/^(preflight_[a-z_]+)(?::\s*(.*))?$/s);
+    if (legacy) return { code: legacy[1], detail: legacy[2] ?? "" };
+  }
+  return null;
 }
 
 export function getLocale(): string {

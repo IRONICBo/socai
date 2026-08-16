@@ -1,12 +1,19 @@
 //! Tauri desktop entry — header status/configuration plus tools / agent panels.
 
+import "./lib/polyfills";
+
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
-import { applyLanguageToDocument, t } from "./lib/i18n";
+import {
+  applyLanguageToDocument,
+  formatTaskApiError,
+  formatTaskCommandErrorPresentation,
+  t,
+} from "./lib/i18n";
 import { authMenu } from "./panels/auth";
 import { agentPanel } from "./panels/tasks";
 import { settingsMenu } from "./panels/settings";
@@ -184,12 +191,22 @@ interface BackgroundMediaEvent {
 export interface ShellState {
   status: Status;
   rerender: () => void;
+  notifyTaskCommandError: (error: unknown) => boolean;
 }
 
 let status: Status = { state: "disconnected", reason: "starting" };
 let connectionDetailsOpen = false;
 // The sidebar (task history rail) starts expanded; the topbar toggle collapses it.
 let sidebarOpen = true;
+type RuntimeErrorNotice =
+  | { key: string; kind: "api"; error: string }
+  | { key: string; kind: "command"; error: unknown };
+let runtimeErrorNotice: RuntimeErrorNotice | null = null;
+let runtimeErrorNoticeTimer: number | null = null;
+let runtimeErrorDismissBound = false;
+const recentRuntimeErrors = new Map<string, number>();
+const RUNTIME_ERROR_NOTICE_MS = 5_000;
+const RUNTIME_ERROR_DEDUPE_MS = 30_000;
 
 // Sidebar-collapse toggle glyph (mirrors the prototype's PanelIcon). On macOS
 // the native traffic lights sit to its left; the .topbar-left gutter clears them.
@@ -201,7 +218,11 @@ const PANEL_ICON_SVG = `
 `;
 
 function shell(): ShellState {
-  return { status, rerender: render };
+  return {
+    status,
+    rerender: render,
+    notifyTaskCommandError: captureTaskCommandErrorNotice,
+  };
 }
 
 function render(): void {
@@ -234,6 +255,7 @@ function render(): void {
           ${settingsMenu.render(state)}
         </div>
       </header>
+      ${renderRuntimeErrorNotice()}
       <div class="body">
         ${sidebarOpen ? agentPanel.renderSidebar() : ""}
         <div class="workspace-stack">
@@ -246,6 +268,7 @@ function render(): void {
   bindConnectionStatusBar();
   bindUpdateChip();
   bindSidebarToggle();
+  bindRuntimeErrorNotice();
   agentPanel.bindHeader(state);
   authMenu.bind(
     state,
@@ -281,6 +304,88 @@ function render(): void {
     },
   );
   agentPanel.bind(state);
+}
+
+function renderRuntimeErrorNotice(): string {
+  if (!runtimeErrorNotice) return "";
+  const presentation = runtimeErrorNotice.kind === "api"
+    ? formatTaskApiError(runtimeErrorNotice.error)
+    : formatTaskCommandErrorPresentation(runtimeErrorNotice.error);
+  if (!presentation) return "";
+  return `
+    <aside class="runtime-error-notice" role="alert" aria-live="assertive">
+      <div class="runtime-error-notice__copy">
+        <div class="runtime-error-notice__heading">
+          <i class="runtime-error-notice__dot" aria-hidden="true"></i>
+          <p class="runtime-error-notice__title">${htmlEsc(presentation.title)}</p>
+        </div>
+        <p class="runtime-error-notice__message">${htmlEsc(presentation.message)}</p>
+        <p class="runtime-error-notice__meta">${htmlEsc(presentation.meta)}</p>
+      </div>
+      <button
+        type="button"
+        class="icon-button runtime-error-notice__dismiss"
+        data-runtime-error-dismiss
+        aria-label="${htmlEsc(t("task.apiErrorDismissAria"))}"
+      >×</button>
+    </aside>
+  `;
+}
+
+function bindRuntimeErrorNotice(): void {
+  if (runtimeErrorDismissBound) return;
+  runtimeErrorDismissBound = true;
+  document.addEventListener("click", (event) => {
+    const dismiss = event.composedPath().find((item) =>
+      item instanceof Element && item.hasAttribute("data-runtime-error-dismiss"));
+    if (!dismiss) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dismissRuntimeErrorNotice();
+  });
+}
+
+function dismissRuntimeErrorNotice(): void {
+  runtimeErrorNotice = null;
+  if (runtimeErrorNoticeTimer !== null) window.clearTimeout(runtimeErrorNoticeTimer);
+  runtimeErrorNoticeTimer = null;
+  document.querySelector(".runtime-error-notice")?.remove();
+}
+
+function showRuntimeErrorNotice(notice: RuntimeErrorNotice): void {
+  runtimeErrorNotice = notice;
+  if (runtimeErrorNoticeTimer !== null) window.clearTimeout(runtimeErrorNoticeTimer);
+  runtimeErrorNoticeTimer = window.setTimeout(() => {
+    if (runtimeErrorNotice?.key !== notice.key) return;
+    dismissRuntimeErrorNotice();
+  }, RUNTIME_ERROR_NOTICE_MS);
+}
+
+function captureTaskCommandErrorNotice(error: unknown): boolean {
+  const presentation = formatTaskCommandErrorPresentation(error);
+  if (!presentation) return false;
+  showRuntimeErrorNotice({
+    key: `command:${presentation.fingerprint}`,
+    kind: "command",
+    error,
+  });
+  return true;
+}
+
+function captureRuntimeErrorNotice(payload: AgentTaskEventPayload): boolean {
+  if (payload.kind !== "api_error" || !payload.text.trim()) return false;
+  console.error("agent task API error:", payload.text);
+  const presentation = formatTaskApiError(payload.text);
+  const key = `${payload.task_id}:${presentation.fingerprint}`;
+  const now = Date.now();
+  if ((recentRuntimeErrors.get(key) ?? 0) > now - RUNTIME_ERROR_DEDUPE_MS) return false;
+  recentRuntimeErrors.set(key, now);
+  for (const [seenKey, seenAt] of recentRuntimeErrors) {
+    if (seenAt <= now - RUNTIME_ERROR_DEDUPE_MS) recentRuntimeErrors.delete(seenKey);
+  }
+
+  showRuntimeErrorNotice({ key, kind: "api", error: payload.text });
+  return true;
 }
 
 function bindSidebarToggle(): void {
@@ -606,7 +711,8 @@ async function main(): Promise<void> {
   // run boundaries ask for a full render so the task list and conversation
   // turns update; normal stream rows append in place to preserve scroll.
   await listen<AgentTaskEventPayload>("agent_task:event", (event) => {
-    if (agentPanel.appendTaskEvent(event.payload)) render();
+    const showRuntimeError = captureRuntimeErrorNotice(event.payload);
+    if (agentPanel.appendTaskEvent(event.payload) || showRuntimeError) render();
     if (event.payload.kind === "tool_result") {
       // Each finished step's notes are on disk — refresh so the result row's
       // embed renders them now, not when the whole task ends.

@@ -706,12 +706,22 @@ export namespace agentPanel {
       return !!payload.snapshot;
     }
 
+    const failedFromApiError = payload.kind === "api_error"
+      && (task.status === "queued" || task.status === "running");
+    if (failedFromApiError) {
+      task.status = "failed";
+      task.finished_at = payload.created_at || Date.now();
+      task.error = payload.text;
+      task.target_id = null;
+      clearActivityState(task.task_id);
+    }
+
     if (payload.text.trim()) {
       const added = appendUniqueEvent(task, payload);
       if (added && !boundary) appendEventRowIfSelected(payload);
     }
 
-    return !!payload.snapshot || boundary;
+    return !!payload.snapshot || boundary || failedFromApiError;
   }
 
   // The persistent left rail: "new task" + the history list. Always rendered
@@ -806,20 +816,7 @@ export namespace agentPanel {
       });
     });
 
-    // The row's open control is a native <button>, so click/Enter/Space are
-    // handled for free — no hand-bound keydown, no role/tabindex.
-    document.querySelectorAll<HTMLButtonElement>("[data-task-id]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        selectedTaskId = btn.dataset.taskId ?? null;
-        view = "detail";
-        // A stale draft/error from whatever task was open before shouldn't
-        // leak into this one's reply box.
-        replyDraft = "";
-        replyError = "";
-        shell.rerender();
-        if (selectedTaskId) void loadTaskNotes(selectedTaskId, shell);
-      });
-    });
+    bindTaskSelection(shell);
     // Note interactions (viewer, card carousel, citation hover, external links)
     // are wired once via delegation on document.
     bindNoteInteractions();
@@ -873,6 +870,27 @@ export namespace agentPanel {
     if (selected && (selected.status === "running" || selected.status === "queued")) {
       updateLiveStrip(selected);
     }
+  }
+
+  function bindTaskSelection(shell: ShellState): void {
+    document.querySelectorAll<HTMLButtonElement>("[data-task-id]").forEach((button) => {
+      const select = (): void => {
+        const taskId = button.dataset.taskId;
+        if (!taskId) return;
+        selectedTaskId = taskId;
+        view = "detail";
+        replyDraft = "";
+        replyError = "";
+        shell.rerender();
+        void loadTaskNotes(taskId, shell);
+      };
+      button.addEventListener("pointerdown", (event) => {
+        if (event.button === 0) select();
+      });
+      button.addEventListener("click", (event) => {
+        if (event.detail === 0) select();
+      });
+    });
   }
 
   // A shell render rebuilds the left rail, so restore the task list's previous
@@ -1059,7 +1077,8 @@ export namespace agentPanel {
       view = "detail";
       draft = "";
     } catch (err) {
-      submitError = `${err}`;
+      console.error("agent_task_start failed:", err);
+      submitError = shell.notifyTaskCommandError(err) ? "" : `${err}`;
     } finally {
       submittingTask = false;
       shell.rerender();
@@ -1090,7 +1109,8 @@ export namespace agentPanel {
       upsertTask(snapshot);
       replyDraft = "";
     } catch (err) {
-      replyError = `${err}`;
+      console.error("agent_task_reply failed:", err);
+      replyError = shell.notifyTaskCommandError(err) ? "" : `${err}`;
     } finally {
       submittingReply = false;
       shell.rerender();
@@ -1108,9 +1128,7 @@ export namespace agentPanel {
       // The answer landing auto-folds the activity: drop the task's explicit
       // fold choices so the default (closed once finished) takes over.
       if (wasActive && statusRank(existing.status) >= 2) {
-        for (const key of [...activityOpen.keys()]) {
-          if (key.startsWith(`${snapshot.task_id}#`)) activityOpen.delete(key);
-        }
+        clearActivityState(snapshot.task_id);
       }
       return existing;
     }
@@ -1118,6 +1136,12 @@ export namespace agentPanel {
     tasks = [...tasks, created];
     if (!selectedTaskId) selectedTaskId = snapshot.task_id;
     return created;
+  }
+
+  function clearActivityState(taskId: string): void {
+    for (const key of [...activityOpen.keys()]) {
+      if (key.startsWith(`${taskId}#`)) activityOpen.delete(key);
+    }
   }
 
   // Delete-confirm dialog wiring: keep, a click on the scrim itself, or Esc
@@ -1282,6 +1306,10 @@ export namespace agentPanel {
   }
 
   function stableEventKey(event: AgentTaskEventPayload): string | null {
+    if (event.kind === "api_error") {
+      const requestId = event.text.match(/(?:^|\|\s*)request_id=([^|\s]+)/)?.[1];
+      if (requestId) return `${event.task_id}:api_error:${requestId}`;
+    }
     return event.sequence > 0 ? `${event.task_id}:sequence:${event.sequence}` : null;
   }
 
