@@ -18,7 +18,14 @@
 
 import type { AgentTaskEventPayload, AgentTaskSnapshot, Status } from "../main";
 import { esc } from "../lib/html";
-import { formatStepCount, formatTaskTimestamp, formatTokenUsage, t, taskStatusLabel } from "../lib/i18n";
+import {
+  formatStepCount,
+  formatTaskApiError,
+  formatTaskTimestamp,
+  formatTokenUsage,
+  t,
+  taskStatusLabel,
+} from "../lib/i18n";
 import { sendShortcutLabel } from "../lib/shortcuts";
 import feishuLogo from "../assets/connectors/feishu.png";
 import chromeRemoteDebuggingImage from "../assets/chrome-remote-debugging.png";
@@ -226,6 +233,10 @@ function buildTurn(
       }
     }
   }
+  const apiErrors = new Set(
+    body.filter((event) => event.kind === "api_error").map((event) => event.text.trim()),
+  );
+  body = body.filter((event) => event.kind !== "failed" || !apiErrors.has(event.text.trim()));
   return { userText, userAt, body, answerText, answerAt };
 }
 
@@ -249,7 +260,11 @@ function renderTurn(
   const metaBits: string[] = [];
   if (isLast) {
     const finishedAt = task.finished_at ? formatTaskTimestamp(task.finished_at) : null;
-    if (task.final_text) {
+    const apiError = taskApiError(task);
+    if (apiError) {
+      answer = renderTaskApiErrorCard(apiError);
+      if (finishedAt) metaBits.push(finishedAt);
+    } else if (task.final_text) {
       exportText = task.final_text;
       answer = `<div class="conv-answer result-md note-answer">${renderNoteAnswer(task.final_text)}</div>`;
       if (finishedAt) metaBits.push(finishedAt);
@@ -397,8 +412,41 @@ function renderActivity(
 export function renderEventRow(ev: AgentTaskEventPayload): string {
   const progressKey = ev.kind === "tool_progress" ? `${ev.id ?? ""}:${ev.phase ?? ""}` : "";
   const progressAttr = progressKey ? ` data-tool-progress="${esc(progressKey)}"` : "";
+  if (ev.kind === "api_error") return renderTaskApiErrorEvent(ev);
   const text = ev.kind === "tool_progress" ? toolProgressText(ev) : ev.text;
   return `<div class="act-row act-row--${esc(ev.kind)}"${progressAttr}><span class="act-row__glyph" aria-hidden="true">${eventGlyph(ev.kind)}</span><span class="act-row__text">${esc(text)}</span></div>`;
+}
+
+function renderTaskApiErrorEvent(ev: AgentTaskEventPayload): string {
+  const presentation = formatTaskApiError(ev.text);
+  return `<div class="act-row act-row--api_error">
+    <span class="act-row__glyph" aria-hidden="true">${eventGlyph(ev.kind)}</span>
+    <span class="act-row__text task-api-error-copy">
+      <span class="task-api-error-copy__title">${esc(presentation.title)}</span>
+      <span class="task-api-error-copy__message">${esc(presentation.message)}</span>
+      <span class="task-api-error-copy__meta">${esc(presentation.meta)}</span>
+    </span>
+  </div>`;
+}
+
+function renderTaskApiErrorCard(error: string): string {
+  const presentation = formatTaskApiError(error);
+  return `<div class="task-api-error-card" role="alert">
+    <div class="task-api-error-card__heading">
+      <i class="runtime-error-notice__dot" aria-hidden="true"></i>
+      <p class="task-api-error-card__title">${esc(presentation.title)}</p>
+    </div>
+    <p class="task-api-error-card__message">${esc(presentation.message)}</p>
+    <p class="task-api-error-card__meta">${esc(presentation.meta)}</p>
+  </div>`;
+}
+
+function taskApiError(task: AgentTaskView): string | null {
+  const error = task.error?.trim();
+  if (error && /\bAPI error\b/i.test(error)) return error;
+  const finalText = task.final_text?.trim();
+  if (!finalText || !/^API error:\s*/i.test(finalText)) return null;
+  return finalText.replace(/^API error:\s*/i, "");
 }
 
 function toolProgressText(ev: AgentTaskEventPayload): string {

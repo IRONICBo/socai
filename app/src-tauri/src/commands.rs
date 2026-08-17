@@ -12,9 +12,9 @@ use socai_core::agent::{
 use socai_core::runtime::{
     create_llm_provider_for_task, ensure_llm_provider_configured_for,
     run_agent_task as run_agent_with_tools, AgentRunConfig, BrowserStatus, ChromeConnectOptions,
-    RuntimePageSession, SocaiRuntime,
+    ChromeProfile, RuntimePageSession, SocaiRuntime,
 };
-use socai_core::sites::xhs::XhsHistoryStore;
+use socai_core::sites::xhs::{XhsHistoryStore, XhsPageRuntime};
 use socai_core::sites::{find_site, SiteSpec};
 use socai_core::telemetry::query_text_enabled;
 use socai_core::telemetry::tool_call::{summarize_tool_args, summarize_tool_result};
@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::io::{BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const TAURI_AGENT_PREAMBLE: &str =
@@ -140,20 +141,29 @@ pub async fn app_relaunch(app: AppHandle) {
     tauri::process::restart(&app.env());
 }
 
-/// Ensure the browser is connected before an agent run, connecting when it is
-/// not. Starting a run expresses the user's intent to resume, so a dropped
-/// connection reconnects here instead of bouncing them to the connect button.
-/// Routine for remote profiles — hosted sessions expire on a server-side
-/// timeout between runs, and reconnecting mints a fresh one — and it also
-/// revives a killed managed chrome. Bounded by the runtime's connect budget.
-async fn ensure_browser_connected(runtime: &SocaiRuntime) -> Result<(), String> {
-    let site = app_site().map_err(|err| format!("{err:#}"))?;
-    let options = ChromeConnectOptions::from_config().map_err(|err| format!("{err:#}"))?;
+/// Ensure the browser is connected before an agent run and return the shared
+/// site page for the login preflight. Starting a run expresses the user's
+/// intent to resume, so a dropped connection reconnects here instead of
+/// bouncing them to the connect button. Routine for remote profiles — hosted
+/// sessions expire on a server-side timeout between runs, and reconnecting
+/// mints a fresh one — and it also revives a killed managed chrome. Bounded by
+/// the runtime's connect budget.
+async fn ensure_browser_connected(
+    runtime: &SocaiRuntime,
+) -> Result<Arc<RuntimePageSession>, String> {
+    let site =
+        app_site().map_err(|error| task_preflight_error("preflight_site", format!("{error:#}")))?;
+    let options = ChromeConnectOptions::from_config()
+        .map_err(|error| task_preflight_error("preflight_browser_config", format!("{error:#}")))?;
+    let browser_error_code = if options.profile == ChromeProfile::Remote {
+        "preflight_browser_remote"
+    } else {
+        "preflight_browser"
+    };
     runtime
         .ensure_site_page_with_browser_options(site.id, site.home_url, options)
         .await
-        .map(|_| ())
-        .map_err(|err| format!("{err:#}"))
+        .map_err(|error| task_preflight_error(browser_error_code, format!("{error:#}")))
 }
 
 async fn label_controlled_page(page: &RuntimePageSession, label: &str) {
@@ -592,13 +602,11 @@ pub async fn agent_task_start(
     provider: Option<String>,
     model: Option<String>,
 ) -> Result<AgentTaskSnapshot, String> {
-    ensure_browser_connected(&runtime).await?;
     let task_text = task.trim().to_string();
     if task_text.is_empty() {
         return Err("task is empty".into());
     }
-    ensure_llm_provider_configured_for(provider.as_deref(), model.as_deref())
-        .map_err(|e| format!("{e:#}"))?;
+    run_task_preflight(&runtime, provider.as_deref(), model.as_deref()).await?;
 
     // One conversation = one folder under the runs root, named after the
     // first task; each turn's run dir nests inside it (turn-01_…, turn-02_…).
@@ -676,7 +684,6 @@ pub async fn agent_task_reply(
     task_id: String,
     message: String,
 ) -> Result<AgentTaskSnapshot, String> {
-    ensure_browser_connected(&runtime).await?;
     let message_text = message.trim().to_string();
     if message_text.is_empty() {
         return Err("message is empty".into());
@@ -694,8 +701,7 @@ pub async fn agent_task_reply(
     };
     let provider = existing.provider.clone();
     let model = existing.model.clone();
-    ensure_llm_provider_configured_for(provider.as_deref(), model.as_deref())
-        .map_err(|e| format!("{e:#}"))?;
+    run_task_preflight(&runtime, provider.as_deref(), model.as_deref()).await?;
 
     // This turn's run dir nests inside the conversation dir. Tasks created
     // before nesting have their session dir under ~/.socai/sessions; their
@@ -769,6 +775,64 @@ pub async fn agent_task_reply(
         let _ = start_tx.send(());
     }
     Ok(snapshot)
+}
+
+async fn run_task_preflight(
+    runtime: &SocaiRuntime,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<(), String> {
+    let resolved_provider = ensure_llm_provider_configured_for(provider, model)
+        .map_err(|error| task_preflight_error("preflight_model_config", format!("{error:#}")))?;
+    if resolved_provider == Provider::Socai {
+        if !socai_core::cloud::pro_activated() {
+            return Err(task_preflight_error(
+                "preflight_auth",
+                "sign in before using Socai Agent",
+            ));
+        }
+        let wallet = socai_core::cloud::wallet_balance().await.map_err(|error| {
+            task_preflight_error("preflight_region_or_account", format!("{error:#}"))
+        })?;
+        validate_preflight_balance(wallet.balance_points)?;
+    }
+
+    let page = ensure_browser_connected(runtime).await?;
+    let login_error_code = if page.is_remote_browser() {
+        "preflight_xhs_session"
+    } else {
+        "preflight_xhs_login"
+    };
+    let login = XhsPageRuntime::new(&page)
+        .login_gate(true)
+        .await
+        .map_err(|error| task_preflight_error(login_error_code, format!("{error:#}")))?;
+    if login == socai_core::sites::xhs::page::LoginGate::Required {
+        return Err(task_preflight_error(
+            login_error_code,
+            "Xiaohongshu login is required in the active browser session",
+        ));
+    }
+    Ok(())
+}
+
+fn task_preflight_error(code: &str, detail: impl std::fmt::Display) -> String {
+    json!({
+        "code": code,
+        "detail": detail.to_string(),
+    })
+    .to_string()
+}
+
+fn validate_preflight_balance(balance_points: i64) -> Result<(), String> {
+    if balance_points <= 0 {
+        Err(task_preflight_error(
+            "preflight_balance",
+            "insufficient Socai points; recharge or switch provider",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -1996,5 +2060,18 @@ mod tests {
             selected[0].get("selected_model").and_then(Value::as_str),
             Some("o3")
         );
+    }
+
+    #[test]
+    fn preflight_rejects_empty_hosted_balance() {
+        assert!(validate_preflight_balance(100).is_ok());
+        let error = validate_preflight_balance(0).expect_err("zero balance must fail");
+        let payload: Value = serde_json::from_str(&error).expect("preflight error must be JSON");
+        assert_eq!(payload["code"], "preflight_balance");
+        assert_eq!(
+            payload["detail"],
+            "insufficient Socai points; recharge or switch provider"
+        );
+        assert!(validate_preflight_balance(-1).is_err());
     }
 }
