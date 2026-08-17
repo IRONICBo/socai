@@ -290,14 +290,12 @@ export namespace settingsMenu {
     const errorTitle = whisper?.error ? ` title="${esc(whisper.error)}"` : "";
     return `
       <section class="settings-group">
-        <p class="settings-group-label">${esc(t("settings.voice"))}</p>
         <div class="settings-row">
-          <span class="t-small settings-row-label">${esc(t("settings.whisperModel"))}</span>
-          <div class="seg-toggle" role="group" aria-label="${esc(t("settings.whisperModel"))}"${busy ? ` title="${esc(busyTitle)}"` : ""}>
+          <span class="t-small settings-row-label">${esc(t("settings.voice"))}</span>
+          <div class="seg-toggle" role="group" aria-label="${esc(t("settings.voice"))}"${busy ? ` title="${esc(busyTitle)}"` : ""}>
             ${controls}
           </div>
         </div>
-        <p class="t-small subtle settings-field-hint">${esc(t("settings.whisperHint"))}</p>
         <p id="settings-whisper-state" class="t-small subtle settings-voice-state${whisper?.state === "error" ? " result-error" : ""}" role="status" aria-live="polite"${errorTitle}>${esc(busy ? busyTitle : voiceInput.statusText())}</p>
       </section>
     `;

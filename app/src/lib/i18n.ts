@@ -278,11 +278,6 @@ const messages = {
     zh: "运行报告、轨迹和截图的保存位置。",
   },
   "settings.voice": { en: "voice input", zh: "语音输入" },
-  "settings.whisperModel": { en: "Whisper model", zh: "Whisper 模型" },
-  "settings.whisperHint": {
-    en: "runs locally. models are stored under socai's default data directory.",
-    zh: "完全在本地运行，模型保存在 socai 默认数据目录中。",
-  },
   "settings.inviteCode": { en: "invite code", zh: "邀请码" },
   "settings.enter": { en: "enter", zh: "输入" },
   "settings.loginForInvite": { en: "sign in first", zh: "请先登录" },
