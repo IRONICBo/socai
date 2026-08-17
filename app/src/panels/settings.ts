@@ -23,6 +23,7 @@ import {
   t,
 } from "../lib/i18n";
 import { authMenu } from "./auth";
+import { voiceInput, type WhisperModelSize } from "../lib/voice-input";
 
 /** Mirrors the `DesktopConfig` returned by the `config_get` command. */
 interface DesktopConfig {
@@ -182,6 +183,7 @@ export namespace settingsMenu {
     return `
       <div class="topbar-popover settings-popover" role="dialog" aria-label="${esc(t("settings.title"))}">
         ${renderGeneralGroup(draft)}
+        ${renderVoiceGroup()}
         ${renderOutputGroup(config, draft)}
         ${renderInviteGroup(draft)}
         ${renderStatus()}
@@ -268,6 +270,39 @@ export namespace settingsMenu {
     `;
   }
 
+  function renderVoiceGroup(): string {
+    const whisper = voiceInput.getStatus();
+    const selected = whisper?.model_size ?? "medium";
+    const voiceBusy = voiceInput.isBusy();
+    const busy = voiceBusy || whisper?.state === "downloading";
+    const busyTitle = voiceBusy ? t("voice.unavailable.busy") : voiceInput.statusText();
+    const sizes: WhisperModelSize[] = ["low", "medium", "high"];
+    const controls = sizes.map((size) => `
+      <button
+        type="button"
+        class="seg-toggle__button"
+        data-settings-whisper-size="${size}"
+        aria-pressed="${selected === size ? "true" : "false"}"
+        aria-describedby="settings-whisper-state"
+        ${busy ? "disabled" : ""}
+      >${esc(voiceInput.modelSizeLabel(size))}</button>
+    `).join("");
+    const errorTitle = whisper?.error ? ` title="${esc(whisper.error)}"` : "";
+    return `
+      <section class="settings-group">
+        <p class="settings-group-label">${esc(t("settings.voice"))}</p>
+        <div class="settings-row">
+          <span class="t-small settings-row-label">${esc(t("settings.whisperModel"))}</span>
+          <div class="seg-toggle" role="group" aria-label="${esc(t("settings.whisperModel"))}"${busy ? ` title="${esc(busyTitle)}"` : ""}>
+            ${controls}
+          </div>
+        </div>
+        <p class="t-small subtle settings-field-hint">${esc(t("settings.whisperHint"))}</p>
+        <p id="settings-whisper-state" class="t-small subtle settings-voice-state${whisper?.state === "error" ? " result-error" : ""}" role="status" aria-live="polite"${errorTitle}>${esc(busy ? busyTitle : voiceInput.statusText())}</p>
+      </section>
+    `;
+  }
+
   function renderStatus(): string {
     const text =
       status === "saving"
@@ -320,6 +355,13 @@ export namespace settingsMenu {
         if (!isSupportedLanguage(next) || getLanguage() === next) return;
         setLanguage(next);
         shell.rerender();
+      });
+    });
+
+    document.querySelectorAll<HTMLButtonElement>("[data-settings-whisper-size]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const size = button.dataset.settingsWhisperSize as WhisperModelSize | undefined;
+        if (size) void voiceInput.selectModel(size);
       });
     });
 

@@ -18,6 +18,7 @@ import { authMenu } from "./panels/auth";
 import { agentPanel } from "./panels/tasks";
 import { settingsMenu } from "./panels/settings";
 import { subscriptionMenu } from "./panels/subscription";
+import { voiceInput } from "./lib/voice-input";
 
 export type Status =
   | { state: "disconnected"; reason: string }
@@ -756,6 +757,7 @@ async function main(): Promise<void> {
     console.error("getVersion failed:", e);
   }
   await Promise.all([settingsMenu.loadConfig(), authMenu.loadSession()]);
+  await voiceInput.initialize(() => render());
   await subscriptionMenu.refresh(authMenu.isLoggedIn());
   render();
   bindGlobalDismiss();

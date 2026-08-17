@@ -50,6 +50,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "macOS": {
+      "infoPlist": "Info.plist",
+      "entitlements": "Entitlements.plist"
+    },
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"

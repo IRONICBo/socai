@@ -3,6 +3,7 @@ mod connectors;
 mod tasks;
 mod telemetry;
 mod timeline;
+mod whisper;
 
 use std::collections::HashSet;
 use std::sync::{
@@ -129,6 +130,7 @@ pub fn run() {
         .manage(AgentTaskRegistry::default())
         .manage(connectors::feishu::FeishuState::default())
         .manage(telemetry)
+        .manage(whisper::WhisperState::default())
         .setup(|app| {
             // Let the webview load locally-downloaded note media (images/video)
             // from the run-artifact root via the asset protocol (convertFileSrc).
@@ -334,6 +336,9 @@ pub fn run() {
             commands::config_get,
             commands::config_set,
             commands::config_unset,
+            whisper::whisper_status,
+            whisper::whisper_select_model,
+            whisper::whisper_transcribe,
             commands::pro_activate,
             commands::auth_session,
             commands::auth_sms_send,

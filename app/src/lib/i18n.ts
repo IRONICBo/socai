@@ -277,6 +277,12 @@ const messages = {
     en: "where run reports, traces, and screenshots are saved.",
     zh: "运行报告、轨迹和截图的保存位置。",
   },
+  "settings.voice": { en: "voice input", zh: "语音输入" },
+  "settings.whisperModel": { en: "Whisper model", zh: "Whisper 模型" },
+  "settings.whisperHint": {
+    en: "runs locally. models are stored under socai's default data directory.",
+    zh: "完全在本地运行，模型保存在 socai 默认数据目录中。",
+  },
   "settings.inviteCode": { en: "invite code", zh: "邀请码" },
   "settings.enter": { en: "enter", zh: "输入" },
   "settings.loginForInvite": { en: "sign in first", zh: "请先登录" },
@@ -316,6 +322,83 @@ const messages = {
   "settings.loadFailed": {
     en: "could not load settings.",
     zh: "无法加载设置。",
+  },
+  "voice.model.low": { en: "low", zh: "低" },
+  "voice.model.medium": { en: "medium", zh: "中" },
+  "voice.model.high": { en: "high", zh: "高" },
+  "voice.status.ready": { en: "ready · {model}", zh: "可用 · {model}" },
+  "voice.status.binaryMissing": {
+    en: "Whisper is not installed. install whisper-cpp to enable voice input.",
+    zh: "本地 Whisper 未安装，安装 whisper-cpp 后可使用语音输入。",
+  },
+  "voice.status.modelMissing": {
+    en: "the selected model is not downloaded.",
+    zh: "所选模型尚未下载。",
+  },
+  "voice.status.downloading": {
+    en: "downloading model · {percent}%",
+    zh: "正在下载模型 · {percent}%",
+  },
+  "voice.status.failed": {
+    en: "local Whisper setup failed. choose the model again to retry.",
+    zh: "本地 Whisper 配置失败，重新选择模型即可重试。",
+  },
+  "voice.start": { en: "start voice input", zh: "开始语音输入" },
+  "voice.stop": { en: "stop recording and transcribe", zh: "停止录音并转写" },
+  "voice.requesting": { en: "requesting microphone access…", zh: "正在请求麦克风权限…" },
+  "voice.transcribing": { en: "transcribing locally…", zh: "正在本地转写…" },
+  "voice.unavailable.taskBusy": {
+    en: "voice input is unavailable while this task is running.",
+    zh: "任务运行期间无法使用语音输入。",
+  },
+  "voice.unavailable.busy": {
+    en: "finish the current recording or transcription before changing the Whisper model.",
+    zh: "请先完成当前录音或转写，再切换 Whisper 模型。",
+  },
+  "voice.unavailable.browser": {
+    en: "voice input is unavailable in this webview.",
+    zh: "当前 WebView 不支持语音输入。",
+  },
+  "voice.unavailable.checking": {
+    en: "checking local Whisper…",
+    zh: "正在检测本地 Whisper…",
+  },
+  "voice.unavailable.installFailed": {
+    en: "local Whisper installation failed or was not found; voice input is unavailable.",
+    zh: "本地 Whisper 安装失败或未找到，语音输入不可用。",
+  },
+  "voice.unavailable.downloading": {
+    en: "Whisper model is downloading ({percent}%); voice input will enable when ready.",
+    zh: "Whisper 模型正在下载（{percent}%），完成后会自动启用语音输入。",
+  },
+  "voice.unavailable.modelMissing": {
+    en: "the local Whisper model is missing; select a model in settings.",
+    zh: "缺少本地 Whisper 模型，请在设置中选择模型。",
+  },
+  "voice.unavailable.failed": {
+    en: "local Whisper setup failed; open settings and retry the model download.",
+    zh: "本地 Whisper 配置失败，请打开设置重试模型下载。",
+  },
+  "voice.error.permission": {
+    en: "microphone permission was denied. allow it in system settings and try again.",
+    zh: "麦克风权限被拒绝，请在系统设置中允许后重试。",
+  },
+  "voice.error.noDevice": { en: "no microphone was found.", zh: "未找到可用的麦克风。" },
+  "voice.error.capture": {
+    en: "the microphone could not be started.",
+    zh: "无法启动麦克风。",
+  },
+  "voice.error.tooShort": {
+    en: "the recording is too short. speak for a little longer and try again.",
+    zh: "录音太短，请多说一会儿后重试。",
+  },
+  "voice.error.maxDuration": {
+    en: "recording stopped after two minutes. start a new recording to continue.",
+    zh: "录音已在两分钟后自动停止，请重新开始录音。",
+  },
+  "voice.error.noSpeech": {
+    en: "no speech was recognized.",
+    zh: "没有识别到语音内容。",
   },
   "agent.label": { en: "model", zh: "模型" },
   "agent.configurationAria": { en: "agent configuration", zh: "智能体设置" },

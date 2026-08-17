@@ -1,9 +1,12 @@
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use tempfile::NamedTempFile;
 
 use crate::cdp::{ChromeConnectOptions, ChromeProfile};
 
@@ -15,6 +18,8 @@ pub struct SocaiConfig {
     pub runs: RunsConfig,
     #[serde(default)]
     pub cloud: CloudConfig,
+    #[serde(default)]
+    pub whisper: WhisperConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -44,6 +49,14 @@ pub struct CloudConfig {
     /// `https://api.example.com` or `http://127.0.0.1:8000`.
     #[serde(default)]
     pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WhisperConfig {
+    /// Product-facing local transcription quality: `low`, `medium`, or
+    /// `high`. Missing means the desktop's balanced default (`medium`).
+    #[serde(default)]
+    pub model_size: Option<String>,
 }
 
 impl SocaiConfig {
@@ -81,6 +94,7 @@ enum ConfigKey {
     ChromeProfileDir,
     RunsDir,
     CloudBaseUrl,
+    WhisperModelSize,
 }
 
 impl ConfigKey {
@@ -93,8 +107,11 @@ impl ConfigKey {
             "cloud.base_url" | "cloud.base-url" | "cloud.url" | "server.url" => {
                 Ok(Self::CloudBaseUrl)
             }
+            "whisper.model_size" | "whisper.model-size" | "whisper.size" => {
+                Ok(Self::WhisperModelSize)
+            }
             other => anyhow::bail!(
-                "unknown config key {other:?}; supported keys: chrome.profile, chrome.profile_dir, runs.dir, cloud.base_url"
+                "unknown config key {other:?}; supported keys: chrome.profile, chrome.profile_dir, runs.dir, cloud.base_url, whisper.model_size"
             ),
         }
     }
@@ -105,6 +122,7 @@ impl ConfigKey {
             Self::ChromeProfileDir => &["chrome", "profile_dir"],
             Self::RunsDir => &["runs", "dir"],
             Self::CloudBaseUrl => &["cloud", "base_url"],
+            Self::WhisperModelSize => &["whisper", "model_size"],
         }
     }
 
@@ -114,6 +132,7 @@ impl ConfigKey {
             Self::ChromeProfileDir => "chrome.profile_dir",
             Self::RunsDir => "runs.dir",
             Self::CloudBaseUrl => "cloud.base_url",
+            Self::WhisperModelSize => "whisper.model_size",
         }
     }
 }
@@ -146,18 +165,46 @@ pub fn load_config_value() -> Result<Value> {
 }
 
 pub fn save_config_value(value: &Value) -> Result<PathBuf> {
+    let path = config_path()?;
+    let _lock = ConfigWriteLock::acquire(&path)?;
+    save_config_value_unlocked(value, &path)
+}
+
+fn save_config_value_unlocked(value: &Value, path: &PathBuf) -> Result<PathBuf> {
     if !value.is_object() {
         anyhow::bail!("socai config root must be a JSON object");
     }
-    let path = config_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let mut rendered = serde_json::to_string_pretty(value)?;
     rendered.push('\n');
-    fs::write(&path, rendered).with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(path)
+    let parent = path
+        .parent()
+        .context("socai config path has no parent directory")?;
+    // A named temporary file in the same directory gives us an atomic replace
+    // on every supported platform (`MoveFileExW` on Windows, `rename` on Unix)
+    // while retaining the previous config if installation fails.
+    let mut file = NamedTempFile::new_in(parent).with_context(|| {
+        format!(
+            "failed to create a temporary config in {}",
+            parent.display()
+        )
+    })?;
+    file.write_all(rendered.as_bytes())
+        .with_context(|| format!("failed to write temporary config for {}", path.display()))?;
+    file.as_file()
+        .sync_all()
+        .with_context(|| format!("failed to sync temporary config for {}", path.display()))?;
+    file.persist(path)
+        .map_err(|err| err.error)
+        .with_context(|| format!("failed to install {}", path.display()))?;
+    #[cfg(unix)]
+    if let Ok(directory) = fs::File::open(parent) {
+        let _ = directory.sync_all();
+    }
+    Ok(path.clone())
 }
 
 pub fn get_config_key(key: &str) -> Result<Option<Value>> {
@@ -169,17 +216,53 @@ pub fn get_config_key(key: &str) -> Result<Option<Value>> {
 pub fn set_config_key(key: &str, raw_value: &str) -> Result<PathBuf> {
     let key = ConfigKey::parse(key)?;
     let value = parse_key_value(key, raw_value)?;
+    let path = config_path()?;
+    let _lock = ConfigWriteLock::acquire(&path)?;
     let mut config = load_config_value()?;
     set_path(&mut config, key.path(), value)?;
-    save_config_value(&config)
+    save_config_value_unlocked(&config, &path)
 }
 
 pub fn unset_config_key(key: &str) -> Result<PathBuf> {
     let key = ConfigKey::parse(key)?;
+    let path = config_path()?;
+    let _lock = ConfigWriteLock::acquire(&path)?;
     let mut config = load_config_value()?;
     unset_path(&mut config, key.path());
     prune_empty_objects(&mut config);
-    save_config_value(&config)
+    save_config_value_unlocked(&config, &path)
+}
+
+struct ConfigWriteLock(fs::File);
+
+impl ConfigWriteLock {
+    fn acquire(config_path: &std::path::Path) -> Result<Self> {
+        let parent = config_path
+            .parent()
+            .context("socai config path has no parent directory")?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+        let lock_path = parent.join(".config.json.lock");
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&lock_path)
+            .with_context(|| format!("failed to open {}", lock_path.display()))?;
+        file.lock_exclusive()
+            .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for ConfigWriteLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
 }
 
 pub fn canonical_config_key(key: &str) -> Result<&'static str> {
@@ -199,6 +282,10 @@ fn parse_key_value(key: ConfigKey, raw_value: &str) -> Result<Value> {
         ConfigKey::ChromeProfileDir => Ok(Value::String(value.to_string())),
         ConfigKey::RunsDir => Ok(Value::String(normalized_path_value(value)?)),
         ConfigKey::CloudBaseUrl => Ok(Value::String(normalized_url_value(value)?)),
+        ConfigKey::WhisperModelSize => match value.to_ascii_lowercase().as_str() {
+            "low" | "medium" | "high" => Ok(Value::String(value.to_ascii_lowercase())),
+            _ => anyhow::bail!("whisper.model_size must be one of: low, medium, high"),
+        },
     }
 }
 
