@@ -1,5 +1,7 @@
 //! Default system prompt for the agent loop.
 
+use crate::agent::file_bash_tools::shell_runtime_prompt;
+
 pub const BASE_SYSTEM_PROMPT: &str =
     "You are a computer-use agent. Use the provided tools when they help complete\n\
 the user's task. Think briefly, take one or more useful actions, verify results\n\
@@ -18,6 +20,9 @@ pub fn build_system_prompt(tool_names: &[&str], extra_instructions: &str) -> Str
         "Today's date is {}.",
         chrono::Local::now().format("%Y-%m-%d (%A)")
     ));
+    if tool_names.contains(&"shell") {
+        parts.push(shell_runtime_prompt());
+    }
     if !tool_names.is_empty() {
         let listing = tool_names
             .iter()

@@ -24,6 +24,7 @@
 //! working directory set to the current run dir.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -405,6 +406,65 @@ impl ShellTool {
     }
 }
 
+/// Compact host context injected into the system prompt whenever `shell` is
+/// available. The model sees this before its first tool call, so it can choose
+/// the platform's real shell contract instead of guessing from a generic
+/// `shell` tool name. Runtime discovery is process-free and cached.
+pub(crate) fn shell_runtime_prompt() -> String {
+    let runtime = crate::util::machine::runtime_platform_info();
+    let os_name = match runtime.os {
+        "macos" => "macOS",
+        "windows" => "Windows",
+        "linux" => "Linux",
+        other => other,
+    };
+    let os = if runtime.os_version.trim().is_empty() {
+        os_name.to_string()
+    } else {
+        format!("{os_name} {}", runtime.os_version.trim())
+    };
+    let mut facts = vec![format!("os={os}"), format!("arch={}", runtime.arch)];
+    if !runtime.os_kernel_version.trim().is_empty()
+        && runtime.os_kernel_version.trim() != runtime.os_version.trim()
+    {
+        facts.push(format!("kernel={}", runtime.os_kernel_version.trim()));
+    }
+    let shell_program = shell_runtime_program();
+    facts.push(format!("shell={}", shell_runtime_name()));
+    if shell_program.is_absolute() {
+        facts.push(format!("shell_path={}", shell_program.display()));
+    } else {
+        facts.push(format!("shell_command={}", shell_program.display()));
+    }
+
+    let guidance = match runtime.os {
+        "windows" => "Use PowerShell syntax for `shell` commands. Do not call `bash`, `sh`, or use POSIX-only syntax unless the user explicitly provides such an environment.",
+        "macos" => "Use POSIX `sh` syntax for `shell` commands; commands are executed with `sh -c`. macOS ships BSD userland tools, so do not assume GNU-only command flags.",
+        "linux" => "Use POSIX `sh` syntax for `shell` commands; commands are executed with `sh -c`. Do not assume Bash-only syntax unless `bash` is explicitly invoked and available.",
+        _ => "Use the reported shell and its native syntax for `shell` commands. Do not assume shell-specific extensions unless their interpreter is explicitly invoked and available.",
+    };
+
+    format!("Runtime environment: {}. {guidance}", facts.join("; "))
+}
+
+#[cfg(not(windows))]
+fn shell_runtime_name() -> &'static str {
+    "POSIX sh"
+}
+
+#[cfg(windows)]
+fn shell_runtime_name() -> &'static str {
+    let executable = shell_runtime_program()
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("powershell");
+    if executable.eq_ignore_ascii_case("pwsh") {
+        "PowerShell (pwsh)"
+    } else {
+        "Windows PowerShell (powershell.exe)"
+    }
+}
+
 #[async_trait]
 impl Tool for ShellTool {
     fn name(&self) -> &str {
@@ -414,14 +474,14 @@ impl Tool for ShellTool {
     fn description(&self) -> &str {
         #[cfg(windows)]
         if !self.roots.is_empty() {
-            "Run a Windows PowerShell command and return its stdout/stderr and \
+            "Run a PowerShell command and return its stdout/stderr and \
              exit code. Working directory is the current run dir. Confined to \
              socai's data directories — commands referencing paths outside \
              them are rejected. Use this to write output files (e.g. \
              Set-Content), list/search run artifacts, create directories, etc. within \
              those directories."
         } else {
-            "Run a Windows PowerShell command and return its stdout/stderr and exit \
+            "Run a PowerShell command and return its stdout/stderr and exit \
              code. Working directory is the current run dir under ~/.socai/runs, so \
              relative paths land there; use absolute paths for other run dirs or \
              the session dir. Use this to write output files, list/search artifacts, \
@@ -453,7 +513,7 @@ impl Tool for ShellTool {
         json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "Platform-native shell command: Windows PowerShell on Windows, `sh -c` elsewhere." },
+                "command": { "type": "string", "description": "Platform-native shell command: PowerShell on Windows, `sh -c` elsewhere." },
                 "timeout_ms": { "type": "integer", "description": "Optional timeout in milliseconds (default 120000)." }
             },
             "required": ["command"]
@@ -533,7 +593,7 @@ impl Tool for ShellTool {
 
 #[cfg(not(windows))]
 fn shell_command(command: &str) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new("sh");
+    let mut cmd = tokio::process::Command::new(shell_runtime_program());
     cmd.arg("-c").arg(command);
     cmd
 }
@@ -543,10 +603,94 @@ fn shell_command(command: &str) -> tokio::process::Command {
     let script = format!(
         "$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n{command}"
     );
-    let mut cmd = tokio::process::Command::new("powershell.exe");
+    let mut cmd = tokio::process::Command::new(shell_runtime_program());
     cmd.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
         .arg(script);
     cmd
+}
+
+/// Resolve once so the prompt and every command use the same executable.
+fn shell_runtime_program() -> &'static Path {
+    static PROGRAM: OnceLock<PathBuf> = OnceLock::new();
+    PROGRAM.get_or_init(resolve_shell_program).as_path()
+}
+
+/// Use the system POSIX shell on macOS and Linux instead of the user's
+/// interactive shell (`$SHELL` may be zsh, fish, etc.). `/bin/sh` is the
+/// execution contract exposed by this tool; PATH lookup is only a fallback
+/// for Unix-like targets whose system shell lives elsewhere.
+#[cfg(not(windows))]
+fn resolve_shell_program() -> PathBuf {
+    for candidate in [PathBuf::from("/bin/sh"), PathBuf::from("/usr/bin/sh")] {
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+
+    executable_on_path("sh").unwrap_or_else(|| PathBuf::from("sh"))
+}
+
+/// Prefer the modern `pwsh` executable (PowerShell 7 in its standard install
+/// location) for `&&` and predictable UTF-8 behavior, then fall back to the
+/// Windows PowerShell installation that ships with the OS. Resolution is
+/// filesystem-only so building the first prompt never launches shell code.
+#[cfg(windows)]
+fn resolve_shell_program() -> PathBuf {
+    for root in [
+        std::env::var_os("ProgramFiles"),
+        std::env::var_os("ProgramW6432"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let root = PathBuf::from(root);
+        if !root.is_absolute() {
+            continue;
+        }
+        let candidate = root.join("PowerShell").join("7").join("pwsh.exe");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+
+    if let Some(path) = executable_on_path("pwsh.exe") {
+        return path;
+    }
+
+    if let Some(system_root) = std::env::var_os("SystemRoot").or_else(|| std::env::var_os("WINDIR"))
+    {
+        let system_root = PathBuf::from(system_root);
+        let candidate = system_root
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        if system_root.is_absolute() && candidate.is_file() {
+            return candidate;
+        }
+    }
+
+    if let Some(path) = executable_on_path("powershell.exe") {
+        return path;
+    }
+
+    PathBuf::from("powershell.exe")
+}
+
+fn executable_on_path(name: &str) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .map(|dir| {
+            if dir.is_absolute() {
+                dir.join(name)
+            } else {
+                cwd.join(dir).join(name)
+            }
+        })
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.canonicalize().unwrap_or(candidate))
 }
 
 /// Backward-compatible Rust API alias. The agent-facing tool is named `shell`.
