@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::agent::api_errors::format_http_error;
+use crate::agent::api_errors::{format_api_error, format_http_error};
 use crate::agent::llm::{
     Backend, Block, LLMResponse, Message, StopReason, TokenUsage, ToolCall, ToolResultContent,
     ToolSchema,
@@ -687,7 +687,7 @@ fn parse_responses_sse(
                 }
             }
             Some("response.failed") | Some("response.incomplete") => {
-                anyhow::bail!("OpenAI Codex Responses request failed: {value}");
+                anyhow::bail!(format_api_error("openai-codex", &value));
             }
             _ => {}
         }

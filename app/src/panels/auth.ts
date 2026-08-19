@@ -5,7 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ShellState } from "../main";
 import { esc } from "../lib/html";
-import { t } from "../lib/i18n";
+import { SIGNUP_BONUS_POINTS, setAccountSignedIn, t } from "../lib/i18n";
 
 interface AuthSession {
   logged_in: boolean;
@@ -60,12 +60,12 @@ export namespace authMenu {
   export async function loadSession(): Promise<void> {
     phase = "loading";
     try {
-      session = await invoke<AuthSession>("auth_session");
+      setSession(await invoke<AuthSession>("auth_session"));
       error = "";
       if (session.logged_in) await refreshWallet();
     } catch (err) {
       console.error("auth_session failed:", err);
-      session = EMPTY_SESSION;
+      setSession(EMPTY_SESSION);
       error = t("auth.sessionLoadFailed");
     } finally {
       phase = "idle";
@@ -96,6 +96,13 @@ export namespace authMenu {
 
   export function isLoggedIn(): boolean {
     return session.logged_in;
+  }
+
+  // Single write path for the session so shared copy that depends on the
+  // sign-in state (the api-error nudge toward the built-in model) stays in sync.
+  function setSession(next: AuthSession): void {
+    session = next;
+    setAccountSignedIn(next.logged_in);
   }
 
   export function hasProAccess(): boolean {
@@ -156,7 +163,7 @@ export namespace authMenu {
     return `
       <section class="auth-choice">
         <div class="auth-choice-copy">
-          <p class="t-small subtle">${esc(t("auth.loginAgentHint"))}</p>
+          <p class="t-small subtle">${esc(t("auth.loginAgentHint", { points: SIGNUP_BONUS_POINTS }))}</p>
         </div>
         <button id="auth-start-login" type="button" class="btn-primary btn-compact" aria-expanded="${loginExpanded || challenge ? "true" : "false"}">${esc(t("auth.login"))}</button>
       </section>
@@ -393,11 +400,11 @@ export namespace authMenu {
     error = "";
     shell.rerender();
     try {
-      session = await invoke<AuthSession>("auth_sms_verify", {
+      setSession(await invoke<AuthSession>("auth_sms_verify", {
         challengeId: challenge.challenge_id,
         phone,
         code,
-      });
+      }));
       challenge = null;
       code = "";
       retryAt = 0;
@@ -430,7 +437,7 @@ export namespace authMenu {
       console.error("auth_logout failed:", err);
       error = friendlyError(err);
     } finally {
-      session = EMPTY_SESSION;
+      setSession(EMPTY_SESSION);
       wallet = null;
       walletUnavailable = false;
       loginExpanded = false;
