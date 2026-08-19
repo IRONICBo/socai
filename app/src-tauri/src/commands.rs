@@ -1491,11 +1491,20 @@ async fn run_agent_task_on_shared_page(
         .ensure_site_page_with_browser_options(site.id, site.home_url, browser_options)
         .await?;
     let target_id = page.target_id().to_string();
-    label_controlled_page(&page, &title_label).await;
+    let page_url = page
+        .evaluate_json("location.href")
+        .await
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| site.home_url.to_string());
+    let page_title_marker = format!("task:{task_id}");
+    label_controlled_page(&page, &format!("{page_title_marker} · {title_label}")).await;
     if let Some(registry) = &registry {
         if let Some(snapshot) = registry
             .update(&task_id, |snapshot| {
                 snapshot.target_id = Some(target_id.clone());
+                snapshot.page_url = Some(page_url.clone());
+                snapshot.page_title_marker = Some(page_title_marker.clone());
             })
             .await
         {

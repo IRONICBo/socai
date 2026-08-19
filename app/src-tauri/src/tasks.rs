@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use socai_core::agent::{mark_agent_run_status, Conversation};
+use socai_core::runtime::BrowserTargetInfo;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::AbortHandle;
 
@@ -41,6 +42,8 @@ pub struct AgentTaskSnapshot {
     pub(crate) run_dir: Option<String>,
     pub(crate) session_dir: Option<String>,
     pub(crate) target_id: Option<String>,
+    pub(crate) page_url: Option<String>,
+    pub(crate) page_title_marker: Option<String>,
     // Hydrated from `<run_dir>/report.md` for API responses; not persisted in tasks.json.
     pub(crate) final_text: Option<String>,
     pub(crate) error: Option<String>,
@@ -149,6 +152,8 @@ impl AgentTaskRegistry {
             run_dir: Some(run_dir),
             session_dir: Some(session_dir),
             target_id: None,
+            page_url: None,
+            page_title_marker: None,
             final_text: None,
             error: None,
             steps: None,
@@ -281,6 +286,61 @@ impl AgentTaskRegistry {
         out
     }
 
+    pub(crate) async fn rebind_missing_targets(
+        &self,
+        targets: &[BrowserTargetInfo],
+    ) -> Vec<AgentTaskSnapshot> {
+        let active_targets: HashSet<&str> = targets
+            .iter()
+            .map(|target| target.target_id.as_str())
+            .collect();
+        let mut guard = self.inner.lock().await;
+        let mut rebound = Vec::new();
+        for task in &mut guard.tasks {
+            if task.status != "running"
+                || task
+                    .target_id
+                    .as_deref()
+                    .is_some_and(|target_id| active_targets.contains(target_id))
+            {
+                continue;
+            }
+            let marker_match = task
+                .page_title_marker
+                .as_deref()
+                .and_then(|marker| targets.iter().find(|target| target.title.contains(marker)));
+            let site_matches: Vec<&BrowserTargetInfo> = task
+                .page_url
+                .as_deref()
+                .map(site_key)
+                .filter(|site| !site.is_empty())
+                .map(|site| {
+                    targets
+                        .iter()
+                        .filter(|target| site_key(&target.url) == site)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let candidate = marker_match.or_else(|| {
+                if site_matches.len() == 1 {
+                    site_matches.first().copied()
+                } else {
+                    None
+                }
+            });
+            let Some(candidate) = candidate else {
+                continue;
+            };
+            task.target_id = Some(candidate.target_id.clone());
+            task.page_url = Some(candidate.url.clone());
+            rebound.push(task.clone());
+        }
+        if !rebound.is_empty() {
+            persist_task_index(&guard.tasks);
+        }
+        rebound
+    }
+
     pub(crate) async fn list(&self) -> Vec<AgentTaskSnapshot> {
         self.inner
             .lock()
@@ -409,6 +469,18 @@ impl AgentTaskRegistry {
         persist_task_index(&guard.tasks);
         Some(hydrate_task_snapshot(snapshot))
     }
+}
+
+fn site_key(url: &str) -> String {
+    url.trim()
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches("www.")
+        .to_ascii_lowercase()
 }
 
 pub(crate) fn now_ms() -> u64 {
