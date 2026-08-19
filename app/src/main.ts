@@ -390,7 +390,18 @@ function captureTaskCommandErrorNotice(error: unknown): boolean {
 }
 
 function captureRuntimeErrorNotice(payload: AgentTaskEventPayload): boolean {
-  if (payload.kind !== "api_error" || !payload.text.trim()) return false;
+  if (!payload.text.trim()) return false;
+  if (payload.kind === "failed") {
+    const commandPresentation = formatTaskCommandErrorPresentation(payload.text);
+    if (!commandPresentation) return false;
+    showRuntimeErrorNotice({
+      key: `${payload.task_id}:${commandPresentation.fingerprint}`,
+      kind: "command",
+      error: payload.text,
+    });
+    return true;
+  }
+  if (payload.kind !== "api_error") return false;
   console.error("agent task API error:", payload.text);
   const presentation = formatTaskApiError(payload.text);
   const key = `${payload.task_id}:${presentation.fingerprint}`;

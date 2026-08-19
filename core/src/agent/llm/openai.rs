@@ -8,6 +8,8 @@
 //! `reasoning_content` field, thinking toggles) live here too.
 
 use std::collections::HashSet;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -21,6 +23,31 @@ use crate::agent::llm::{
 use crate::agent::provider::{
     config_for, load_api_key, load_openai_credential, Credential, Provider, ProviderConfig,
 };
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const IDLE_POOL_TIMEOUT: Duration = Duration::from_secs(300);
+static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn http_client() -> anyhow::Result<reqwest::Client> {
+    if let Some(client) = HTTP_CLIENT.get() {
+        return Ok(client.clone());
+    }
+    // Agent tasks spend minutes inside browser tools between model turns. A
+    // process-wide pool lets all three tasks reuse whichever ChatGPT/OpenAI
+    // connection is still healthy instead of maintaining three independent
+    // pools that all reconnect after the same idle window. Bound the connect
+    // phase separately so a dead route reaches the existing retry loop in
+    // seconds rather than waiting for the operating system's TCP timeout.
+    let client = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .pool_idle_timeout(IDLE_POOL_TIMEOUT)
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()?;
+    let _ = HTTP_CLIENT.set(client.clone());
+    Ok(HTTP_CLIENT.get().cloned().unwrap_or(client))
+}
 
 #[derive(Debug, Clone)]
 pub struct OpenAICompatBackend {
@@ -82,9 +109,7 @@ impl OpenAICompatBackend {
         } else {
             model
         };
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(180))
-            .build()?;
+        let client = http_client()?;
         Ok(Self {
             provider,
             model: resolved_model,
