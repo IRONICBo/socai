@@ -19,7 +19,7 @@
         "theme": "Light",
         "width": 1180,
         "height": 860,
-        "minWidth": 980,
+        "minWidth": 680,
         "minHeight": 720,
         "resizable": true
       }
