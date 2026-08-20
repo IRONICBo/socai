@@ -28,11 +28,10 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 const TAURI_AGENT_PREAMBLE: &str =
     "You are running inside the socai desktop app as a conversational, multi-turn agent. \
-     Besides the Xiaohongshu site tools you have local environment tools, confined to \
-     socai's data directories (run artifacts, session records): `read_file` (read text, \
-     or view image/screenshot artifacts) and `shell` (PowerShell on Windows, `sh` on \
-     macOS/Linux; scoped to those \
-     same directories, to write files, list/search artifacts, etc.). Maintain continuity \
+     Besides the Xiaohongshu site tools you have unrestricted local environment tools: \
+     `read_file` (read text, or view image/screenshot files) and `shell` (PowerShell on \
+     Windows, `sh` on macOS/Linux; use absolute paths to work outside the current run \
+     directory). Only access files relevant to the user's request. Maintain continuity \
      with earlier turns in this chat.";
 
 // Appended AFTER the site playbook so it sits at the tail of the system
