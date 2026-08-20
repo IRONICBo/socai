@@ -23,6 +23,7 @@ import {
   formatTaskApiError,
   formatTaskTimestamp,
   formatTokenUsage,
+  isTaskApiError,
   t,
   taskStatusLabel,
 } from "../lib/i18n";
@@ -443,7 +444,7 @@ function renderTaskApiErrorCard(error: string): string {
 
 function taskApiError(task: AgentTaskView): string | null {
   const error = task.error?.trim();
-  if (error && /\bAPI error\b/i.test(error)) return error;
+  if (error && isTaskApiError(error)) return error;
   const finalText = task.final_text?.trim();
   if (!finalText || !/^API error:\s*/i.test(finalText)) return null;
   return finalText.replace(/^API error:\s*/i, "");

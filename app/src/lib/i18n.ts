@@ -7,6 +7,10 @@ const STORAGE_KEY = "socai-language";
 const TIMEZONE_STORAGE_KEY = "socai-timezone";
 const supportedLanguages: Language[] = ["zh", "en"];
 
+/** Agent points granted on first sign-in. Shown by the account menu and by the
+ *  api-error copy that offers the built-in model as a way out of a spent key. */
+export const SIGNUP_BONUS_POINTS = 50;
+
 // Active IANA timezone for displaying task timestamps. `undefined` follows the
 // system local zone. This is a display-only preference (no backend field) — it
 // is persisted to localStorage and threaded into the timestamp formatters.
@@ -126,8 +130,8 @@ const messages = {
   "auth.accountAria": { en: "open account menu", zh: "打开账号菜单" },
   "auth.loginTitle": { en: "sign in with phone", zh: "手机号登录" },
   "auth.loginAgentHint": {
-    en: "sign in to get 50 points of agent credit",
-    zh: "登录后获赠50点 agent额度",
+    en: "sign in to get {points} points of agent credit",
+    zh: "登录后获赠{points}点 agent额度",
   },
   "auth.useOwnApiKey": {
     en: "or use your own API key, no sign-in required",
@@ -451,25 +455,66 @@ const messages = {
     en: "{provider} rejected the current API key. update it in the model menu at the top right, then send the task again.",
     zh: "{provider} 拒绝了当前 API Key。请在右上角模型菜单中更新 API Key，然后重新发送任务。",
   },
+  "task.apiErrorAuthOwnKey": {
+    en: "{provider} rejected the API key you provided. update it in the model menu at the top right.",
+    zh: "{provider} 拒绝了您提供的 API Key。请在右上角模型菜单中更新 API Key。",
+  },
   "task.apiErrorBalanceTitle": { en: "model balance is insufficient", zh: "模型余额不足" },
   "task.apiErrorBalance": {
     en: "{provider} reported insufficient balance or quota. recharge the account or switch to another configured model, then try again.",
     zh: "{provider} 返回余额或额度不足。请充值对应账号或切换到其他已配置的模型，然后重试。",
+  },
+  "task.apiErrorBalanceOwnKey": {
+    en: "the account behind the {provider} API key you provided is out of balance or quota.",
+    zh: "您提供的 {provider} API Key 对应账号余额或额度不足。",
+  },
+  "task.apiErrorUsageLimitTitle": {
+    en: "model usage limit reached",
+    zh: "模型使用额度已用完",
+  },
+  "task.apiErrorUsageLimit": {
+    en: "{provider} reported that this account's usage limit has been reached. wait for the quota cycle to reset, or switch accounts or models.",
+    zh: "{provider} 当前账号的使用额度已用完。请等待额度周期恢复，或切换账号或其他已配置的模型。",
+  },
+  "task.apiErrorUsageLimitOwnKey": {
+    en: "the {provider} API key you provided has used up its quota. wait for its quota cycle to reset.",
+    zh: "您提供的 {provider} API Key 额度已使用完。请等待该额度周期恢复。",
   },
   "task.apiErrorForbiddenTitle": { en: "model access was denied", zh: "模型访问被拒绝" },
   "task.apiErrorForbidden": {
     en: "{provider} denied access to this model. check the model permission and account region, or switch models.",
     zh: "{provider} 拒绝访问当前模型。请检查模型权限和账号区域，或切换其他模型。",
   },
+  "task.apiErrorForbiddenOwnKey": {
+    en: "{provider} denied this model to the API key you provided. check the model permission and account region.",
+    zh: "{provider} 拒绝您提供的 API Key 访问该模型。请检查模型权限和账号区域。",
+  },
   "task.apiErrorRateLimitTitle": { en: "model requests are too frequent", zh: "模型请求过于频繁" },
   "task.apiErrorRateLimit": {
     en: "{provider} is rate limiting requests. wait briefly and send the task again, or switch models.",
     zh: "{provider} 正在限制请求频率。请稍后重新发送任务，或切换其他模型。",
   },
+  "task.apiErrorRateLimitOwnKey": {
+    en: "{provider} is rate limiting the API key you provided. wait briefly and send the task again.",
+    zh: "{provider} 正在限制您提供的 API Key 的请求频率。请稍后重新发送任务。",
+  },
   "task.apiErrorUnavailableTitle": { en: "model service is unavailable", zh: "模型服务暂时不可用" },
   "task.apiErrorUnavailable": {
     en: "{provider} is temporarily unavailable. wait briefly and send the task again.",
     zh: "{provider} 服务暂时不可用。请稍后重新发送任务。",
+  },
+  "task.apiErrorOverloadedTitle": {
+    en: "model service is overloaded",
+    zh: "模型服务当前过载",
+  },
+  "task.apiErrorOverloaded": {
+    en: "{provider} is currently overloaded. socai completed its bounded automatic retries; wait briefly and resend the task, or switch models.",
+    zh: "{provider} 服务当前过载。socai 已完成有限次数的自动重试；请稍后重新发送任务，或切换其他模型。",
+  },
+  "task.apiErrorTimeoutTitle": { en: "model response timed out", zh: "模型响应超时" },
+  "task.apiErrorTimeout": {
+    en: "socai timed out while waiting for {provider}. check the network and proxy settings, then try again.",
+    zh: "socai 等待 {provider} 响应时超时。请检查网络和代理设置，然后重试。",
   },
   "task.apiErrorNetworkTitle": { en: "model connection failed", zh: "模型连接失败" },
   "task.apiErrorNetwork": {
@@ -484,6 +529,14 @@ const messages = {
   "task.apiErrorDismissAria": { en: "dismiss error", zh: "关闭错误提示" },
   "task.apiErrorRequestId": { en: "request {id}", zh: "请求 {id}" },
   "task.apiErrorProvider": { en: "the model provider", zh: "模型服务" },
+  "task.apiErrorSignUpHint": {
+    en: "socai's built-in model needs no API key — sign in to claim {points} free points and keep going.",
+    zh: "socai 内置模型无需 API Key，注册账号即可免费领取 {points} 点额度，继续当前任务。",
+  },
+  "task.apiErrorSwitchManagedHint": {
+    en: "or switch to socai's built-in model in the model menu, which runs on account points without an API key.",
+    zh: "也可以在模型菜单中切换到 socai 内置模型，使用账号点数、无需 API Key。",
+  },
 
   "feishu.export": { en: "export to feishu", zh: "导出到飞书" },
   "feishu.dialogAria": { en: "export to feishu", zh: "导出到飞书" },
@@ -639,13 +692,46 @@ export function formatTaskCommandErrorPresentation(
   if (!payload) return null;
   const messageKey = taskPreflightMessages[payload.code as keyof typeof taskPreflightMessages]
     ?? "task.preflightUnknown";
+  const nudge = messageKey === "task.preflightModelConfig" ? managedModelNudge() : "";
   return {
     title: t("task.preflightFailedTitle"),
-    message: t(messageKey),
+    message: joinSentences(t(messageKey), nudge),
     meta: t("task.errorCode", { code: payload.code }),
     fingerprint: `${payload.code}:${payload.detail}`,
   };
 }
+
+// Whether a socai account is signed in on this device. The api-error copy needs
+// it to choose between offering the sign-up bonus and pointing an already
+// signed-in user at the built-in model. Pushed in by the auth panel rather than
+// read from it, since panels/auth.ts imports this module.
+let accountSignedIn = false;
+
+export function setAccountSignedIn(signedIn: boolean): void {
+  accountSignedIn = signedIn;
+}
+
+/** Where the credential that failed came from. `own_key` is a user-pasted api
+ *  key, `codex` a connected chatgpt subscription, `managed` the socai gateway
+ *  (points, no key), `unknown` an error whose provider could not be parsed. */
+type ApiErrorCredential = "own_key" | "codex" | "managed" | "unknown";
+
+/** Copy that blames the user-supplied api key instead of "the current" one. */
+const ownKeyMessages: Partial<Record<MessageKey, MessageKey>> = {
+  "task.apiErrorAuth": "task.apiErrorAuthOwnKey",
+  "task.apiErrorBalance": "task.apiErrorBalanceOwnKey",
+  "task.apiErrorUsageLimit": "task.apiErrorUsageLimitOwnKey",
+  "task.apiErrorForbidden": "task.apiErrorForbiddenOwnKey",
+  "task.apiErrorRateLimit": "task.apiErrorRateLimitOwnKey",
+};
+
+/** The socai gateway spends account points, so its failures are account
+ *  problems rather than api key problems. */
+const managedMessages: Partial<Record<MessageKey, MessageKey>> = {
+  "task.apiErrorAuth": "task.preflightAuth",
+  "task.apiErrorBalance": "task.preflightBalance",
+  "task.apiErrorUsageLimit": "task.preflightBalance",
+};
 
 export interface TaskApiErrorPresentation {
   title: string;
@@ -655,62 +741,253 @@ export interface TaskApiErrorPresentation {
 }
 
 export function formatTaskApiError(error: string): TaskApiErrorPresentation {
-  const segments = error.split(/\s+\|\s+/);
-  const providerMatch = segments.shift()?.match(/^(.+?)\s+API error$/i);
-  const providerValue = providerMatch?.[1]?.trim() ?? "";
-  const provider = providerValue
-    ? `${providerValue.charAt(0).toUpperCase()}${providerValue.slice(1)}`
-    : t("task.apiErrorProvider");
-  const fields = new Map<string, string>();
-  for (const segment of segments) {
-    const separator = segment.indexOf("=");
-    if (separator <= 0) continue;
-    fields.set(segment.slice(0, separator).trim().toLowerCase(), segment.slice(separator + 1).trim());
-  }
-
-  const statusText = fields.get("status") ?? "";
-  const status = Number.parseInt(statusText, 10);
-  const type = fields.get("type") ?? "";
-  const detail = fields.get("message") ?? error;
-  const requestId = fields.get("request_id") ?? "";
-  const signal = `${type} ${detail}`.toLowerCase();
+  const parsed = parseTaskApiError(error);
+  const provider = parsed.provider;
+  const status = parsed.status;
+  const signal = parsed.signal;
+  const explicitCode = parsed.code || parsed.type;
+  let fallbackCode: string;
   let titleKey: MessageKey;
   let messageKey: MessageKey;
   if (status === 401 || /auth|unauthor|invalid.*(?:api|x-api).*key/.test(signal)) {
     titleKey = "task.apiErrorAuthTitle";
     messageKey = "task.apiErrorAuth";
-  } else if (status === 402 || /insufficient.*(?:balance|point|credit|quota)/.test(signal)) {
+    fallbackCode = "authentication_error";
+  } else if (/usage_limit_reached|usage limit (?:has been )?reached/.test(signal)) {
+    titleKey = "task.apiErrorUsageLimitTitle";
+    messageKey = "task.apiErrorUsageLimit";
+    fallbackCode = "usage_limit_reached";
+  } else if (
+    status === 402
+    || /insufficient.*(?:balance|point|credit|quota)|quota.*(?:exhausted|exceeded)|billing.*limit|credit.*balance/.test(signal)
+  ) {
     titleKey = "task.apiErrorBalanceTitle";
     messageKey = "task.apiErrorBalance";
+    fallbackCode = "insufficient_quota";
   } else if (status === 403 || /forbidden|permission|access denied/.test(signal)) {
     titleKey = "task.apiErrorForbiddenTitle";
     messageKey = "task.apiErrorForbidden";
-  } else if (status === 429 || /rate.?limit|too many requests/.test(signal)) {
+    fallbackCode = "permission_denied";
+  } else if (
+    /server_is_overloaded|overloaded_error|currently overloaded|service.*overload/.test(signal)
+  ) {
+    titleKey = "task.apiErrorOverloadedTitle";
+    messageKey = "task.apiErrorOverloaded";
+    fallbackCode = "server_is_overloaded";
+  } else if (status === 429 || /rate_limit|rate.?limit|too many requests/.test(signal)) {
     titleKey = "task.apiErrorRateLimitTitle";
     messageKey = "task.apiErrorRateLimit";
-  } else if (status >= 500) {
+    fallbackCode = "rate_limit_error";
+  } else if (status !== null && status >= 500) {
     titleKey = "task.apiErrorUnavailableTitle";
     messageKey = "task.apiErrorUnavailable";
+    fallbackCode = `http_${status}`;
+  } else if (/timed out|timeout|os error 10060/.test(signal)) {
+    titleKey = "task.apiErrorTimeoutTitle";
+    messageKey = "task.apiErrorTimeout";
+    fallbackCode = "network_timeout";
   } else if (/network|connect|timeout|timed out|dns/.test(signal)) {
     titleKey = "task.apiErrorNetworkTitle";
     messageKey = "task.apiErrorNetwork";
+    fallbackCode = "network_connect_error";
   } else {
     titleKey = "task.apiErrorGenericTitle";
     messageKey = "task.apiErrorGeneric";
+    fallbackCode = "api_error";
   }
 
-  const errorCode = type || (Number.isFinite(status) ? `http_${status}` : "api_error");
+  const credential = credentialSource(parsed.providerSlug);
+  const errorCode = explicitCode || fallbackCode;
   const meta = [
     t("task.errorCode", { code: errorCode }),
-    Number.isFinite(status) ? `HTTP ${status}` : "",
-    requestId ? t("task.apiErrorRequestId", { id: requestId }) : "",
+    status !== null ? `HTTP ${status}` : "",
+    parsed.requestId ? t("task.apiErrorRequestId", { id: parsed.requestId }) : "",
   ].filter(Boolean).join(" · ");
   return {
     title: t(titleKey),
-    message: t(messageKey, { provider }),
+    message: taskApiErrorMessage(messageKey, credential, provider),
     meta,
-    fingerprint: requestId || `${provider}:${statusText}:${type}:${detail}`,
+    fingerprint: parsed.requestId || `${provider}:${parsed.statusText}:${errorCode}:${parsed.detail}`,
   };
+}
+
+/** The category copy for `credential`, plus — when the user's own credential is
+ *  what ran out — the nudge toward the built-in model they can use instead. */
+function taskApiErrorMessage(
+  messageKey: MessageKey,
+  credential: ApiErrorCredential,
+  provider: string,
+): string {
+  const resolved = credential === "own_key"
+    ? ownKeyMessages[messageKey] ?? messageKey
+    : credential === "managed"
+    ? managedMessages[messageKey] ?? messageKey
+    : messageKey;
+  const nudge = (credential === "own_key" || credential === "codex")
+      && ownKeyMessages[messageKey] !== undefined
+    ? managedModelNudge()
+    : "";
+  return joinSentences(t(resolved, { provider }), nudge);
+}
+
+/** Sentence separator for stitched copy: chinese needs none after "。". */
+function joinSentences(...parts: string[]): string {
+  return parts.filter(Boolean).join(currentLanguage === "zh" ? "" : " ");
+}
+
+/** Offers socai's built-in model as the way out of a credential the user owns:
+ *  the sign-up bonus when there is no account yet, a switch hint once there is. */
+function managedModelNudge(): string {
+  return t(accountSignedIn ? "task.apiErrorSwitchManagedHint" : "task.apiErrorSignUpHint", {
+    points: SIGNUP_BONUS_POINTS,
+  });
+}
+
+function credentialSource(slug: string): ApiErrorCredential {
+  if (!slug) return "unknown";
+  if (slug === "socai") return "managed";
+  if (slug === "openai-codex") return "codex";
+  return "own_key";
+}
+
+export function isTaskApiError(error: string): boolean {
+  return /\bAPI error\b|(?:Responses|Chat Completions|Messages?) request failed|error sending request for url|stream ended without response\.completed|model output was truncated|usage_limit_reached|server_is_overloaded/i
+    .test(error);
+}
+
+interface ParsedTaskApiError {
+  provider: string;
+  /** Normalized provider id ("openai-codex", "socai", …), "" when unknown. */
+  providerSlug: string;
+  status: number | null;
+  statusText: string;
+  code: string;
+  type: string;
+  detail: string;
+  requestId: string;
+  signal: string;
+}
+
+function parseTaskApiError(error: string): ParsedTaskApiError {
+  const raw = error.replace(/^API error:\s*/i, "").trim();
+  const segments = raw.split(/\s+\|\s+/);
+  const header = segments[0] ?? "";
+  const providerValue = header.match(/^(.+?)\s+API error$/i)?.[1]
+    ?? header.match(/^(.+?)\s+(?:Responses|Chat Completions|Messages?) request failed(?::|$)/i)?.[1]
+    ?? providerFromRequestUrl(raw);
+  const fields = new Map<string, string>();
+  for (const segment of segments.slice(1)) {
+    const separator = segment.indexOf("=");
+    if (separator <= 0) continue;
+    fields.set(segment.slice(0, separator).trim().toLowerCase(), segment.slice(separator + 1).trim());
+  }
+  const embedded = embeddedErrorFields(raw);
+  const statusText = fields.get("status") || embedded.status || "";
+  const parsedStatus = Number.parseInt(statusText, 10);
+  const status = Number.isFinite(parsedStatus) ? parsedStatus : null;
+  const code = fields.get("code") || embedded.code || "";
+  const type = fields.get("type") || embedded.type || "";
+  const detail = fields.get("message") || embedded.message || raw;
+  const requestId = fields.get("request_id") || embedded.request_id || "";
+  return {
+    provider: providerLabel(providerValue),
+    providerSlug: normalizeProviderSlug(providerValue),
+    status,
+    statusText,
+    code,
+    type,
+    detail,
+    requestId,
+    signal: `${code} ${type} ${detail} ${raw}`.toLowerCase(),
+  };
+}
+
+function embeddedErrorFields(raw: string): Record<string, string> {
+  const jsonStart = raw.indexOf("{");
+  if (jsonStart >= 0) {
+    const root = parseJsonObject(raw.slice(jsonStart));
+    if (root) {
+      const response = objectValue(root.response);
+      const detail = objectValue(response?.error) ?? objectValue(root.error);
+      if (detail) {
+        return {
+          code: stringValue(detail.code),
+          type: stringValue(detail.type),
+          message: stringValue(detail.message),
+          status: stringValue(response?.status ?? root.status),
+          request_id: stringValue(response?.request_id ?? root.request_id),
+        };
+      }
+    }
+  }
+  return {
+    code: embeddedJsonString(raw, "code"),
+    type: embeddedJsonString(raw, "type"),
+    message: embeddedJsonString(raw, "message"),
+    request_id: embeddedJsonString(raw, "request_id"),
+  };
+}
+
+function embeddedJsonString(raw: string, field: string): string {
+  const pattern = new RegExp(`"${field}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, "i");
+  const match = raw.match(pattern);
+  if (!match) return "";
+  try {
+    return JSON.parse(`"${match[1]}"`) as string;
+  } catch {
+    return match[1];
+  }
+}
+
+function parseJsonObject(value: string): Record<string, unknown> | null {
+  try {
+    return objectValue(JSON.parse(value));
+  } catch {
+    return null;
+  }
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number") return `${value}`;
+  return "";
+}
+
+function providerFromRequestUrl(raw: string): string {
+  const hostname = raw.match(/https?:\/\/([^/)\s]+)/i)?.[1]?.toLowerCase() ?? "";
+  if (hostname === "chatgpt.com") return "openai-codex";
+  if (hostname.includes("openai.com")) return "openai";
+  if (hostname.includes("anthropic.com")) return "anthropic";
+  if (hostname.includes("dashscope")) return "qwen";
+  if (hostname.includes("deepseek")) return "deepseek";
+  if (hostname.includes("volces.com")) return "doubao";
+  return "";
+}
+
+function normalizeProviderSlug(provider: string): string {
+  const normalized = provider.trim().toLowerCase().replace(/\s+/g, "-");
+  return normalized === "openai-codex" || normalized === "codex" ? "openai-codex" : normalized;
+}
+
+function providerLabel(provider: string): string {
+  const normalized = provider.trim().toLowerCase();
+  if (normalized === "openai-codex" || normalized === "openai codex") {
+    return "OpenAI Codex";
+  }
+  if (normalized === "openai") return "OpenAI";
+  if (normalized === "anthropic") return "Anthropic";
+  if (normalized === "qwen") return "Qwen";
+  if (normalized === "deepseek") return "DeepSeek";
+  if (normalized === "doubao") return "Doubao";
+  return provider
+    ? `${provider.charAt(0).toUpperCase()}${provider.slice(1)}`
+    : t("task.apiErrorProvider");
 }
 
 function parseTaskCommandError(error: unknown): { code: string; detail: string } | null {

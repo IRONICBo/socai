@@ -71,6 +71,44 @@ pub fn format_http_error(provider: &str, status: u16, body_text: &str) -> String
     cleaned.join(" | ")
 }
 
+pub fn format_api_error(provider: &str, value: &Value) -> String {
+    let mut parts = vec![format!("{provider} API error")];
+    let error = value
+        .pointer("/response/error")
+        .or_else(|| value.get("error"))
+        .unwrap_or(value);
+    let mut had_structured = false;
+    for key in ["message", "code", "type", "param"] {
+        if let Some(field) = error.get(key) {
+            let rendered = match field {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            if !rendered.is_empty() {
+                parts.push(format!("{key}={rendered}"));
+                had_structured = true;
+            }
+        }
+    }
+    if let Some(request_id) = value
+        .get("request_id")
+        .or_else(|| value.pointer("/response/request_id"))
+        .and_then(Value::as_str)
+    {
+        parts.push(format!("request_id={request_id}"));
+    }
+    if !had_structured {
+        let raw = value.to_string();
+        let snippet: String = raw.chars().take(500).collect();
+        parts.push(format!(
+            "body={}{}",
+            snippet,
+            if raw.chars().count() > 500 { "…" } else { "" }
+        ));
+    }
+    parts.join(" | ")
+}
+
 /// Whether a chat error is worth retrying: transport-level failures
 /// (connect, timeout, mid-body I/O) and overload-ish HTTP statuses
 /// (408/429/5xx, per the `status=` field [`format_http_error`] embeds).
@@ -96,11 +134,26 @@ pub fn is_transient_api_error(error: &anyhow::Error) -> bool {
         return transient;
     }
     let msg = format!("{error:#}");
-    if msg.contains("insufficient_quota") {
+    let signal = msg.to_ascii_lowercase();
+    if [
+        "usage_limit_reached",
+        "insufficient_quota",
+        "billing_hard_limit_reached",
+        "credit_balance_too_low",
+    ]
+    .iter()
+    .any(|code| signal.contains(code))
+    {
         return false;
     }
+    if signal.contains("server_is_overloaded")
+        || signal.contains("overloaded_error")
+        || signal.contains("currently overloaded")
+    {
+        return true;
+    }
     // Codex SSE stream cut off server-side before the terminal event.
-    if msg.contains("stream ended without response.completed") {
+    if signal.contains("stream ended without response.completed") {
         return true;
     }
     matches!(parsed_status(&msg), Some(408 | 429 | 500..=599))
@@ -124,6 +177,22 @@ mod tests {
         assert!(out.contains("message=Invalid api key"));
         assert!(out.contains("code=invalid_api_key"));
         assert!(out.contains("status=401"));
+
+        let nested = serde_json::json!({
+            "response": {
+                "error": {
+                    "code": "server_is_overloaded",
+                    "message": "Our servers are currently overloaded."
+                }
+            }
+        });
+        let overload = format_api_error("openai-codex", &nested);
+        assert!(overload.contains("code=server_is_overloaded"));
+        assert!(is_transient_api_error(&anyhow::anyhow!(overload)));
+
+        let quota =
+            anyhow::anyhow!("openai-codex API error | status=429 | type=usage_limit_reached");
+        assert!(!is_transient_api_error(&quota));
     }
 
     #[test]
