@@ -4,6 +4,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AgentArtifact,
+  AgentArtifactDownload,
   AgentTaskEventPayload,
   AgentTaskSnapshot,
   AgentTaskStatus,
@@ -27,7 +29,7 @@ import {
   renderLiveNotesGroup,
   renderSearchGroupForEvent,
 } from "./conversation";
-import type { ComposerProps } from "./conversation";
+import type { ArtifactDownloadState, ComposerProps } from "./conversation";
 import { bindNoteInteractions, setNoteRegistry } from "./notes";
 import {
   bindFeishuConnector,
@@ -41,8 +43,17 @@ type WorkspaceView = "compose" | "detail";
 export type AgentTaskView = AgentTaskSnapshot & {
   events: AgentTaskEventPayload[];
   notes?: NoteData[];
+  artifacts?: AgentArtifact[];
 };
 type CodexLoginStart = { message: string };
+type PersistedArtifactDownload = {
+  taskId: string;
+  sourcePath: string;
+  destination: string;
+  identity: string;
+};
+
+const ARTIFACT_DOWNLOAD_STORAGE_KEY = "socai.artifact-downloads.v2";
 
 // ── Agent task workspace ──────────────────────────────────────────────────
 
@@ -77,6 +88,54 @@ export namespace agentPanel {
   // terminal transition clears a task's entries so the fold lands with the
   // answer even if the user toggled mid-run.
   const activityOpen = new Map<string, boolean>();
+  const artifactDownloads = restoreArtifactDownloads();
+  const artifactLoadGenerations = new Map<string, number>();
+
+  function artifactDownloadKey(taskId: string, path: string): string {
+    return `${taskId}\0${path}`;
+  }
+
+  function parseArtifactDownloadKey(key: string): { taskId: string; sourcePath: string } | null {
+    const separator = key.indexOf("\0");
+    if (separator <= 0 || separator === key.length - 1) return null;
+    return { taskId: key.slice(0, separator), sourcePath: key.slice(separator + 1) };
+  }
+
+  function restoreArtifactDownloads(): Map<string, ArtifactDownloadState> {
+    const restored = new Map<string, ArtifactDownloadState>();
+    try {
+      const raw = window.localStorage.getItem(ARTIFACT_DOWNLOAD_STORAGE_KEY);
+      if (!raw) return restored;
+      const records: unknown = JSON.parse(raw);
+      if (!Array.isArray(records)) return restored;
+      for (const record of records) {
+        if (!record || typeof record !== "object") continue;
+        const { taskId, sourcePath, destination, identity } = record as Partial<PersistedArtifactDownload>;
+        if (typeof taskId !== "string" || !taskId) continue;
+        if (typeof sourcePath !== "string" || !sourcePath) continue;
+        if (typeof destination !== "string" || !destination) continue;
+        if (typeof identity !== "string" || !identity) continue;
+        restored.set(artifactDownloadKey(taskId, sourcePath), { status: "downloaded", destination, identity });
+      }
+    } catch (error) {
+      console.error("artifact download state restore failed:", error);
+    }
+    return restored;
+  }
+
+  function persistArtifactDownloads(): void {
+    const records: PersistedArtifactDownload[] = [];
+    for (const [key, state] of artifactDownloads) {
+      const parsed = parseArtifactDownloadKey(key);
+      if (!parsed || !state.destination || !state.identity) continue;
+      records.push({ ...parsed, destination: state.destination, identity: state.identity });
+    }
+    try {
+      window.localStorage.setItem(ARTIFACT_DOWNLOAD_STORAGE_KEY, JSON.stringify(records));
+    } catch (error) {
+      console.error("artifact download state persist failed:", error);
+    }
+  }
 
   function isActivityOpen(taskId: string, turnIndex: number, defaultOpen: boolean): boolean {
     return activityOpen.get(`${taskId}#${turnIndex}`) ?? defaultOpen;
@@ -130,13 +189,26 @@ export namespace agentPanel {
       const pending = pendingEvents.get(snapshot.task_id) ?? [];
       pendingEvents.delete(snapshot.task_id);
       const merged = existing ? mergeSnapshot(existing, snapshot) : snapshot;
-      return { ...merged, events: mergeEvents(existing?.events ?? [], pending) };
+      return {
+        ...merged,
+        artifacts: existing?.artifacts,
+        events: mergeEvents(existing?.events ?? [], pending),
+      };
     });
     const liveOnly = tasks.filter((task) => !snapshotIds.has(task.task_id));
     tasks = [...hydrated, ...liveOnly];
     if (!selectedTaskId && tasks.length > 0) {
       selectedTaskId = newestTask(tasks)?.task_id ?? null;
     }
+    const retainedTaskIds = new Set(tasks.map((task) => task.task_id));
+    let downloadsChanged = false;
+    for (const key of [...artifactDownloads.keys()]) {
+      const parsed = parseArtifactDownloadKey(key);
+      if (parsed && retainedTaskIds.has(parsed.taskId)) continue;
+      artifactDownloads.delete(key);
+      downloadsChanged = true;
+    }
+    if (downloadsChanged) persistArtifactDownloads();
   }
 
   export function setTaskEvents(taskId: string, events: AgentTaskEventPayload[]): boolean {
@@ -158,6 +230,13 @@ export namespace agentPanel {
     return taskId === selectedTaskId;
   }
 
+  export function setTaskArtifacts(taskId: string, artifacts: AgentArtifact[]): boolean {
+    const task = tasks.find((item) => item.task_id === taskId);
+    if (!task) return false;
+    task.artifacts = artifacts;
+    return taskId === selectedTaskId;
+  }
+
   // Fetch a task's note archive (notes.json) and re-render when it changed the
   // currently-selected task. Best-effort: a run simply may have no notes.
   export async function loadTaskNotes(taskId: string, shell: ShellState): Promise<void> {
@@ -172,6 +251,70 @@ export namespace agentPanel {
   export function loadSelectedTaskNotes(shell: ShellState): void {
     const selected = selectedTask();
     if (selected) void loadTaskNotes(selected.task_id, shell);
+  }
+
+  export async function loadTaskArtifacts(taskId: string, shell: ShellState): Promise<void> {
+    const generation = (artifactLoadGenerations.get(taskId) ?? 0) + 1;
+    artifactLoadGenerations.set(taskId, generation);
+    try {
+      const artifacts = await invoke<AgentArtifact[]>("agent_task_artifacts", { taskId });
+      if (artifactLoadGenerations.get(taskId) !== generation) return;
+      const artifactsChanged = setTaskArtifacts(taskId, artifacts);
+      const downloadsChanged = await validateArtifactDownloads(taskId);
+      if (artifactsChanged || downloadsChanged) shell.rerender();
+    } catch (e) {
+      console.error("agent_task_artifacts failed:", e);
+    }
+  }
+
+  export function loadSelectedTaskArtifacts(shell: ShellState): void {
+    const selected = selectedTask();
+    if (selected) void loadTaskArtifacts(selected.task_id, shell);
+  }
+
+  export async function revalidateArtifactDownloads(shell: ShellState): Promise<void> {
+    if (await validateArtifactDownloads()) shell.rerender();
+  }
+
+  export async function prepareArtifactDownloads(): Promise<void> {
+    await validateArtifactDownloads();
+  }
+
+  async function validateArtifactDownloads(taskId?: string): Promise<boolean> {
+    const downloads = [...artifactDownloads.entries()].filter(([key, state]) => {
+      const parsed = parseArtifactDownloadKey(key);
+      return !!parsed
+        && (!taskId || parsed.taskId === taskId)
+        && !!state.destination
+        && !!state.identity
+        && state.status !== "downloading"
+        && state.status !== "opening";
+    });
+    if (downloads.length === 0) return false;
+
+    let changed = false;
+    await Promise.all(downloads.map(async ([key, state]) => {
+      const parsed = parseArtifactDownloadKey(key);
+      const destination = state.destination;
+      const identity = state.identity;
+      if (!parsed || !destination || !identity) return;
+      try {
+        const exists = await invoke<boolean>("agent_task_artifact_download_exists", {
+          taskId: parsed.taskId,
+          path: parsed.sourcePath,
+          downloadPath: destination,
+          downloadIdentity: identity,
+        });
+        const current = artifactDownloads.get(key);
+        if (exists || current?.destination !== destination || current.identity !== identity) return;
+        artifactDownloads.delete(key);
+        changed = true;
+      } catch (error) {
+        console.error("agent_task_artifact_download_exists failed:", error);
+      }
+    }));
+    if (changed) persistArtifactDownloads();
+    return changed;
   }
 
   const backgroundMediaRefreshTimers = new Map<string, number>();
@@ -748,6 +891,7 @@ export namespace agentPanel {
       task,
       running,
       isActivityOpen: (turnIndex, defaultOpen) => isActivityOpen(task.task_id, turnIndex, defaultOpen),
+      artifactDownloadState: (path) => artifactDownloads.get(artifactDownloadKey(task.task_id, path)),
       composer: replyComposer(shell, running),
     });
   }
@@ -817,6 +961,7 @@ export namespace agentPanel {
     });
 
     bindTaskSelection(shell);
+    bindArtifactActions(shell);
     // Note interactions (viewer, card carousel, citation hover, external links)
     // are wired once via delegation on document.
     bindNoteInteractions();
@@ -883,12 +1028,84 @@ export namespace agentPanel {
         replyError = "";
         shell.rerender();
         void loadTaskNotes(taskId, shell);
+        void loadTaskArtifacts(taskId, shell);
       };
       button.addEventListener("pointerdown", (event) => {
         if (event.button === 0) select();
       });
       button.addEventListener("click", (event) => {
         if (event.detail === 0) select();
+      });
+    });
+  }
+
+  function bindArtifactActions(shell: ShellState): void {
+    document.querySelectorAll<HTMLButtonElement>("[data-artifact-action]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const taskId = button.dataset.artifactAction;
+        const path = button.dataset.artifactPath;
+        if (!taskId || !path) return;
+        const key = artifactDownloadKey(taskId, path);
+        const current = artifactDownloads.get(key);
+        if (current?.status === "downloading" || current?.status === "opening") return;
+        if (current?.destination && current.identity) {
+          const destination = current.destination;
+          const identity = current.identity;
+          artifactDownloads.set(key, { status: "opening", destination, identity });
+          shell.rerender();
+          try {
+            const exists = await invoke<boolean>("agent_task_artifact_open", {
+              taskId,
+              path,
+              downloadPath: destination,
+              downloadIdentity: identity,
+            });
+            const pending = artifactDownloads.get(key);
+            if (pending?.status !== "opening"
+              || pending.destination !== destination
+              || pending.identity !== identity) return;
+            if (exists) {
+              artifactDownloads.set(key, { status: "downloaded", destination, identity });
+            } else {
+              artifactDownloads.delete(key);
+              persistArtifactDownloads();
+            }
+          } catch (error) {
+            console.error("agent_task_artifact_open failed:", error);
+            const pending = artifactDownloads.get(key);
+            if (pending?.status === "opening"
+              && pending.destination === destination
+              && pending.identity === identity) {
+              artifactDownloads.set(key, { status: "open_failed", destination, identity });
+            }
+          } finally {
+            shell.rerender();
+          }
+          return;
+        }
+
+        artifactDownloads.set(key, { status: "downloading" });
+        shell.rerender();
+        try {
+          const downloaded = await invoke<AgentArtifactDownload>("agent_task_artifact_download", {
+            taskId,
+            path,
+          });
+          if (artifactDownloads.get(key)?.status !== "downloading") return;
+          artifactDownloads.set(key, {
+            status: "downloaded",
+            destination: downloaded.path,
+            identity: downloaded.identity,
+          });
+          persistArtifactDownloads();
+        } catch (error) {
+          console.error("agent_task_artifact_download failed:", error);
+          if (artifactDownloads.get(key)?.status === "downloading") {
+            artifactDownloads.set(key, { status: "download_failed" });
+          }
+        } finally {
+          shell.rerender();
+        }
       });
     });
   }
@@ -1172,6 +1389,7 @@ export namespace agentPanel {
         await invoke("agent_task_delete", { taskId });
         removeTask(taskId);
         loadSelectedTaskNotes(shell);
+        loadSelectedTaskArtifacts(shell);
       } catch (err) {
         console.error("agent_task_delete failed:", err);
       } finally {
@@ -1204,6 +1422,12 @@ export namespace agentPanel {
     tasks = tasks.filter((task) => task.task_id !== taskId);
     pendingEvents.delete(taskId);
     streamScroll.delete(taskId);
+    artifactLoadGenerations.delete(taskId);
+    let downloadsChanged = false;
+    for (const key of [...artifactDownloads.keys()]) {
+      if (key.startsWith(`${taskId}\0`)) downloadsChanged = artifactDownloads.delete(key) || downloadsChanged;
+    }
+    if (downloadsChanged) persistArtifactDownloads();
     for (const key of [...activityOpen.keys()]) {
       if (key.startsWith(`${taskId}#`)) activityOpen.delete(key);
     }

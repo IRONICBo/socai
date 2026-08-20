@@ -1527,6 +1527,65 @@ body.has-paper > * { position: relative; z-index: 1; }
 /* citation pills need to sit comfortably in the larger prose */
 .conv-answer .note-cite { font-size: 0.82em; }
 
+/* Generated-file attachments: one primary action downloads first, then reveals
+   the downloaded copy in Finder/Explorer while that copy still exists. */
+.artifact-cards {
+  margin-top: var(--sp-3);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.artifact-card {
+  appearance: none;
+  width: min(100%, 360px);
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: var(--hairline);
+  border-radius: var(--r-3);
+  background: var(--surface);
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.artifact-card:hover { border-color: var(--line-strong); background: var(--surface-2); }
+.artifact-card:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.artifact-card:disabled { cursor: default; opacity: 1; }
+.artifact-card__icon {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-2);
+  background: var(--ink-8);
+  color: var(--ink-2);
+}
+.artifact-card__copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.artifact-card__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-1);
+}
+.artifact-card__meta,
+.artifact-card__action {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--fg-faint);
+}
+.artifact-card__action { color: var(--fg-muted); white-space: nowrap; }
+.artifact-card.is-downloaded .artifact-card__action { color: var(--ink-1); }
+.artifact-card.is-error .artifact-card__action { color: var(--status-error-fg); }
+
 .conv-error {
   margin: var(--sp-4) 0 0;
   padding: var(--sp-3);

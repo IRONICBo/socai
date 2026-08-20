@@ -20,10 +20,20 @@ serde_json.workspace = true
 base64.workspace = true
 flate2 = "1"
 reqwest.workspace = true
+futures.workspace = true
+sha2 = "0.10"
+hex = "0.4"
+fs2 = "0.4"
+libc.workspace = true
+same-file = "1"
 url = "2"
 tokio = { workspace = true }
 anyhow.workspace = true
+async-trait.workspace = true
+cap-std = "4"
+tempfile = "3"
 dirs = "5"
+dunce = "1"
 socai-core.workspace = true
 
 # macOS-only: attach an empty unified toolbar so AppKit centers the native

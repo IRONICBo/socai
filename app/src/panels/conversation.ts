@@ -16,7 +16,7 @@
 //!
 //! Rendering only; state and bindings live in tasks.ts.
 
-import type { AgentTaskEventPayload, AgentTaskSnapshot, Status } from "../main";
+import type { AgentArtifact, AgentTaskEventPayload, AgentTaskSnapshot, Status } from "../main";
 import { esc } from "../lib/html";
 import {
   formatStepCount,
@@ -59,7 +59,15 @@ export interface ConversationProps {
   running: boolean;
   /** Resolves a turn's activity fold state (tasks.ts owns the toggles). */
   isActivityOpen: (turnIndex: number, defaultOpen: boolean) => boolean;
+  /** Download/open progress survives the full-shell rerenders owned by tasks.ts. */
+  artifactDownloadState: (path: string) => ArtifactDownloadState | undefined;
   composer: ComposerProps;
+}
+
+export interface ArtifactDownloadState {
+  status: "downloading" | "downloaded" | "opening" | "download_failed" | "open_failed";
+  destination?: string;
+  identity?: string;
 }
 
 interface TurnMetrics {
@@ -81,7 +89,12 @@ export function renderConversation(props: ConversationProps): string {
       ${renderHead(task, running)}
       <div class="thread" data-agent-events="${esc(task.task_id)}">
         <div class="thread-inner">
-          ${renderThread(task, running, props.isActivityOpen)}
+          ${renderThread(
+            task,
+            running,
+            props.isActivityOpen,
+            props.artifactDownloadState,
+          )}
         </div>
       </div>
       <div class="composer-dock">
@@ -193,12 +206,21 @@ function renderThread(
   task: AgentTaskView,
   running: boolean,
   isActivityOpen: ConversationProps["isActivityOpen"],
+  artifactDownloadState: ConversationProps["artifactDownloadState"],
 ): string {
   const duplicateIndex = finalAnswerEventIndex(task);
   const groups = groupRunEvents(task, duplicateIndex);
   if (groups.length === 0) groups.push([]); // no events (e.g. an early failure) → still show prompt + error
   return groups
-    .map((events, index) => renderTurn(task, events, index, index === groups.length - 1, running, isActivityOpen))
+    .map((events, index) => renderTurn(
+      task,
+      events,
+      index,
+      index === groups.length - 1,
+      running,
+      isActivityOpen,
+      artifactDownloadState,
+    ))
     .join("");
 }
 
@@ -248,6 +270,7 @@ function renderTurn(
   isLast: boolean,
   running: boolean,
   isActivityOpen: ConversationProps["isActivityOpen"],
+  artifactDownloadState: ConversationProps["artifactDownloadState"],
 ): string {
   const { userText, userAt, body, answerText, answerAt } = buildTurn(events, index === 0, isLast, task);
   const showWorking = isLast && running;
@@ -310,6 +333,12 @@ function renderTurn(
     }
   }
   const meta = renderConvMeta(metaBits);
+  const artifactCards = renderArtifactCards(
+    task.task_id,
+    task.artifacts ?? [],
+    index,
+    artifactDownloadState,
+  );
   const exportAction = exportText
     ? `<div class="conv-answer-actions">
         <button type="button" class="btn-ghost btn-compact feishu-export-action" data-feishu-export="${esc(task.task_id)}" data-feishu-turn="${index}">
@@ -331,10 +360,81 @@ function renderTurn(
       ${user}
       ${renderActivity(task, body, index, showWorking, metrics, isActivityOpen)}
       ${answer}
+      ${artifactCards}
       ${exportAction}
       ${meta}
     </div>
   `;
+}
+
+function renderArtifactCards(
+  taskId: string,
+  artifacts: AgentArtifact[],
+  turnIndex: number,
+  downloadState: ConversationProps["artifactDownloadState"],
+): string {
+  const cards = artifacts
+    .filter((artifact) => artifact.turn_index === turnIndex)
+    .map((artifact) => {
+      const state = downloadState(artifact.path);
+      const statusKey = state?.status === "downloading"
+        ? "artifact.downloading"
+        : state?.status === "downloaded"
+          ? "artifact.open"
+          : state?.status === "opening"
+            ? "artifact.opening"
+            : state?.status === "open_failed"
+              ? "artifact.openFailed"
+              : state?.status === "download_failed"
+                ? "artifact.downloadFailed"
+                : "artifact.download";
+      const openingState = state?.status === "downloaded"
+        || state?.status === "opening"
+        || state?.status === "open_failed";
+      const stateClass = openingState
+        ? " is-downloaded"
+        : state?.status === "download_failed"
+          ? " is-error"
+          : "";
+      const ariaLabel = openingState
+        ? t("artifact.openAria", { name: artifact.name })
+        : t("artifact.downloadAria", { name: artifact.name });
+      return `
+      <button
+        type="button"
+        class="artifact-card${stateClass}${state?.status === "open_failed" ? " is-error" : ""}"
+        data-artifact-action="${esc(taskId)}"
+        data-artifact-path="${esc(artifact.path)}"
+        title="${esc(state?.destination ?? artifact.relative_path)}"
+        aria-label="${esc(ariaLabel)}"
+        ${state?.status === "downloading" || state?.status === "opening" ? "disabled" : ""}
+      >
+        <span class="artifact-card__icon" aria-hidden="true">${artifactFileIcon()}</span>
+        <span class="artifact-card__copy">
+          <span class="artifact-card__name">${esc(artifact.name)}</span>
+          <span class="artifact-card__meta">${esc(artifact.kind)} · ${esc(formatArtifactSize(artifact.size_bytes))}</span>
+        </span>
+        <span class="artifact-card__action" aria-live="polite">${esc(t(statusKey))}</span>
+      </button>
+    `;
+    })
+    .join("");
+  if (!cards) return "";
+  return `<div class="artifact-cards" aria-label="${esc(t("artifact.listAria"))}">${cards}</div>`;
+}
+
+function artifactFileIcon(): string {
+  return `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5h7l4 4v13h-11z"></path><path d="M13.5 3.5v4h4"></path><path d="M9 13h6M9 16h4"></path></svg>`;
+}
+
+function formatArtifactSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+  }
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 /** Exact answer represented by an answer-level export button. */

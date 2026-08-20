@@ -538,6 +538,16 @@ const messages = {
     zh: "也可以在模型菜单中切换到 socai 内置模型，使用账号点数、无需 API Key。",
   },
 
+  "artifact.listAria": { en: "generated files", zh: "生成的文件" },
+  "artifact.download": { en: "download", zh: "下载" },
+  "artifact.downloading": { en: "downloading…", zh: "下载中…" },
+  "artifact.downloadFailed": { en: "retry download", zh: "重试下载" },
+  "artifact.downloadAria": { en: "download {name}", zh: "下载 {name}" },
+  "artifact.open": { en: "open", zh: "打开" },
+  "artifact.opening": { en: "opening…", zh: "正在打开…" },
+  "artifact.openFailed": { en: "retry opening", zh: "重试打开" },
+  "artifact.openAria": { en: "show downloaded {name} in folder", zh: "在下载目录中显示 {name}" },
+
   "feishu.export": { en: "export to feishu", zh: "导出到飞书" },
   "feishu.dialogAria": { en: "export to feishu", zh: "导出到飞书" },
   "feishu.title": { en: "export to feishu", zh: "导出到飞书" },
