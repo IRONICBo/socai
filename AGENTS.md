@@ -112,7 +112,8 @@ are byte-identical copies. WeChat group QR codes expire after 7 days and can't
 be fetched via any API — the user must re-export it manually from WeChat on
 their phone.
 
-A `SessionStart` hook in `.claude/settings.json` checks the file's last git
+A `sessionStart` hook in `.cursor/hooks.json` (and the Claude Code
+`SessionStart` hook in `.claude/settings.json`) checks the file's last git
 commit date and, if ≥6 days old, injects a `[wechat-qr-reminder]`. On seeing it,
 remind the user at the start of your reply.
 
