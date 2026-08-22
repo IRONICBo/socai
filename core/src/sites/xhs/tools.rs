@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use crate::agent::compaction::truncate;
 use crate::agent::tool::{
-    ToolProgressEvent, ToolProgressPhase, ToolProgressSender, ToolProgressStatus,
+    SearchHistoryEntry, ToolProgressEvent, ToolProgressPhase, ToolProgressSender,
+    ToolProgressStatus,
 };
 use crate::agent::{Backend as LlmProvider, Tool, ToolContext, ToolResult};
 use crate::cdp::PageSession;
@@ -4040,6 +4041,136 @@ pub struct SearchTool {
     asr_enabled: bool,
 }
 
+const SEARCH_OVERLAP_FEEDBACK_THRESHOLD: f64 = 0.15;
+const SEARCH_OVERLAP_FEEDBACK_MIN_COUNT: usize = 2;
+
+struct DiverseCardSelection {
+    cards: Vec<XhsNoteCard>,
+    overlap_count: usize,
+    candidates_considered: usize,
+}
+
+fn select_diverse_cards(
+    cards: Vec<XhsNoteCard>,
+    prior_note_ids: &std::collections::HashSet<String>,
+    want: usize,
+) -> DiverseCardSelection {
+    let mut selected = Vec::with_capacity(want);
+    let mut overlap_count = 0usize;
+    let mut candidates_considered = 0usize;
+    let mut seen = std::collections::HashSet::new();
+    for card in cards {
+        if selected.len() >= want {
+            break;
+        }
+        let dedup = if !card.note_id.is_empty() {
+            card.note_id.clone()
+        } else if !card.link.is_empty() {
+            card.link.clone()
+        } else {
+            format!("pos:{}", card.position)
+        };
+        if !seen.insert(dedup) {
+            continue;
+        }
+        candidates_considered += 1;
+        if !card.note_id.is_empty() && prior_note_ids.contains(&card.note_id) {
+            overlap_count += 1;
+            continue;
+        }
+        selected.push(card);
+    }
+    DiverseCardSelection {
+        cards: selected,
+        overlap_count,
+        candidates_considered,
+    }
+}
+
+fn diverse_card_count(
+    cards: &[XhsNoteCard],
+    prior_note_ids: &std::collections::HashSet<String>,
+) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    cards
+        .iter()
+        .filter(|card| {
+            let dedup = if !card.note_id.is_empty() {
+                card.note_id.clone()
+            } else if !card.link.is_empty() {
+                card.link.clone()
+            } else {
+                format!("pos:{}", card.position)
+            };
+            seen.insert(dedup)
+                && (card.note_id.is_empty() || !prior_note_ids.contains(&card.note_id))
+        })
+        .count()
+}
+
+fn build_search_overlap_feedback(
+    query: &str,
+    history: &[SearchHistoryEntry],
+    overlap_count: usize,
+    candidates_considered: usize,
+) -> Option<Value> {
+    if history.is_empty()
+        || overlap_count < SEARCH_OVERLAP_FEEDBACK_MIN_COUNT
+        || candidates_considered == 0
+    {
+        return None;
+    }
+    let overlap_ratio = overlap_count as f64 / candidates_considered as f64;
+    if overlap_ratio < SEARCH_OVERLAP_FEEDBACK_THRESHOLD {
+        return None;
+    }
+    let mut previous_queries = Vec::new();
+    for entry in history.iter().rev() {
+        if !previous_queries.contains(&entry.query) {
+            previous_queries.push(entry.query.clone());
+        }
+        if previous_queries.len() >= 4 {
+            break;
+        }
+    }
+    previous_queries.reverse();
+    Some(json!({
+        "kind": "result_overlap",
+        "message": format!(
+            "Excluded {overlap_count} notes already returned by earlier searches in this run. Use a product model, concrete scenario, or pain point in the next query to reach a different result set."
+        ),
+        "overlap_count": overlap_count,
+        "candidates_considered": candidates_considered,
+        "overlap_ratio": (overlap_ratio * 1000.0).round() / 1000.0,
+        "previous_queries": previous_queries,
+        "suggested_queries": suggested_search_queries(query),
+    }))
+}
+
+fn suggested_search_queries(query: &str) -> Vec<String> {
+    let mut base = query.trim().to_string();
+    for generic in [
+        "真实使用体验",
+        "使用体验",
+        "真实体验",
+        "使用感受",
+        "怎么样",
+        "测评",
+        "评测",
+        "体验",
+    ] {
+        base = base.replace(generic, " ");
+    }
+    base = base.split_whitespace().collect::<Vec<_>>().join(" ");
+    if base.is_empty() {
+        base = query.trim().to_string();
+    }
+    ["长期使用 缺点", "具体型号 对比 实测", "清洁力 避障 基站"]
+        .into_iter()
+        .map(|angle| format!("{base} {angle}"))
+        .collect()
+}
+
 fn effective_macro_input(
     input: &Value,
     default_num_notes: Option<i64>,
@@ -4163,6 +4294,11 @@ impl Tool for SearchTool {
             .get("filters")
             .filter(|value| !value.is_null())
             .cloned();
+        let search_history = ctx.search_history();
+        let prior_note_ids = ctx
+            .search_note_ids()
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
 
         // Preview mode: return result cards only (titles/likes/covers) without
         // opening notes. This is the cards-only fast path surfaced on the CLI as
@@ -4171,7 +4307,7 @@ impl Tool for SearchTool {
             // num_notes defaults to DEFAULT_NUM_NOTES to match the schema and
             // the full-scan path: collect at least that many cards, scrolling
             // only if the first page holds fewer.
-            let num_notes = Some(get_i64(&input, "num_notes", DEFAULT_NUM_NOTES).max(1) as usize);
+            let want = get_i64(&input, "num_notes", DEFAULT_NUM_NOTES).max(1) as usize;
             // Warm the OCR engine off the critical path so cover OCR doesn't pay
             // model-load latency; overlaps the search + card collection below.
             let ocr = self.always_ocr || get_bool(&input, "ocr", false);
@@ -4180,7 +4316,7 @@ impl Tool for SearchTool {
             }
             let xhs = XhsPageRuntime::new(&self.page);
             let mut value = match xhs
-                .search_notes(&query, filters.as_ref(), SEARCH_WAIT_SECONDS, num_notes)
+                .search_notes(&query, filters.as_ref(), SEARCH_WAIT_SECONDS, None)
                 .await
             {
                 Ok(value) => value,
@@ -4196,6 +4332,47 @@ impl Tool for SearchTool {
                     result
                 }
             };
+            let mut returned_ids = Vec::new();
+            if value.get("ok").and_then(Value::as_bool) != Some(false) {
+                let cards = match xhs
+                    .collect_search_cards_until(|cards| {
+                        diverse_card_count(cards, &prior_note_ids) >= want
+                    })
+                    .await
+                {
+                    Ok(cards) => cards,
+                    Err(err) => {
+                        value = json!({
+                            "ok": false,
+                            "query": query.clone(),
+                            "reason": "search_collection_failed",
+                            "error": format!("{err:#}"),
+                            "cards": [],
+                        });
+                        xhs.attach_page_failure_diagnostic(&mut value).await;
+                        Vec::new()
+                    }
+                };
+                let selection = select_diverse_cards(cards, &prior_note_ids, want);
+                let overlap_count = selection.overlap_count;
+                let candidates_considered = selection.candidates_considered;
+                returned_ids = selection
+                    .cards
+                    .iter()
+                    .map(|card| card.note_id.clone())
+                    .filter(|id| !id.is_empty())
+                    .collect();
+                value["count"] = json!(selection.cards.len());
+                value["cards"] = serde_json::to_value(selection.cards)?;
+                if let Some(feedback) = build_search_overlap_feedback(
+                    &query,
+                    &search_history,
+                    overlap_count,
+                    candidates_considered,
+                ) {
+                    value["search_feedback"] = feedback;
+                }
+            }
             promote_page_diagnostic(&mut value);
             if let Some(cards) = value.get_mut("cards") {
                 self.history.annotate_cards(cards);
@@ -4288,6 +4465,9 @@ impl Tool for SearchTool {
                 );
             }
             annotate_remote_login_gate(&self.page, &mut value);
+            if !failed {
+                ctx.record_search_results(&query, &returned_ids);
+            }
             return Ok(json_result(&value));
         }
 
@@ -4432,6 +4612,8 @@ impl Tool for SearchTool {
         let mut page_error: Option<String> = None;
         let mut recovery_attempted = false;
         let mut consecutive_note_failures = 0usize;
+        let mut overlap_count = 0usize;
+        let mut candidates_considered = 0usize;
         let scan_deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(SEARCH_SCAN_TIMEOUT_SECONDS);
 
@@ -4583,8 +4765,39 @@ impl Tool for SearchTool {
                     }
                     break;
                 }
-                stalls += 1;
-                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                let baseline = cards.len();
+                if let Err(err) = xhs.scroll_feed(stalls % 2 == 1).await {
+                    append_search_debug_event(
+                        ctx,
+                        json!({
+                            "event": "search_feed_scroll_failed",
+                            "elapsed_ms": browse_t0.elapsed().as_millis() as u64,
+                            "error": format!("{err:#}"),
+                            "loaded_cards": baseline,
+                        }),
+                    );
+                    stalls += 1;
+                    continue;
+                }
+                match xhs
+                    .wait_for_card_growth(baseline, std::time::Duration::from_secs(5))
+                    .await
+                {
+                    Ok(grown) if grown.len() > baseline => stalls = 0,
+                    Ok(_) => stalls += 1,
+                    Err(err) => {
+                        append_search_debug_event(
+                            ctx,
+                            json!({
+                                "event": "search_feed_growth_failed",
+                                "elapsed_ms": browse_t0.elapsed().as_millis() as u64,
+                                "error": format!("{err:#}"),
+                                "loaded_cards": baseline,
+                            }),
+                        );
+                        stalls += 1;
+                    }
+                }
                 continue;
             }
             stalls = 0;
@@ -4600,8 +4813,10 @@ impl Tool for SearchTool {
             if !seen.insert(dedup) {
                 continue;
             }
-            if !card.note_id.is_empty() {
-                ctx.add_search_note_ids(std::slice::from_ref(&card.note_id));
+            candidates_considered += 1;
+            if !card.note_id.is_empty() && prior_note_ids.contains(&card.note_id) {
+                overlap_count += 1;
+                continue;
             }
             selected.push(card.clone());
             let item_index = notes.len() + 1;
@@ -4765,7 +4980,11 @@ impl Tool for SearchTool {
         if ocr {
             scan_progress.finish_ocr(notes.len());
         }
-
+        let returned_ids: Vec<String> = selected
+            .iter()
+            .map(|card| card.note_id.clone())
+            .filter(|id| !id.is_empty())
+            .collect();
         let mut media_timing = match (&media, &media_baseline) {
             (Some(media), Some(before)) => timing_delta(before, &media.timing().snapshot()),
             _ => json!({}),
@@ -4811,16 +5030,28 @@ impl Tool for SearchTool {
                 "download_media": download_media,
                 "ocr": ocr,
                 "transcribe_audio": transcribe_audio,
+                "overlap_excluded": overlap_count,
             },
             "timing": {
                 "media": media_timing,
             }
         });
+        if let Some(feedback) = build_search_overlap_feedback(
+            &query,
+            &search_history,
+            overlap_count,
+            candidates_considered,
+        ) {
+            payload["search_feedback"] = feedback;
+        }
         if !stop_reason.is_empty() {
             payload["reason"] = json!(stop_reason);
         }
         if let Some(error) = page_error {
             payload["error"] = json!(error);
+        }
+        if payload.get("ok").and_then(Value::as_bool) == Some(true) {
+            ctx.record_search_results(&query, &returned_ids);
         }
         promote_page_diagnostic(&mut payload);
         // Even the artifact keeps only the compact filter summary (changed +
@@ -5362,6 +5593,82 @@ fn sanitize_for_filename(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn card(note_id: &str, title: &str) -> XhsNoteCard {
+        XhsNoteCard {
+            note_id: note_id.to_string(),
+            title: title.to_string(),
+            ..XhsNoteCard::default()
+        }
+    }
+
+    #[test]
+    fn search_diversity_filters_previous_results_and_fills_requested_count() {
+        let ctx = ToolContext::new("run-1", "/tmp/socai-run");
+        ctx.record_search_results(
+            "科沃斯 扫地机器人 使用体验",
+            &["shared-1".into(), "shared-2".into(), "ecovacs".into()],
+        );
+        let prior = ctx
+            .search_note_ids()
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        let selection = select_diverse_cards(
+            vec![
+                card("shared-1", "generic"),
+                card("roborock-1", "石头 P20"),
+                card("shared-2", "generic again"),
+                card("roborock-1", "duplicate current card"),
+                card("roborock-2", "石头 G30"),
+            ],
+            &prior,
+            2,
+        );
+
+        assert_eq!(selection.cards.len(), 2);
+        assert_eq!(selection.cards[0].note_id, "roborock-1");
+        assert_eq!(selection.cards[1].note_id, "roborock-2");
+        assert_eq!(selection.overlap_count, 2);
+        assert_eq!(selection.candidates_considered, 4);
+        assert_eq!(
+            diverse_card_count(
+                &[
+                    card("shared-1", "generic"),
+                    card("roborock-1", "石头 P20"),
+                    card("roborock-1", "duplicate current card"),
+                ],
+                &prior,
+            ),
+            1,
+            "raw card count must not stop collection before two unique new cards exist"
+        );
+    }
+
+    #[test]
+    fn search_overlap_feedback_suggests_specific_query_angles() {
+        let ctx = ToolContext::new("run-1", "/tmp/socai-run");
+        ctx.record_search_results(
+            "科沃斯 扫地机器人 使用体验",
+            &["shared-1".into(), "shared-2".into(), "ecovacs".into()],
+        );
+
+        let feedback =
+            build_search_overlap_feedback("石头 扫地机器人 使用体验", &ctx.search_history(), 2, 5)
+                .expect("40% overlap should produce agent feedback");
+
+        assert_eq!(feedback["kind"], json!("result_overlap"));
+        assert_eq!(feedback["overlap_count"], json!(2));
+        let suggestions = feedback["suggested_queries"].as_array().unwrap();
+        assert!(suggestions.iter().any(|value| {
+            value
+                .as_str()
+                .is_some_and(|query| query.contains("石头 扫地机器人") && query.contains("缺点"))
+        }));
+        assert_eq!(
+            feedback["previous_queries"][0],
+            json!("科沃斯 扫地机器人 使用体验")
+        );
+    }
 
     #[test]
     fn download_media_does_not_imply_include_media() {

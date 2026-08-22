@@ -458,7 +458,7 @@ impl<'a> XhsPageRuntime<'a> {
 
     /// Poll `extract_search_cards` until the count grows past `baseline` or
     /// `timeout` elapses; returns the latest cards either way.
-    async fn wait_for_card_growth(
+    pub(crate) async fn wait_for_card_growth(
         &self,
         baseline: usize,
         timeout: Duration,
@@ -474,11 +474,14 @@ impl<'a> XhsPageRuntime<'a> {
         }
     }
 
-    /// Collect search cards up to `target`, scrolling the feed and waiting for
-    /// lazy-loaded cards after each scroll. Stops once we have enough cards or
-    /// the feed stops growing across a few consecutive scrolls (real end of
-    /// results). Returns at most `target` cards in feed order.
-    async fn collect_search_cards(&self, target: usize) -> Result<Vec<XhsNoteCard>> {
+    /// Collect search cards until `enough` accepts the current feed, scrolling
+    /// and waiting for lazy-loaded cards after each scroll. This lets callers
+    /// stop on a post-filter condition (for example, enough unique cards after
+    /// prior-run exclusions) instead of a raw DOM-card count.
+    pub(crate) async fn collect_search_cards_until<F>(&self, enough: F) -> Result<Vec<XhsNoteCard>>
+    where
+        F: Fn(&[XhsNoteCard]) -> bool,
+    {
         // XHS sometimes ignores a too-fast jump to the bottom and won't fetch
         // more, so pause before each jump; if a jump still loads nothing within
         // SETTLE_TIMEOUT, a small reverse (upward) scroll reliably re-triggers
@@ -490,7 +493,7 @@ impl<'a> XhsPageRuntime<'a> {
 
         let mut cards = self.extract_search_cards().await?;
         let mut stalls = 0usize;
-        while cards.len() < target {
+        while !enough(&cards) {
             let before = cards.len();
 
             // 1) Deliberate pause, then jump to the bottom to request more.
@@ -514,6 +517,17 @@ impl<'a> XhsPageRuntime<'a> {
                 stalls = 0;
             }
         }
+        Ok(cards)
+    }
+
+    /// Collect search cards up to `target`, scrolling the feed and waiting for
+    /// lazy-loaded cards after each scroll. Stops once we have enough cards or
+    /// the feed stops growing across a few consecutive scrolls (real end of
+    /// results). Returns at most `target` cards in feed order.
+    async fn collect_search_cards(&self, target: usize) -> Result<Vec<XhsNoteCard>> {
+        let mut cards = self
+            .collect_search_cards_until(|cards| cards.len() >= target)
+            .await?;
         cards.truncate(target);
         Ok(cards)
     }

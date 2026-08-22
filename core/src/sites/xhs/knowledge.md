@@ -78,6 +78,13 @@ artifacts, and return a compact bundle. They differ only in where they enter:
   topic, keyword, market, trend, product category, or group of posts. `filters`
   are search-result filters (sort, note_type, publish_time, search_scope,
   distance).
+
+Within one run, `search` excludes note IDs already returned by earlier search
+calls and continues through the ranked feed to collect new notes. When overlap
+is high, the result includes `search_feedback` with the earlier queries,
+measured overlap, and more specific query options. Use one of those options or
+add a product model, concrete scenario, or pain point before the next search;
+avoid repeating a generic template across brands.
 - `author_scan(author_id=...)` — enters from one author's profile (also returns
   the profile header). Use for a specific creator. Needs an `author_id` (trailing
   segment of `/user/profile/<id>`); if the user only gives a display name/handle,

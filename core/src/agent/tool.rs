@@ -164,6 +164,10 @@ pub struct ToolContext {
     /// Note ids the agent has sampled via `search` in this run — useful
     /// for "show me what I've already covered" tools.
     search_note_ids: Arc<Mutex<Vec<String>>>,
+    /// Query-scoped search results from this run. The search tool uses these
+    /// records to exclude notes already returned by earlier searches and to
+    /// explain high overlap to the agent with more specific query options.
+    search_history: Arc<Mutex<Vec<SearchHistoryEntry>>>,
     /// Notes the agent fully read this run, in the order they were first
     /// recorded (the order the tool processed them — for `search`, result
     /// order). Archived to `<run_dir>/notes.json` so the desktop app can
@@ -183,6 +187,12 @@ struct Counters {
 pub struct ProcessedNote {
     pub level: String,
     pub include_media: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchHistoryEntry {
+    pub query: String,
+    pub note_ids: Vec<String>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -213,6 +223,7 @@ impl ToolContext {
             counters: Arc::new(Mutex::new(Counters::default())),
             processed_notes: Arc::new(Mutex::new(BTreeMap::new())),
             search_note_ids: Arc::new(Mutex::new(Vec::new())),
+            search_history: Arc::new(Mutex::new(Vec::new())),
             notes_seen: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -316,6 +327,39 @@ impl ToolContext {
         self.search_note_ids
             .lock()
             .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// Record the note ids actually returned by one search call. Empty ids are
+    /// ignored and duplicates inside the call keep their first position.
+    pub fn record_search_results(&self, query: &str, ids: &[String]) {
+        let query = query.trim();
+        if query.is_empty() {
+            return;
+        }
+        let mut note_ids = Vec::new();
+        for id in ids {
+            let id = id.trim();
+            if !id.is_empty() && !note_ids.iter().any(|existing| existing == id) {
+                note_ids.push(id.to_string());
+            }
+        }
+        self.add_search_note_ids(&note_ids);
+        let Ok(mut guard) = self.search_history.lock() else {
+            return;
+        };
+        guard.push(SearchHistoryEntry {
+            query: query.to_string(),
+            note_ids,
+        });
+        let overflow = guard.len().saturating_sub(20);
+        guard.drain(0..overflow);
+    }
+
+    pub fn search_history(&self) -> Vec<SearchHistoryEntry> {
+        self.search_history
+            .lock()
+            .map(|history| history.clone())
             .unwrap_or_default()
     }
 
