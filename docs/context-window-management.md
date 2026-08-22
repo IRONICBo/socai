@@ -69,7 +69,7 @@ The request context has four relevant layers:
 | System | Rules, date, tool names, site instructions | No |
 | Earlier turns | User requests and final Markdown reports | Yes, after they enter the old region |
 | Recent in-run history | Assistant tool calls and tool results | No; the newest 10 messages stay verbatim |
-| Older in-run history | Earlier tool calls and structured results | Yes, to IDs, titles, and artifact paths |
+| Older in-run history | Earlier tool calls and structured results | Yes, to post metadata and artifact paths |
 | Run artifacts | Full JSON, OCR, media, requests, responses | No |
 
 Run artifacts are the durable evidence store. Context compaction changes only
@@ -82,14 +82,23 @@ Every raw tool result is written to its tool-call directory before the result is
 bounded for model history. The LLM-facing text has a 30,000-character ceiling.
 If an oversized result is JSON, degradation happens in this order:
 
-1. Cap each `ocr_text` value to 1,000 characters in total. For string arrays,
+1. For XHS search/author results with an artifact pointer, keep every returned
+   post as a metadata-first record using all fields available in the lean tool
+   result: note ID, title, author, author ID, URL, date, type, engagement
+   counts, a bounded body excerpt, and a small comment/reply sample. Full OCR,
+   media, bodies, comment threads, location, and hashtags remain in the
+   artifact when those fields were removed by the artifact-first tool shape.
+   If the full metadata view still exceeds the ceiling, reduce it through
+   identity-only and ID-only valid JSON forms. An extreme result that cannot
+   fit every ID keeps a valid artifact index with retained and omitted counts.
+2. Cap each `ocr_text` value to 1,000 characters in total. For string arrays,
    keep complete leading entries until the budget is exhausted and mark the
    truncation.
-2. Replace `top_comments` with an artifact pointer marker if the result is still
+3. Replace `top_comments` with an artifact pointer marker if the result is still
    too large.
-3. Compact JSON objects, arrays, and string leaves while keeping note body text
+4. Compact JSON objects, arrays, and string leaves while keeping note body text
    longer than generic strings.
-4. Apply a final character truncation only as a last resort.
+5. Apply a final character truncation only as a last resort.
 
 Xiaohongshu search and author-scan results are already artifact-first before
 this generic limit runs. Their full artifacts retain per-image OCR. The lean
@@ -102,7 +111,7 @@ Example for a three-image note:
 | --- | --- |
 | `artifacts/search/*.json` | Images 1, 2, and 3, including their complete per-image OCR fields |
 | LLM-facing `search` result | OCR summaries for images 1 and 2 only, each capped at 1,200 characters |
-| Later compacted context | Note ID, title, and artifact path; OCR text is removed |
+| Later compacted context | Available note metadata and artifact path; OCR text is removed |
 
 ## Sawtooth message window
 
@@ -154,17 +163,22 @@ Prior turns are seeded as user text followed by an assistant Markdown report.
 When those messages move into the compacted region, socai emits compact Markdown
 for each recognized report containing:
 
-- up to 500 characters of its associated user request, when available;
-- the first 2,000 characters of the assistant report;
+- up to 1,000 characters of its associated user request, preserving the start
+  and end when the middle must be removed;
+- up to 3,000 characters of the assistant report, preserving the opening
+  analysis and closing conclusions;
 - every note citation found in the full report using the canonical
   `[title](note:NOTE_ID)` form;
 - artifact links found in the full report when their targets point into known
   run artifact locations such as `artifacts/`, `tools/`, `snapshots/`,
   `site_media/`, or an absolute `.socai/runs/` path.
 
-Evidence extraction scans the complete Markdown report, not only its
-2,000-character excerpt. Earlier compacted Markdown is carried forward when the
-next sawtooth compaction occurs.
+Evidence extraction scans the complete Markdown report, including content
+outside the 3,000-character compact view. Request and report excerpts are HTML-
+escaped inside `<pre>` blocks so a cut cannot leave an open Markdown construct.
+At the next sawtooth point, prior turns and artifact entries are parsed back
+into structured blocks, deduplicated, and rendered within a 48,000-character
+aggregate ceiling.
 
 For example, suppose an older turn ends with a 3,000-character report whose
 last section contains these links:
@@ -179,19 +193,29 @@ Its compact representation is shaped like this:
 ```markdown
 ### Turn 1
 User request:
-<first 500 characters>
+<pre>
+<opening request text>
+
+[middle omitted; full request remains in the conversation record]
+
+<closing request text>
+</pre>
 
 Assistant report excerpt:
-<first 2,000 characters>
+<pre>
+<opening report text>
 
-[truncated; full report remains in the run artifact]
+[middle omitted; full report remains in the run artifact]
+
+<closing conclusions>
+</pre>
 
 Extracted evidence:
 - note_id: note-123; title: A useful note
 - artifact: artifacts/search/coffee.json
 ```
 
-The links are retained even though they appeared after character 2,000 because
+The links are retained even when they appear outside the compact view because
 evidence extraction scans the complete report. Ordinary Markdown such as a task
 checkbox (`[x]`) is ignored and cannot consume a later link's title.
 
@@ -207,14 +231,15 @@ Older `tool_result` text is parsed as JSON. When the result contains an
 `artifact.path`, the compacted context retains:
 
 - the artifact path;
-- note IDs and titles from `notes` or `cards`, accepting either direct entities
+- note IDs, titles, authors, author IDs, URLs, dates, note types, and available
+  engagement counts from `notes` or `cards`, accepting either direct entities
   or `{ "entity": ... }` wrappers;
 - an author ID and available profile name for author-scan results.
 
-Body text, OCR, comments, timing details, engagement metadata, and other large
-fields are omitted from this compact representation because the artifact path
-is the durable lookup key. Duplicate entity entries are removed
-deterministically.
+Body text, OCR, comments, timing details, and other large fields are omitted
+from this later sawtooth representation. The artifact path remains the durable
+lookup key. Duplicate entity entries merge non-empty fields so a later sparse
+card cannot replace richer metadata.
 
 For example, this older tool result:
 
@@ -222,7 +247,15 @@ For example, this older tool result:
 {
   "artifact": { "path": "artifacts/search/coffee.json" },
   "notes": [
-    { "note_id": "note-123", "title": "A useful note", "ocr_text": ["..."] }
+    {
+      "note_id": "note-123",
+      "title": "A useful note",
+      "author": "Lin",
+      "date": "2026-08-21",
+      "likes": 1200,
+      "url": "https://www.xiaohongshu.com/explore/note-123",
+      "ocr_text": ["..."]
+    }
   ]
 }
 ```
@@ -231,7 +264,7 @@ becomes approximately:
 
 ```markdown
 ## Artifact: artifacts/search/coffee.json
-- note-123 — A useful note
+- note-123 — A useful note | author: Lin; date: 2026-08-21; likes: 1200; url: https://www.xiaohongshu.com/explore/note-123
 ```
 
 The model can reopen the artifact if it needs the omitted body, comments, or

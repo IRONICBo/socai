@@ -13,8 +13,10 @@ use crate::agent::llm::{Block, Message, MessageContent, MessageRole, ToolResultC
 
 pub const DEFAULT_COMPACT_AFTER_MESSAGES: usize = 20;
 pub const DEFAULT_KEEP_RECENT_MESSAGES: usize = 10;
-const TURN_MARKDOWN_MAX_CHARS: usize = 2_000;
-const USER_REQUEST_MAX_CHARS: usize = 500;
+const TURN_MARKDOWN_MAX_CHARS: usize = 3_000;
+const USER_REQUEST_MAX_CHARS: usize = 1_000;
+const COMPACT_CONTEXT_MAX_CHARS: usize = 48_000;
+const COMPACT_TURNS_MAX_CHARS: usize = 24_000;
 const COMPACT_CONTEXT_HEADING: &str = "# Earlier compacted context";
 const LEGACY_EVIDENCE_HEADING: &str = "# Earlier tool evidence";
 
@@ -113,8 +115,9 @@ fn contains_tool_result(message: &Message) -> bool {
 }
 
 fn compact_older_messages(messages: &[Message]) -> String {
-    let mut inherited = Vec::new();
-    let mut artifacts: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
+    let mut inherited_artifacts: BTreeMap<String, BTreeMap<String, CompactEntityEvidence>> =
+        BTreeMap::new();
+    let mut artifacts: BTreeMap<String, BTreeMap<String, CompactEntityEvidence>> = BTreeMap::new();
     let mut turns = Vec::new();
     let mut pending_user: Option<String> = None;
 
@@ -124,7 +127,7 @@ fn compact_older_messages(messages: &[Message]) -> String {
                 if text.starts_with(COMPACT_CONTEXT_HEADING)
                     || text.starts_with(LEGACY_EVIDENCE_HEADING)
                 {
-                    inherited.push(text.trim().to_string());
+                    collect_inherited_context(text, &mut turns, &mut inherited_artifacts);
                 } else {
                     pending_user = Some(text.trim().to_string());
                 }
@@ -168,28 +171,151 @@ fn compact_older_messages(messages: &[Message]) -> String {
         ));
     }
 
-    let mut rendered = if inherited.is_empty() {
-        COMPACT_CONTEXT_HEADING.to_string()
-    } else {
-        inherited.join("\n\n")
+    for (path, entities) in artifacts {
+        let inherited = inherited_artifacts.entry(path).or_default();
+        for entity in entities.values() {
+            inherited
+                .entry(entity.key())
+                .and_modify(|existing| existing.merge_from(entity))
+                .or_insert_with(|| entity.clone());
+        }
+    }
+    render_bounded_context(&turns, &inherited_artifacts)
+}
+
+fn collect_inherited_context(
+    text: &str,
+    turns: &mut Vec<String>,
+    artifacts: &mut BTreeMap<String, BTreeMap<String, CompactEntityEvidence>>,
+) {
+    enum Section {
+        None,
+        Turns,
+        Evidence,
+    }
+    let mut section = Section::None;
+    let mut current_turn = String::new();
+    let mut current_artifact: Option<String> = None;
+    let mut inside_pre = false;
+    let flush_turn = |turns: &mut Vec<String>, current: &mut String| {
+        let turn = current.trim();
+        if !turn.is_empty() && !turns.iter().any(|existing| existing == turn) {
+            turns.push(turn.to_string());
+        }
+        current.clear();
     };
+
+    for line in text.lines() {
+        let structural = !inside_pre;
+        if structural && line == "## Earlier conversation turns" {
+            flush_turn(turns, &mut current_turn);
+            section = Section::Turns;
+            current_artifact = None;
+            continue;
+        }
+        if structural && (line == "## Earlier tool evidence" || line == LEGACY_EVIDENCE_HEADING) {
+            flush_turn(turns, &mut current_turn);
+            section = Section::Evidence;
+            current_artifact = None;
+            continue;
+        }
+        if structural && matches!(section, Section::Turns) && line.starts_with("### Turn ") {
+            flush_turn(turns, &mut current_turn);
+            continue;
+        }
+        if structural && matches!(section, Section::Evidence) {
+            if let Some(path) = line.strip_prefix("## Artifact: ") {
+                current_artifact = Some(path.trim().to_string());
+                artifacts.entry(path.trim().to_string()).or_default();
+                continue;
+            }
+            if let (Some(path), Some(evidence)) =
+                (current_artifact.as_ref(), line.strip_prefix("- "))
+            {
+                let candidate = CompactEntityEvidence::parse(evidence.trim());
+                artifacts
+                    .entry(path.clone())
+                    .or_default()
+                    .entry(candidate.key())
+                    .and_modify(|existing| existing.merge_from(&candidate))
+                    .or_insert(candidate);
+            }
+            continue;
+        }
+        if matches!(section, Section::Turns) {
+            current_turn.push_str(line);
+            current_turn.push('\n');
+        }
+        if line.contains("<pre>") && !line.contains("</pre>") {
+            inside_pre = true;
+        }
+        if line.contains("</pre>") {
+            inside_pre = false;
+        }
+    }
+    flush_turn(turns, &mut current_turn);
+}
+
+fn render_bounded_context(
+    turns: &[String],
+    artifacts: &BTreeMap<String, BTreeMap<String, CompactEntityEvidence>>,
+) -> String {
+    let mut rendered = COMPACT_CONTEXT_HEADING.to_string();
     if !turns.is_empty() {
+        let mut selected = Vec::new();
+        let mut used = 0usize;
+        for turn in turns.iter().rev() {
+            let block_chars = turn.chars().count() + 32;
+            if used + block_chars <= COMPACT_TURNS_MAX_CHARS {
+                selected.push(turn);
+                used += block_chars;
+            }
+        }
+        selected.reverse();
         rendered.push_str("\n\n## Earlier conversation turns\n");
-        for (index, turn) in turns.iter().enumerate() {
-            rendered.push_str(&format!("\n### Turn {}\n{}", index + 1, turn));
+        let omitted = turns.len().saturating_sub(selected.len());
+        if omitted > 0 {
+            rendered.push_str(&format!("\n[{omitted} older compacted turns omitted]\n"));
+        }
+        for (index, turn) in selected.into_iter().enumerate() {
+            let block = format!("\n### Turn {}\n{}", index + 1, turn);
+            if rendered.chars().count() + block.chars().count() > COMPACT_CONTEXT_MAX_CHARS {
+                break;
+            }
+            rendered.push_str(&block);
         }
     }
     if !artifacts.is_empty() {
-        rendered.push_str("\n\n## Earlier tool evidence\n");
-        rendered.push_str("Full data is available in the listed artifacts.\n");
+        let heading =
+            "\n\n## Earlier tool evidence\nFull data is available in the listed artifacts.\n";
+        if rendered.chars().count() + heading.chars().count() <= COMPACT_CONTEXT_MAX_CHARS {
+            rendered.push_str(heading);
+        }
+        let mut omitted_entities = 0usize;
         for (path, entities) in artifacts {
-            rendered.push_str(&format!("\n## Artifact: {path}\n"));
-            for (id, title) in entities {
-                if title.is_empty() {
-                    rendered.push_str(&format!("- {id}\n"));
+            let artifact_heading = format!("\n## Artifact: {path}\n");
+            if rendered.chars().count() + artifact_heading.chars().count()
+                > COMPACT_CONTEXT_MAX_CHARS
+            {
+                omitted_entities += entities.len();
+                continue;
+            }
+            rendered.push_str(&artifact_heading);
+            for entity in entities.values() {
+                let line = format!("- {}\n", entity.render());
+                if rendered.chars().count() + line.chars().count() > COMPACT_CONTEXT_MAX_CHARS {
+                    omitted_entities += 1;
                 } else {
-                    rendered.push_str(&format!("- {id} — {title}\n"));
+                    rendered.push_str(&line);
                 }
+            }
+        }
+        if omitted_entities > 0 {
+            let marker = format!(
+                "\n[{omitted_entities} evidence entries omitted; use the artifact paths above]\n"
+            );
+            if rendered.chars().count() + marker.chars().count() <= COMPACT_CONTEXT_MAX_CHARS {
+                rendered.push_str(&marker);
             }
         }
     }
@@ -227,11 +353,24 @@ fn compact_turn_markdown(user: Option<&str>, markdown: &str) -> String {
     let mut rendered = String::new();
     if let Some(user) = user.filter(|text| !text.trim().is_empty()) {
         rendered.push_str("User request:\n");
-        rendered.push_str(&truncate_chars(user, USER_REQUEST_MAX_CHARS));
-        rendered.push_str("\n\n");
+        rendered.push_str("<pre>");
+        rendered.push_str(&escape_html_text(&compact_head_tail(
+            user,
+            USER_REQUEST_MAX_CHARS,
+            700,
+            "[middle omitted; full request remains in the conversation record]",
+        )));
+        rendered.push_str("</pre>\n\n");
     }
     rendered.push_str("Assistant report excerpt:\n");
-    rendered.push_str(&truncate_chars(markdown, TURN_MARKDOWN_MAX_CHARS));
+    rendered.push_str("<pre>");
+    rendered.push_str(&escape_html_text(&compact_head_tail(
+        markdown,
+        TURN_MARKDOWN_MAX_CHARS,
+        2_000,
+        "[middle omitted; full report remains in the run artifact]",
+    )));
+    rendered.push_str("</pre>");
 
     let (notes, artifacts) = extract_markdown_evidence(markdown);
     if !notes.is_empty() || !artifacts.is_empty() {
@@ -250,14 +389,35 @@ fn compact_turn_markdown(user: Option<&str>, markdown: &str) -> String {
     rendered
 }
 
-fn truncate_chars(text: &str, max_chars: usize) -> String {
+fn compact_head_tail(text: &str, max_chars: usize, head_chars: usize, marker: &str) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= max_chars {
         return trimmed.to_string();
     }
-    let mut out: String = trimmed.chars().take(max_chars).collect();
-    out.push_str("\n\n[truncated; full report remains in the run artifact]");
-    out
+    let separator = format!("\n\n{marker}\n\n");
+    let separator_chars = separator.chars().count();
+    if max_chars <= separator_chars {
+        return separator.chars().take(max_chars).collect();
+    }
+    let content_chars = max_chars - separator_chars;
+    let head_chars = head_chars.min(content_chars);
+    let tail_chars = content_chars.saturating_sub(head_chars);
+    let head: String = trimmed.chars().take(head_chars).collect();
+    let tail: String = trimmed
+        .chars()
+        .rev()
+        .take(tail_chars)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head}{separator}{tail}")
+}
+
+fn escape_html_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn extract_markdown_evidence(markdown: &str) -> (BTreeSet<(String, String)>, BTreeSet<String>) {
@@ -312,7 +472,7 @@ fn is_artifact_link(target: &str) -> bool {
 
 fn collect_artifact_evidence(
     value: &Value,
-    artifacts: &mut BTreeMap<String, BTreeSet<(String, String)>>,
+    artifacts: &mut BTreeMap<String, BTreeMap<String, CompactEntityEvidence>>,
 ) {
     let Some(path) = value
         .pointer("/artifact/path")
@@ -330,7 +490,16 @@ fn collect_artifact_evidence(
             .or_else(|| value.pointer("/profile/name"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        entities.insert((format!("author:{author_id}"), title.to_string()));
+        let id = format!("author:{author_id}");
+        let candidate = CompactEntityEvidence {
+            id,
+            title: title.to_string(),
+            ..CompactEntityEvidence::default()
+        };
+        entities
+            .entry(candidate.id.clone())
+            .and_modify(|existing| existing.merge_from(&candidate))
+            .or_insert(candidate);
     }
 
     for key in ["notes", "cards"] {
@@ -346,8 +515,160 @@ fn collect_artifact_evidence(
                 .unwrap_or("");
             let title = entity.get("title").and_then(Value::as_str).unwrap_or("");
             if !id.is_empty() || !title.is_empty() {
-                entities.insert((id.to_string(), title.to_string()));
+                let key = if id.is_empty() {
+                    format!("title:{title}")
+                } else {
+                    id.to_string()
+                };
+                let candidate = CompactEntityEvidence {
+                    id: id.to_string(),
+                    title: title.to_string(),
+                    author: string_field(entity, "author"),
+                    author_id: string_field(entity, "author_id"),
+                    url: string_field(entity, "url"),
+                    date: string_field(entity, "date"),
+                    note_type: string_field(entity, "type"),
+                    likes: scalar_field(entity, "likes"),
+                    favorites: scalar_field(entity, "favorites"),
+                    comments_count: scalar_field(entity, "comments_count"),
+                };
+                entities
+                    .entry(key)
+                    .and_modify(|existing| existing.merge_from(&candidate))
+                    .or_insert(candidate);
             }
         }
     }
+}
+
+#[derive(Clone, Default)]
+struct CompactEntityEvidence {
+    id: String,
+    title: String,
+    author: String,
+    author_id: String,
+    url: String,
+    date: String,
+    note_type: String,
+    likes: String,
+    favorites: String,
+    comments_count: String,
+}
+
+impl CompactEntityEvidence {
+    fn parse(rendered: &str) -> Self {
+        let (main, metadata) = rendered
+            .split_once(" | ")
+            .map_or((rendered, ""), |(main, metadata)| (main, metadata));
+        let (id, title) = main
+            .split_once(" — ")
+            .map_or((main.trim(), ""), |(id, title)| (id.trim(), title.trim()));
+        let mut parsed = Self {
+            id: id.to_string(),
+            title: title.to_string(),
+            ..Self::default()
+        };
+        for field in metadata.split("; ") {
+            let Some((label, value)) = field.split_once(": ") else {
+                continue;
+            };
+            match label {
+                "author" => parsed.author = value.to_string(),
+                "author_id" => parsed.author_id = value.to_string(),
+                "date" => parsed.date = value.to_string(),
+                "type" => parsed.note_type = value.to_string(),
+                "likes" => parsed.likes = value.to_string(),
+                "favorites" => parsed.favorites = value.to_string(),
+                "comments" => parsed.comments_count = value.to_string(),
+                "url" => parsed.url = value.to_string(),
+                _ => {}
+            }
+        }
+        parsed
+    }
+
+    fn key(&self) -> String {
+        if self.id.trim().is_empty() {
+            format!("title:{}", self.title.trim())
+        } else {
+            self.id.trim().to_string()
+        }
+    }
+
+    fn merge_from(&mut self, other: &Self) {
+        merge_field(&mut self.id, &other.id);
+        merge_field(&mut self.title, &other.title);
+        merge_field(&mut self.author, &other.author);
+        merge_field(&mut self.author_id, &other.author_id);
+        merge_field(&mut self.url, &other.url);
+        merge_field(&mut self.date, &other.date);
+        merge_field(&mut self.note_type, &other.note_type);
+        merge_field(&mut self.likes, &other.likes);
+        merge_field(&mut self.favorites, &other.favorites);
+        merge_field(&mut self.comments_count, &other.comments_count);
+    }
+
+    fn render(&self) -> String {
+        let mut main = match (self.id.is_empty(), self.title.is_empty()) {
+            (false, false) => format!("{} — {}", self.id, compact_field(&self.title, 120)),
+            (false, true) => self.id.clone(),
+            (true, false) => compact_field(&self.title, 120),
+            (true, true) => "unknown note".to_string(),
+        };
+        let mut metadata = Vec::new();
+        push_metadata(&mut metadata, "author", &self.author, 80);
+        push_metadata(&mut metadata, "author_id", &self.author_id, 80);
+        push_metadata(&mut metadata, "date", &self.date, 40);
+        push_metadata(&mut metadata, "type", &self.note_type, 30);
+        push_metadata(&mut metadata, "likes", &self.likes, 30);
+        push_metadata(&mut metadata, "favorites", &self.favorites, 30);
+        push_metadata(&mut metadata, "comments", &self.comments_count, 30);
+        push_metadata(&mut metadata, "url", &self.url, 220);
+        if !metadata.is_empty() {
+            main.push_str(" | ");
+            main.push_str(&metadata.join("; "));
+        }
+        main
+    }
+}
+
+fn merge_field(current: &mut String, candidate: &str) {
+    if candidate.trim().is_empty() {
+        return;
+    }
+    if current.trim().is_empty() || candidate.chars().count() > current.chars().count() {
+        *current = candidate.to_string();
+    }
+}
+
+fn string_field(entity: &Value, key: &str) -> String {
+    entity
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn scalar_field(entity: &Value, key: &str) -> String {
+    match entity.get(key) {
+        Some(Value::String(value)) => value.clone(),
+        Some(Value::Number(value)) => value.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn push_metadata(metadata: &mut Vec<String>, label: &str, value: &str, max_chars: usize) {
+    if !value.trim().is_empty() {
+        metadata.push(format!("{label}: {}", compact_field(value, max_chars)));
+    }
+}
+
+fn compact_field(value: &str, max_chars: usize) -> String {
+    let value = value.trim();
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut compact: String = value.chars().take(max_chars).collect();
+    compact.push('…');
+    compact
 }
