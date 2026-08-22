@@ -5207,6 +5207,7 @@ dependencies = [
  "fs2",
  "futures",
  "hex",
+ "image",
  "libc",
  "objc2",
  "objc2-app-kit",

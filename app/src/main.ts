@@ -85,6 +85,8 @@ export interface AgentArtifact {
   relative_path: string;
   kind: string;
   size_bytes: number;
+  version: string;
+  preview_kind?: "markdown" | "csv" | "text" | "pdf" | "image" | null;
 }
 
 export interface AgentArtifactDownload {

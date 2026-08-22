@@ -22,7 +22,7 @@ use socai_core::telemetry::tool_call::{summarize_tool_args, summarize_tool_resul
 use socai_core::telemetry::trace::mark_run_trace_status;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, Cursor, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -958,6 +958,8 @@ pub struct AgentArtifact {
     relative_path: String,
     kind: String,
     size_bytes: u64,
+    version: String,
+    preview_kind: Option<String>,
     #[serde(skip)]
     identity: same_file::Handle,
 }
@@ -968,6 +970,10 @@ pub struct AgentArtifactDownload {
     path: String,
     identity: String,
 }
+
+const ARTIFACT_TEXT_PREVIEW_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const ARTIFACT_BINARY_PREVIEW_MAX_BYTES: u64 = 24 * 1024 * 1024;
+const ARTIFACT_IMAGE_PREVIEW_MAX_PIXELS: u64 = 24_000_000;
 
 /// Download cards include tool-registered artifacts (`artifacts/**`) and
 /// explicit user deliverables (`outputs/**`). Runtime logs, note media and
@@ -982,6 +988,49 @@ pub async fn agent_task_artifacts(
         .await
         .ok_or_else(|| format!("unknown task: {task_id}"))?;
     Ok(task_artifacts(&snapshot))
+}
+
+/// Read a previewable task artifact after authorizing it against the current
+/// task snapshot. Returning bytes over IPC keeps run paths outside the
+/// WebView's asset-protocol scope and applies one size limit on every platform.
+#[tauri::command]
+pub async fn agent_task_artifact_preview(
+    tasks: State<'_, AgentTaskRegistry>,
+    task_id: String,
+    path: String,
+) -> Result<tauri::ipc::Response, String> {
+    let snapshot = tasks
+        .get(&task_id)
+        .await
+        .ok_or_else(|| format!("unknown task: {task_id}"))?;
+    let artifact = task_artifacts(&snapshot)
+        .into_iter()
+        .find(|artifact| artifact.path == path)
+        .ok_or_else(|| "artifact is not part of this task".to_string())?;
+    let preview_kind = artifact
+        .preview_kind
+        .clone()
+        .ok_or_else(|| "artifact type is not previewable".to_string())?;
+    let source = PathBuf::from(&artifact.path);
+    let source_identity = artifact.identity;
+    tokio::task::spawn_blocking(move || {
+        let file = open_artifact_source(&source, &source_identity)?;
+        let limit = if matches!(preview_kind.as_str(), "pdf" | "image") {
+            ARTIFACT_BINARY_PREVIEW_MAX_BYTES
+        } else {
+            ARTIFACT_TEXT_PREVIEW_MAX_BYTES
+        };
+        let bytes = read_artifact_preview(file, limit)?;
+        if preview_kind == "image" {
+            validate_artifact_image_preview(&source, &bytes)?;
+        } else if preview_kind != "pdf" {
+            std::str::from_utf8(&bytes)
+                .map_err(|_| format!("artifact is not valid UTF-8: {}", source.display()))?;
+        }
+        Ok(tauri::ipc::Response::new(bytes))
+    })
+    .await
+    .map_err(|error| format!("artifact preview task failed: {error}"))?
 }
 
 /// Copy one artifact into the user's Downloads directory. The requested path
@@ -1202,10 +1251,96 @@ fn collect_run_artifacts(
                 relative_path,
                 kind,
                 size_bytes: metadata.len(),
+                version: artifact_version(&identity, &metadata),
+                preview_kind: artifact_preview_kind(&path, metadata.len()).map(str::to_string),
                 identity,
             });
         }
     }
+}
+
+fn artifact_preview_kind(path: &std::path::Path, size_bytes: u64) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    let (kind, limit) = match extension.as_str() {
+        "md" | "markdown" => ("markdown", ARTIFACT_TEXT_PREVIEW_MAX_BYTES),
+        "csv" | "tsv" => ("csv", ARTIFACT_TEXT_PREVIEW_MAX_BYTES),
+        "txt" | "json" | "jsonl" | "yaml" | "yml" | "toml" | "xml" | "html" | "htm" | "css"
+        | "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "rs" | "py" | "go" | "java" | "kt"
+        | "swift" | "sh" | "zsh" | "fish" | "ps1" | "sql" | "log" => {
+            ("text", ARTIFACT_TEXT_PREVIEW_MAX_BYTES)
+        }
+        "pdf" => ("pdf", ARTIFACT_BINARY_PREVIEW_MAX_BYTES),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => {
+            ("image", ARTIFACT_BINARY_PREVIEW_MAX_BYTES)
+        }
+        _ => return None,
+    };
+    (size_bytes <= limit).then_some(kind)
+}
+
+fn read_artifact_preview(file: std::fs::File, max_bytes: u64) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    file.take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read artifact preview: {error}"))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(format!(
+            "artifact exceeds the {} MB preview limit",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+    Ok(bytes)
+}
+
+fn artifact_version(identity: &same_file::Handle, metadata: &std::fs::Metadata) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!(
+        "{}:{}:{modified}",
+        hash_artifact_identity(identity),
+        metadata.len()
+    )
+}
+
+fn validate_artifact_image_preview(source: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let expected = match source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => image::ImageFormat::Png,
+        "jpg" | "jpeg" => image::ImageFormat::Jpeg,
+        "gif" => image::ImageFormat::Gif,
+        "webp" => image::ImageFormat::WebP,
+        "bmp" => image::ImageFormat::Bmp,
+        _ => return Err("unsupported image preview format".to_string()),
+    };
+    let reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|error| format!("could not inspect image preview: {error}"))?;
+    if reader.format() != Some(expected) {
+        return Err(format!(
+            "image contents do not match the file extension: {}",
+            source.display()
+        ));
+    }
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|error| format!("could not read image dimensions: {error}"))?;
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if pixels > ARTIFACT_IMAGE_PREVIEW_MAX_PIXELS {
+        return Err(format!(
+            "image exceeds the {} megapixel preview limit",
+            ARTIFACT_IMAGE_PREVIEW_MAX_PIXELS / 1_000_000
+        ));
+    }
+    Ok(())
 }
 
 fn open_artifact_source(

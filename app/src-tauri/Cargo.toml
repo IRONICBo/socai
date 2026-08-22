@@ -26,6 +26,7 @@ hex = "0.4"
 fs2 = "0.4"
 libc.workspace = true
 same-file = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
 url = "2"
 tokio = { workspace = true }
 anyhow.workspace = true

@@ -32,6 +32,7 @@ import feishuLogo from "../assets/connectors/feishu.png";
 import chromeRemoteDebuggingImage from "../assets/chrome-remote-debugging.png";
 import chromeAllowDialogImage from "../assets/chrome-allow-dialog.png";
 import { renderNoteAnswer, renderNoteCards } from "./notes";
+import { artifactFileIcon, downloadIcon, eyeIcon, formatArtifactSize } from "./artifact_preview";
 import type { AgentTaskView } from "./tasks";
 
 export interface ComposerProps {
@@ -61,6 +62,7 @@ export interface ConversationProps {
   isActivityOpen: (turnIndex: number, defaultOpen: boolean) => boolean;
   /** Download/open progress survives the full-shell rerenders owned by tasks.ts. */
   artifactDownloadState: (path: string) => ArtifactDownloadState | undefined;
+  artifactPreviewPath: string | null;
   composer: ComposerProps;
 }
 
@@ -94,6 +96,7 @@ export function renderConversation(props: ConversationProps): string {
             running,
             props.isActivityOpen,
             props.artifactDownloadState,
+            props.artifactPreviewPath,
           )}
         </div>
       </div>
@@ -207,6 +210,7 @@ function renderThread(
   running: boolean,
   isActivityOpen: ConversationProps["isActivityOpen"],
   artifactDownloadState: ConversationProps["artifactDownloadState"],
+  artifactPreviewPath: ConversationProps["artifactPreviewPath"],
 ): string {
   const duplicateIndex = finalAnswerEventIndex(task);
   const groups = groupRunEvents(task, duplicateIndex);
@@ -220,6 +224,7 @@ function renderThread(
       running,
       isActivityOpen,
       artifactDownloadState,
+      artifactPreviewPath,
     ))
     .join("");
 }
@@ -271,6 +276,7 @@ function renderTurn(
   running: boolean,
   isActivityOpen: ConversationProps["isActivityOpen"],
   artifactDownloadState: ConversationProps["artifactDownloadState"],
+  artifactPreviewPath: ConversationProps["artifactPreviewPath"],
 ): string {
   const { userText, userAt, body, answerText, answerAt } = buildTurn(events, index === 0, isLast, task);
   const showWorking = isLast && running;
@@ -338,6 +344,7 @@ function renderTurn(
     task.artifacts ?? [],
     index,
     artifactDownloadState,
+    artifactPreviewPath,
   );
   const exportAction = exportText
     ? `<div class="conv-answer-actions">
@@ -372,6 +379,7 @@ function renderArtifactCards(
   artifacts: AgentArtifact[],
   turnIndex: number,
   downloadState: ConversationProps["artifactDownloadState"],
+  previewPath: string | null,
 ): string {
   const cards = artifacts
     .filter((artifact) => artifact.turn_index === turnIndex)
@@ -396,45 +404,60 @@ function renderArtifactCards(
         : state?.status === "download_failed"
           ? " is-error"
           : "";
-      const ariaLabel = openingState
-        ? t("artifact.openAria", { name: artifact.name })
-        : t("artifact.downloadAria", { name: artifact.name });
+      const ariaLabel = state?.status === "downloading"
+        ? t("artifact.downloadingAria", { name: artifact.name })
+        : state?.status === "download_failed"
+          ? t("artifact.downloadFailedAria", { name: artifact.name })
+          : state?.status === "opening"
+            ? t("artifact.openingAria", { name: artifact.name })
+            : state?.status === "open_failed"
+              ? t("artifact.openFailedAria", { name: artifact.name })
+              : openingState
+                ? t("artifact.openAria", { name: artifact.name })
+                : t("artifact.downloadAria", { name: artifact.name });
+      const previewable = !!artifact.preview_kind;
+      const main = previewable
+        ? `<button
+            type="button"
+            class="artifact-card__main"
+            data-artifact-preview="${esc(taskId)}"
+            data-artifact-path="${esc(artifact.path)}"
+            aria-label="${esc(t("artifact.previewAria", { name: artifact.name }))}"
+            aria-pressed="${previewPath === artifact.path ? "true" : "false"}"
+          >
+            <span class="artifact-card__icon" aria-hidden="true">${artifactFileIcon()}</span>
+            <span class="artifact-card__copy">
+              <span class="artifact-card__name">${esc(artifact.name)}</span>
+              <span class="artifact-card__meta">${esc(artifact.kind)} · ${esc(formatArtifactSize(artifact.size_bytes))}</span>
+            </span>
+            <span class="artifact-card__eye" aria-hidden="true">${eyeIcon()}</span>
+          </button>`
+        : `<div class="artifact-card__main artifact-card__main--static">
+            <span class="artifact-card__icon" aria-hidden="true">${artifactFileIcon()}</span>
+            <span class="artifact-card__copy">
+              <span class="artifact-card__name">${esc(artifact.name)}</span>
+              <span class="artifact-card__meta">${esc(artifact.kind)} · ${esc(formatArtifactSize(artifact.size_bytes))}</span>
+            </span>
+          </div>`;
       return `
-      <button
-        type="button"
-        class="artifact-card${stateClass}${state?.status === "open_failed" ? " is-error" : ""}"
-        data-artifact-action="${esc(taskId)}"
-        data-artifact-path="${esc(artifact.path)}"
-        title="${esc(state?.destination ?? artifact.relative_path)}"
-        aria-label="${esc(ariaLabel)}"
-        ${state?.status === "downloading" || state?.status === "opening" ? "disabled" : ""}
-      >
-        <span class="artifact-card__icon" aria-hidden="true">${artifactFileIcon()}</span>
-        <span class="artifact-card__copy">
-          <span class="artifact-card__name">${esc(artifact.name)}</span>
-          <span class="artifact-card__meta">${esc(artifact.kind)} · ${esc(formatArtifactSize(artifact.size_bytes))}</span>
-        </span>
-        <span class="artifact-card__action" aria-live="polite">${esc(t(statusKey))}</span>
-      </button>
-    `;
+        <div class="artifact-card${stateClass}${state?.status === "open_failed" ? " is-error" : ""}${previewPath === artifact.path ? " is-previewing" : ""}" title="${esc(state?.destination ?? artifact.relative_path)}">
+          ${main}
+          <button
+            type="button"
+            class="artifact-card__action"
+            data-artifact-action="${esc(taskId)}"
+            data-artifact-path="${esc(artifact.path)}"
+            title="${esc(t(statusKey))}"
+            aria-label="${esc(ariaLabel)}"
+            ${state?.status === "downloading" || state?.status === "opening" ? 'aria-disabled="true" aria-busy="true"' : ""}
+          >${downloadIcon()}</button>
+          <span class="sr-only" role="status" aria-live="polite">${esc(t(statusKey))}</span>
+        </div>
+      `;
     })
     .join("");
   if (!cards) return "";
   return `<div class="artifact-cards" aria-label="${esc(t("artifact.listAria"))}">${cards}</div>`;
-}
-
-function artifactFileIcon(): string {
-  return `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5h7l4 4v13h-11z"></path><path d="M13.5 3.5v4h4"></path><path d="M9 13h6M9 16h4"></path></svg>`;
-}
-
-function formatArtifactSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return "—";
-  if (bytes < 1024) return `${Math.round(bytes)} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
-  if (bytes < 1024 * 1024 * 1024) {
-    return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
-  }
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 /** Exact answer represented by an answer-level export button. */

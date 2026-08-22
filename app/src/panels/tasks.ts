@@ -30,6 +30,8 @@ import {
   renderSearchGroupForEvent,
 } from "./conversation";
 import type { ArtifactDownloadState, ComposerProps } from "./conversation";
+import { artifactPreviewMime, renderArtifactPreview } from "./artifact_preview";
+import type { ArtifactPreviewPaneState } from "./artifact_preview";
 import { bindNoteInteractions, setNoteRegistry } from "./notes";
 import {
   bindFeishuConnector,
@@ -90,6 +92,8 @@ export namespace agentPanel {
   const activityOpen = new Map<string, boolean>();
   const artifactDownloads = restoreArtifactDownloads();
   const artifactLoadGenerations = new Map<string, number>();
+  let artifactPreview: ArtifactPreviewPaneState | null = null;
+  let artifactPreviewGeneration = 0;
 
   function artifactDownloadKey(taskId: string, path: string): string {
     return `${taskId}\0${path}`;
@@ -234,6 +238,14 @@ export namespace agentPanel {
     const task = tasks.find((item) => item.task_id === taskId);
     if (!task) return false;
     task.artifacts = artifacts;
+    if (artifactPreview?.taskId === taskId) {
+      const current = artifacts.find((artifact) => artifact.path === artifactPreview?.path);
+      if (!current
+        || current.preview_kind !== artifactPreview.previewKind
+        || current.version !== artifactPreview.version) {
+        clearArtifactPreview();
+      }
+    }
     return taskId === selectedTaskId;
   }
 
@@ -887,13 +899,19 @@ export namespace agentPanel {
     // answer citations resolve refs against it, and so does the viewer.
     setNoteRegistry(task.notes, task.run_dir);
     const running = task.status === "running" || task.status === "queued";
-    return renderConversation({
+    const conversation = renderConversation({
       task,
       running,
       isActivityOpen: (turnIndex, defaultOpen) => isActivityOpen(task.task_id, turnIndex, defaultOpen),
       artifactDownloadState: (path) => artifactDownloads.get(artifactDownloadKey(task.task_id, path)),
+      artifactPreviewPath: artifactPreview?.taskId === task.task_id ? artifactPreview.path : null,
       composer: replyComposer(shell, running),
     });
+    const preview = artifactPreview?.taskId === task.task_id ? artifactPreview : null;
+    const previewDownload = preview
+      ? artifactDownloads.get(artifactDownloadKey(task.task_id, preview.path))
+      : undefined;
+    return `<div class="conversation-workspace">${conversation}${renderArtifactPreview(preview, previewDownload)}</div>`;
   }
 
   // Dialogs live in a sibling layer above the right-side task view, rather
@@ -942,6 +960,7 @@ export namespace agentPanel {
       return task ? answerTextForTurn(task, turnIndex) : null;
     });
     document.getElementById("sidebar-new")?.addEventListener("click", () => {
+      clearArtifactPreview();
       view = "compose";
       shell.rerender();
     });
@@ -961,6 +980,7 @@ export namespace agentPanel {
     });
 
     bindTaskSelection(shell);
+    bindArtifactPreview(shell);
     bindArtifactActions(shell);
     // Note interactions (viewer, card carousel, citation hover, external links)
     // are wired once via delegation on document.
@@ -1022,6 +1042,7 @@ export namespace agentPanel {
       const select = (): void => {
         const taskId = button.dataset.taskId;
         if (!taskId) return;
+        if (artifactPreview?.taskId !== taskId) clearArtifactPreview();
         selectedTaskId = taskId;
         view = "detail";
         replyDraft = "";
@@ -1039,12 +1060,104 @@ export namespace agentPanel {
     });
   }
 
+  function bindArtifactPreview(shell: ShellState): void {
+    document.querySelectorAll<HTMLButtonElement>("[data-artifact-preview]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const taskId = button.dataset.artifactPreview;
+        const path = button.dataset.artifactPath;
+        if (!taskId || !path) return;
+        if (artifactPreview?.taskId === taskId
+          && artifactPreview.path === path
+          && artifactPreview.status !== "error") return;
+        const task = tasks.find((item) => item.task_id === taskId);
+        const artifact = task?.artifacts?.find((item) => item.path === path);
+        if (!artifact?.preview_kind) return;
+
+        clearArtifactPreview();
+        const generation = ++artifactPreviewGeneration;
+        artifactPreview = {
+          taskId,
+          path,
+          name: artifact.name,
+          kind: artifact.kind,
+          sizeBytes: artifact.size_bytes,
+          version: artifact.version,
+          previewKind: artifact.preview_kind,
+          status: "loading",
+        };
+        shell.rerender();
+        requestAnimationFrame(() => {
+          document.querySelector<HTMLButtonElement>("[data-artifact-preview-close]")?.focus();
+        });
+        try {
+          const payload = await invoke<ArrayBuffer>("agent_task_artifact_preview", { taskId, path });
+          if (generation !== artifactPreviewGeneration
+            || artifactPreview?.taskId !== taskId
+            || artifactPreview.path !== path) return;
+          let blobUrl: string | undefined;
+          let text: string | undefined;
+          const bytes = new Uint8Array(payload);
+          if (artifact.preview_kind === "pdf" || artifact.preview_kind === "image") {
+            blobUrl = URL.createObjectURL(new Blob([bytes], {
+              type: artifactPreviewMime(artifact.name, artifact.preview_kind),
+            }));
+          } else {
+            text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+          }
+          artifactPreview = {
+            ...artifactPreview,
+            status: "ready",
+            text,
+            blobUrl,
+          };
+        } catch (error) {
+          if (generation !== artifactPreviewGeneration
+            || artifactPreview?.taskId !== taskId
+            || artifactPreview.path !== path) return;
+          artifactPreview = {
+            ...artifactPreview,
+            status: "error",
+            error: String(error),
+          };
+        } finally {
+          if (generation === artifactPreviewGeneration) {
+            shell.rerender();
+            requestAnimationFrame(() => {
+              if (document.activeElement === document.body) {
+                document.querySelector<HTMLButtonElement>("[data-artifact-preview-close]")?.focus();
+              }
+            });
+          }
+        }
+      });
+    });
+    document.querySelector<HTMLButtonElement>("[data-artifact-preview-close]")?.addEventListener("click", () => {
+      const closed = artifactPreview;
+      clearArtifactPreview();
+      shell.rerender();
+      requestAnimationFrame(() => {
+        if (!closed) return;
+        [...document.querySelectorAll<HTMLButtonElement>("[data-artifact-preview]")]
+          .find((button) => button.dataset.artifactPreview === closed.taskId
+            && button.dataset.artifactPath === closed.path)
+          ?.focus();
+      });
+    });
+  }
+
+  function clearArtifactPreview(): void {
+    artifactPreviewGeneration += 1;
+    if (artifactPreview?.blobUrl) URL.revokeObjectURL(artifactPreview.blobUrl);
+    artifactPreview = null;
+  }
+
   function bindArtifactActions(shell: ShellState): void {
     document.querySelectorAll<HTMLButtonElement>("[data-artifact-action]").forEach((button) => {
       button.addEventListener("click", async () => {
         const taskId = button.dataset.artifactAction;
         const path = button.dataset.artifactPath;
         if (!taskId || !path) return;
+        const actionSurface = button.closest(".artifact-preview") ? "preview" : "card";
         const key = artifactDownloadKey(taskId, path);
         const current = artifactDownloads.get(key);
         if (current?.status === "downloading" || current?.status === "opening") return;
@@ -1052,7 +1165,7 @@ export namespace agentPanel {
           const destination = current.destination;
           const identity = current.identity;
           artifactDownloads.set(key, { status: "opening", destination, identity });
-          shell.rerender();
+          rerenderAndFocusArtifactAction(shell, taskId, path, actionSurface);
           try {
             const exists = await invoke<boolean>("agent_task_artifact_open", {
               taskId,
@@ -1079,13 +1192,13 @@ export namespace agentPanel {
               artifactDownloads.set(key, { status: "open_failed", destination, identity });
             }
           } finally {
-            shell.rerender();
+            rerenderAndFocusArtifactAction(shell, taskId, path, actionSurface);
           }
           return;
         }
 
         artifactDownloads.set(key, { status: "downloading" });
-        shell.rerender();
+        rerenderAndFocusArtifactAction(shell, taskId, path, actionSurface);
         try {
           const downloaded = await invoke<AgentArtifactDownload>("agent_task_artifact_download", {
             taskId,
@@ -1104,9 +1217,26 @@ export namespace agentPanel {
             artifactDownloads.set(key, { status: "download_failed" });
           }
         } finally {
-          shell.rerender();
+          rerenderAndFocusArtifactAction(shell, taskId, path, actionSurface);
         }
       });
+    });
+  }
+
+  function rerenderAndFocusArtifactAction(
+    shell: ShellState,
+    taskId: string,
+    path: string,
+    surface: "card" | "preview",
+  ): void {
+    shell.rerender();
+    requestAnimationFrame(() => {
+      const candidates = [...document.querySelectorAll<HTMLButtonElement>("[data-artifact-action]")]
+        .filter((button) => button.dataset.artifactAction === taskId && button.dataset.artifactPath === path);
+      const matchingSurface = candidates.find((button) => (
+        surface === "preview" ? !!button.closest(".artifact-preview") : !button.closest(".artifact-preview")
+      ));
+      (matchingSurface ?? candidates[0])?.focus();
     });
   }
 
@@ -1423,6 +1553,7 @@ export namespace agentPanel {
     pendingEvents.delete(taskId);
     streamScroll.delete(taskId);
     artifactLoadGenerations.delete(taskId);
+    if (artifactPreview?.taskId === taskId) clearArtifactPreview();
     let downloadsChanged = false;
     for (const key of [...artifactDownloads.keys()]) {
       if (key.startsWith(`${taskId}\0`)) downloadsChanged = artifactDownloads.delete(key) || downloadsChanged;
