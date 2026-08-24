@@ -13,6 +13,8 @@ interface AuthSession {
   phone: string;
   device_id: string;
   status: string;
+  trial_available: boolean;
+  trial_status: string;
 }
 
 interface SmsChallenge {
@@ -36,6 +38,8 @@ const EMPTY_SESSION: AuthSession = {
   phone: "",
   device_id: "",
   status: "",
+  trial_available: false,
+  trial_status: "unknown",
 };
 
 export namespace authMenu {
@@ -160,10 +164,18 @@ export namespace authMenu {
   }
 
   function renderSignedOut(modelConfigContent: string): string {
+    const trialMessage = session.trial_available
+      ? "auth.trialHint"
+      : session.trial_status === "completed" || session.trial_status === "converted"
+        ? "auth.trialCompleteHint"
+        : "auth.trialUnavailableHint";
     return `
       <section class="auth-choice">
         <div class="auth-choice-copy">
-          <p class="t-small subtle">${esc(t("auth.loginAgentHint", { points: SIGNUP_BONUS_POINTS }))}</p>
+          <p class="t-small auth-trial-copy">${esc(t(
+            trialMessage,
+            { points: SIGNUP_BONUS_POINTS },
+          ))}</p>
         </div>
         <button id="auth-start-login" type="button" class="btn-primary btn-compact" aria-expanded="${loginExpanded || challenge ? "true" : "false"}">${esc(t("auth.login"))}</button>
       </section>
@@ -437,7 +449,12 @@ export namespace authMenu {
       console.error("auth_logout failed:", err);
       error = friendlyError(err);
     } finally {
-      setSession(EMPTY_SESSION);
+      try {
+        setSession(await invoke<AuthSession>("auth_session"));
+      } catch (sessionError) {
+        console.error("auth_session failed after logout:", sessionError);
+        setSession(EMPTY_SESSION);
+      }
       wallet = null;
       walletUnavailable = false;
       loginExpanded = false;

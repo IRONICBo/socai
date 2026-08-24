@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -9,6 +10,7 @@ use serde_json::{json, Map, Value};
 use crate::config;
 
 const AUTH_KEY: &str = "socai_pro";
+const LEGACY_DEVICE_AUTH_KEY: &str = "socai_device";
 const LEGACY_AUTH_KEY: &str = "socai_cloud";
 const LEGACY_PRO_BASE_URL: &str = "http://47.94.86.171";
 const PRODUCTION_BASE_URL: &str = "https://api.socai.work";
@@ -21,6 +23,8 @@ pub struct AuthSession {
     pub phone: String,
     pub device_id: String,
     pub status: String,
+    pub trial_available: bool,
+    pub trial_status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +70,18 @@ pub struct CloudCredentials {
     pub active_until: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeviceCredentials {
+    device_id: String,
+    device_token: String,
+    status: String,
+    available: bool,
+    #[serde(default)]
+    hosted_llm_default_applied: bool,
+    #[serde(default)]
+    hosted_llm_selected: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct AccountTelemetrySnapshot {
     pub phone: String,
@@ -94,6 +110,15 @@ struct ActivateResponse {
     device_token: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct TrialResponse {
+    device_id: String,
+    #[serde(default)]
+    device_token: Option<String>,
+    status: String,
+    available: bool,
+}
+
 /// Locally saved user session. Invite-code activations intentionally return a
 /// logged-out session because they have a device token but no user identity.
 pub fn auth_session() -> Result<AuthSession> {
@@ -113,7 +138,20 @@ pub fn auth_session() -> Result<AuthSession> {
         } else {
             creds.status
         },
+        trial_available: trial_available(),
+        trial_status: trial_status(),
     })
+}
+
+pub fn trial_available() -> bool {
+    load_device_credentials().is_some_and(|credentials| credentials.available)
+}
+
+pub fn trial_status() -> String {
+    load_device_credentials()
+        .map(|credentials| credentials.status)
+        .filter(|status| !status.trim().is_empty())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 /// Whether socai pro is activated on this device. Local check only (reads
@@ -132,6 +170,70 @@ pub fn status() -> Result<CloudStatus> {
             .is_some_and(|c| !c.device_token.trim().is_empty()),
         device_id: creds.map(|c| c.device_id).unwrap_or_default(),
     })
+}
+
+pub async fn ensure_trial_device() -> Result<bool> {
+    if auth_session()?.logged_in {
+        return Ok(false);
+    }
+    let base_url = configured_base_url()
+        .ok_or_else(|| anyhow::anyhow!("socai service URL is not configured"))?;
+
+    if let Some(credentials) = load_device_credentials() {
+        let response = bearer(
+            http_client()?.get(format!("{base_url}/v1/auth/trial")),
+            &credentials.device_token,
+        )
+        .send()
+        .await
+        .context("failed to load anonymous trial status")?;
+        let body: TrialResponse = require_success(response, "anonymous trial status")
+            .await?
+            .json()
+            .await?;
+        let server_device_id = body.device_id;
+        let server_status = body.status;
+        let server_available = body.available;
+        let merged = update_device_credentials(|current| {
+            if current.device_id == server_device_id {
+                current.status = server_status;
+                current.available = server_available;
+            }
+        })?;
+        return Ok(merged.is_some_and(|current| current.available));
+    }
+
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve $HOME"))?;
+    let install_id = crate::identity::load_or_create_install_id(&home.join(".socai"));
+    let response = http_client()?
+        .post(format!("{base_url}/v1/auth/trial"))
+        .json(&json!({
+            "install_id": install_id,
+            "app_version": env!("CARGO_PKG_VERSION"),
+            "label": "desktop",
+        }))
+        .send()
+        .await
+        .context("failed to register anonymous trial")?;
+    let body: TrialResponse = require_success(response, "anonymous trial registration")
+        .await?
+        .json()
+        .await?;
+    let device_token = body
+        .device_token
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("anonymous trial response did not include a device token")
+        })?;
+    save_device_credentials(&DeviceCredentials {
+        device_id: body.device_id,
+        device_token,
+        status: body.status,
+        available: body.available,
+        hosted_llm_default_applied: false,
+        hosted_llm_selected: false,
+    })?;
+    Ok(body.available)
 }
 
 pub async fn activate(invite_code: &str, label: &str) -> Result<CloudStatus> {
@@ -228,6 +330,9 @@ pub async fn verify_sms_code(
     let canonical_phone = normalize_mainland_phone(phone)?;
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve $HOME"))?;
     let install_id = crate::identity::load_or_create_install_id(&home.join(".socai"));
+    let trial_device_token = load_device_credentials()
+        .map(|credentials| credentials.device_token)
+        .unwrap_or_default();
     let response = http_client()?
         .post(format!("{base_url}/v1/auth/sms/verify"))
         .json(&json!({
@@ -237,6 +342,7 @@ pub async fn verify_sms_code(
             "install_id": install_id,
             "app_version": env!("CARGO_PKG_VERSION"),
             "label": label.trim(),
+            "trial_device_token": trial_device_token,
         }))
         .send()
         .await
@@ -262,6 +368,9 @@ fn save_login_credentials(
         balance_points: None,
         active_until: None,
     })?;
+    if let Err(err) = mark_trial_converted() {
+        tracing::warn!(error = %err, "failed to persist local anonymous trial conversion marker");
+    }
     // Keep the CLI and future app builds pointed at the same accepted service,
     // even when this build received the URL through SOCAI_PRO_BASE_URL. The
     // authenticated session is still usable in this build if config persistence
@@ -302,45 +411,139 @@ pub async fn logout() -> Result<()> {
 pub fn llm_gateway_config() -> Result<LlmGatewayConfig> {
     let base_url = configured_base_url()
         .ok_or_else(|| anyhow::anyhow!("socai service URL is not configured"))?;
-    let credentials = load_credentials()
-        .filter(|creds| !creds.user_id.trim().is_empty() && !creds.device_token.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("sign in to use Socai Agent"))?;
+    if let Some(credentials) =
+        load_credentials().filter(|creds| !creds.device_token.trim().is_empty())
+    {
+        return Ok(LlmGatewayConfig {
+            base_url,
+            device_token: credentials.device_token,
+        });
+    }
+    let credentials = load_device_credentials()
+        .filter(|credentials| credentials.available && !credentials.device_token.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("sign in or configure an API key to continue"))?;
     Ok(LlmGatewayConfig {
         base_url,
         device_token: credentials.device_token,
     })
 }
 
+pub(crate) fn llm_gateway_config_for_task(task_id: Option<&str>) -> Result<LlmGatewayConfig> {
+    let gateway = llm_gateway_config()?;
+    let Some(task_id) = task_id.filter(|value| !value.trim().is_empty()) else {
+        return Ok(gateway);
+    };
+    let mut gateways = task_gateways()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("hosted LLM task state is unavailable"))?;
+    Ok(gateways
+        .entry(task_id.to_string())
+        .or_insert(gateway)
+        .clone())
+}
+
+pub(super) fn llm_gateway_config_for_settlement(task_id: &str) -> Result<LlmGatewayConfig> {
+    if let Ok(gateways) = task_gateways().lock() {
+        if let Some(gateway) = gateways.get(task_id) {
+            return Ok(gateway.clone());
+        }
+    }
+    if let Ok(gateway) = llm_gateway_config() {
+        return Ok(gateway);
+    }
+    // A consumed anonymous token is no longer eligible for a new model call,
+    // but it remains the identity for idempotently recovering that task's
+    // settlement after an app restart.
+    let base_url = configured_base_url()
+        .ok_or_else(|| anyhow::anyhow!("socai service URL is not configured"))?;
+    let credentials = load_device_credentials()
+        .filter(|credentials| !credentials.device_token.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("device registration is required"))?;
+    Ok(LlmGatewayConfig {
+        base_url,
+        device_token: credentials.device_token,
+    })
+}
+
+pub fn reset_llm_gateway_for_task(task_id: &str) {
+    if let Ok(mut gateways) = task_gateways().lock() {
+        gateways.remove(task_id);
+    }
+}
+
+fn task_gateways() -> &'static Mutex<HashMap<String, LlmGatewayConfig>> {
+    static TASK_GATEWAYS: OnceLock<Mutex<HashMap<String, LlmGatewayConfig>>> = OnceLock::new();
+    TASK_GATEWAYS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Returns true once per saved account, allowing the desktop to select the
 /// hosted model by default without overriding a later explicit BYOK choice.
 pub fn take_hosted_llm_default() -> Result<bool> {
-    let Some(mut credentials) = load_credentials() else {
-        return Ok(false);
-    };
-    if credentials.user_id.trim().is_empty() || credentials.hosted_llm_default_applied {
-        return Ok(false);
+    if let Some(mut credentials) = load_credentials() {
+        if !credentials.user_id.trim().is_empty() && !credentials.hosted_llm_default_applied {
+            credentials.hosted_llm_default_applied = true;
+            credentials.hosted_llm_selected = true;
+            save_credentials(&credentials)?;
+            return Ok(true);
+        }
     }
-    credentials.hosted_llm_default_applied = true;
-    credentials.hosted_llm_selected = true;
-    save_credentials(&credentials)?;
-    Ok(true)
+    let mut applied = false;
+    update_device_credentials(|credentials| {
+        if credentials.available && !credentials.hosted_llm_default_applied {
+            credentials.hosted_llm_default_applied = true;
+            credentials.hosted_llm_selected = true;
+            applied = true;
+        }
+    })?;
+    Ok(applied)
 }
 
 pub fn hosted_llm_selected() -> bool {
     load_credentials().is_some_and(|credentials| {
         !credentials.user_id.trim().is_empty() && credentials.hosted_llm_selected
-    })
+    }) || load_device_credentials()
+        .is_some_and(|credentials| credentials.available && credentials.hosted_llm_selected)
 }
 
 pub fn set_hosted_llm_selected(selected: bool) -> Result<()> {
-    let Some(mut credentials) = load_credentials() else {
-        return Ok(());
-    };
-    if credentials.user_id.trim().is_empty() {
-        return Ok(());
+    if let Some(mut credentials) = load_credentials() {
+        if !credentials.user_id.trim().is_empty() {
+            credentials.hosted_llm_selected = selected;
+            return save_credentials(&credentials).map(|_| ());
+        }
     }
-    credentials.hosted_llm_selected = selected;
-    save_credentials(&credentials).map(|_| ())
+    update_device_credentials(|credentials| {
+        credentials.hosted_llm_selected = selected;
+    })
+    .map(|_| ())
+}
+
+pub(super) fn mark_trial_completed() {
+    let _ = update_device_credentials(|credentials| {
+        credentials.status = "completed".into();
+        credentials.available = false;
+        credentials.hosted_llm_selected = false;
+    });
+}
+
+fn mark_trial_converted() -> Result<()> {
+    update_device_credentials(|credentials| {
+        credentials.status = "converted".into();
+        credentials.available = false;
+        credentials.hosted_llm_selected = false;
+    })
+    .map(|_| ())
+}
+
+pub(super) fn diagnostic_device_token() -> Option<String> {
+    load_credentials()
+        .filter(|credentials| !credentials.device_token.trim().is_empty())
+        .map(|credentials| credentials.device_token)
+        .or_else(|| {
+            load_device_credentials()
+                .filter(|credentials| !credentials.device_token.trim().is_empty())
+                .map(|credentials| credentials.device_token)
+        })
 }
 
 pub(crate) fn telemetry_account_snapshot() -> Option<AccountTelemetrySnapshot> {
@@ -394,6 +597,8 @@ fn logged_out_session() -> AuthSession {
         phone: String::new(),
         device_id: String::new(),
         status: String::new(),
+        trial_available: trial_available(),
+        trial_status: trial_status(),
     }
 }
 
@@ -517,6 +722,20 @@ pub(super) fn load_credentials() -> Option<CloudCredentials> {
     serde_json::from_value(block.clone()).ok()
 }
 
+fn load_device_credentials() -> Option<DeviceCredentials> {
+    let _guard = device_file_lock().lock().ok()?;
+    load_device_credentials_unlocked()
+}
+
+fn load_device_credentials_unlocked() -> Option<DeviceCredentials> {
+    if let Ok(bytes) = std::fs::read(device_auth_path().ok()?) {
+        return serde_json::from_slice(&bytes).ok();
+    }
+    let bytes = std::fs::read(auth_path().ok()?).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    serde_json::from_value(value.get(LEGACY_DEVICE_AUTH_KEY)?.clone()).ok()
+}
+
 fn save_credentials(credentials: &CloudCredentials) -> Result<PathBuf> {
     let path = auth_path()?;
     if let Some(parent) = path.parent() {
@@ -533,6 +752,37 @@ fn save_credentials(credentials: &CloudCredentials) -> Result<PathBuf> {
     data.remove(LEGACY_AUTH_KEY);
     write_auth_file(&path, data)?;
     Ok(path)
+}
+
+fn save_device_credentials(credentials: &DeviceCredentials) -> Result<PathBuf> {
+    let _guard = device_file_lock()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("device credentials are unavailable"))?;
+    write_device_credentials_unlocked(credentials)
+}
+
+fn write_device_credentials_unlocked(credentials: &DeviceCredentials) -> Result<PathBuf> {
+    let path = device_auth_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(credentials)?)?;
+    set_private_permissions(&path);
+    Ok(path)
+}
+
+fn update_device_credentials(
+    update: impl FnOnce(&mut DeviceCredentials),
+) -> Result<Option<DeviceCredentials>> {
+    let _guard = device_file_lock()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("device credentials are unavailable"))?;
+    let Some(mut credentials) = load_device_credentials_unlocked() else {
+        return Ok(None);
+    };
+    update(&mut credentials);
+    write_device_credentials_unlocked(&credentials)?;
+    Ok(Some(credentials))
 }
 
 fn clear_credentials() -> Result<()> {
@@ -556,13 +806,27 @@ fn auth_path() -> Result<PathBuf> {
     Ok(home.join(".socai/auth.json"))
 }
 
+fn device_auth_path() -> Result<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve $HOME"))?;
+    Ok(home.join(".socai/device.json"))
+}
+
+fn device_file_lock() -> &'static Mutex<()> {
+    static DEVICE_FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    DEVICE_FILE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn write_auth_file(path: &Path, data: Map<String, Value>) -> Result<()> {
     let rendered = serde_json::to_string_pretty(&Value::Object(data))?;
     std::fs::write(path, rendered)?;
+    set_private_permissions(path);
+    Ok(())
+}
+
+fn set_private_permissions(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
-    Ok(())
 }

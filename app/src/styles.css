@@ -368,7 +368,7 @@ body.has-paper > * { position: relative; z-index: 1; }
 }
 .task-api-error-card__message {
   margin: 5px 0 0;
-  color: var(--fg-muted);
+  color: var(--fg);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -383,7 +383,9 @@ body.has-paper > * { position: relative; z-index: 1; }
 .task-api-error-card__meta { margin: var(--sp-2) 0 0; }
 .task-api-error-copy { display: flex; flex-direction: column; gap: 3px; }
 .task-api-error-copy__title { color: var(--fg); font-weight: 500; }
-.task-api-error-copy__message { color: var(--fg-muted); line-height: 1.5; }
+.task-api-error-copy__message { color: var(--fg); line-height: 1.5; }
+
+.auth-trial-copy { color: var(--fg); }
 @keyframes runtime-error-enter {
   from { opacity: 0; transform: translateY(-6px); }
   to { opacity: 1; transform: translateY(0); }

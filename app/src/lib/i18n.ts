@@ -133,6 +133,18 @@ const messages = {
     en: "sign in to get {points} points of agent credit",
     zh: "登录后获赠{points}点 agent额度",
   },
+  "auth.trialHint": {
+    en: "Complete one task free. Then sign in for {points} points or add your API key.",
+    zh: "可先免费完成 1 个任务。之后登录领取 {points} 点，或添加自己的 API Key。",
+  },
+  "auth.trialCompleteHint": {
+    en: "Your free task is complete. Sign in for {points} points or add your API key to continue.",
+    zh: "免费体验已完成。登录领取 {points} 点，或添加自己的 API Key 继续使用。",
+  },
+  "auth.trialUnavailableHint": {
+    en: "The free task status is unavailable. Sign in or add your API key to continue.",
+    zh: "暂时无法确认免费体验状态。请登录，或添加自己的 API Key 继续使用。",
+  },
   "auth.useOwnApiKey": {
     en: "or use your own API key, no sign-in required",
     zh: "或自己输入API key，无需登录",
@@ -413,6 +425,18 @@ const messages = {
     en: "your socai account is signed out. sign in, then send the task again.",
     zh: "当前 socai 账号尚未登录。请先登录账号，然后重新发送任务。",
   },
+  "task.preflightTrialUsed": {
+    en: "Your free task is complete. Sign in for {points} points or choose a model with your API key.",
+    zh: "免费体验已完成。请登录领取 {points} 点，或选择已配置 API Key 的模型。",
+  },
+  "task.preflightTrialUnavailable": {
+    en: "The free task status is unavailable. Check the network, sign in, or choose a model with your API key.",
+    zh: "暂时无法确认免费体验状态。请检查网络、登录账号，或选择已配置 API Key 的模型。",
+  },
+  "task.preflightTrialRunning": {
+    en: "The free task is already running. Wait for it to finish or cancel it first.",
+    zh: "免费任务正在运行。请等待完成，或先取消当前任务。",
+  },
   "task.preflightBalance": {
     en: "your socai account does not have enough points. recharge or switch to another configured model, then try again.",
     zh: "当前 socai 账号点数不足。请充值点数或切换到其他已配置的模型，然后重试。",
@@ -456,6 +480,12 @@ const messages = {
   "task.preflightFailedTitle": {
     en: "task cannot start yet",
     zh: "任务暂时无法开始",
+  },
+  "task.diagnosingError": { en: "checking the error…", zh: "正在诊断错误…" },
+  "task.diagnoseError": { en: "check this error", zh: "诊断这个错误" },
+  "task.diagnosisUnavailable": {
+    en: "Error guidance is unavailable. Try again later.",
+    zh: "暂时无法获取错误说明，请稍后重试。",
   },
   "task.errorCode": { en: "error code: {code}", zh: "错误码：{code}" },
   "task.apiErrorAuthTitle": { en: "model authentication failed", zh: "模型认证失败" },
@@ -730,6 +760,9 @@ export function t(
 const taskPreflightMessages = {
   preflight_model_config: "task.preflightModelConfig",
   preflight_auth: "task.preflightAuth",
+  preflight_trial_used: "task.preflightTrialUsed",
+  preflight_trial_unavailable: "task.preflightTrialUnavailable",
+  preflight_trial_running: "task.preflightTrialRunning",
   preflight_balance: "task.preflightBalance",
   preflight_region_or_account: "task.preflightAccount",
   preflight_site: "task.preflightSite",
@@ -757,7 +790,7 @@ export function formatTaskCommandErrorPresentation(
   const nudge = messageKey === "task.preflightModelConfig" ? managedModelNudge() : "";
   return {
     title: t("task.preflightFailedTitle"),
-    message: joinSentences(t(messageKey), nudge),
+    message: joinSentences(t(messageKey, { points: SIGNUP_BONUS_POINTS }), nudge),
     meta: t("task.errorCode", { code: payload.code }),
     fingerprint: `${payload.code}:${payload.detail}`,
   };
@@ -801,6 +834,27 @@ export interface TaskApiErrorPresentation {
   message: string;
   meta: string;
   fingerprint: string;
+}
+
+export interface ErrorDiagnosis {
+  title: string;
+  message: string;
+  action: string;
+}
+
+const errorDiagnoses = new Map<string, ErrorDiagnosis>();
+
+function diagnosisKey(error: string): string {
+  return `${currentLanguage}:${error.trim()}`;
+}
+
+export function setTaskApiErrorDiagnosis(error: string, diagnosis: ErrorDiagnosis): void {
+  errorDiagnoses.set(diagnosisKey(error), diagnosis);
+}
+
+export function taskApiErrorNeedsDiagnosis(error: string): boolean {
+  if (errorDiagnoses.has(diagnosisKey(error))) return false;
+  return formatTaskApiError(error).title === t("task.apiErrorGenericTitle");
 }
 
 export function formatTaskApiError(error: string): TaskApiErrorPresentation {
@@ -878,6 +932,15 @@ export function formatTaskApiError(error: string): TaskApiErrorPresentation {
     status !== null ? `HTTP ${status}` : "",
     parsed.requestId ? t("task.apiErrorRequestId", { id: parsed.requestId }) : "",
   ].filter(Boolean).join(" · ");
+  const diagnosis = fallbackCode === "api_error" ? errorDiagnoses.get(diagnosisKey(error)) : null;
+  if (diagnosis) {
+    return {
+      title: diagnosis.title,
+      message: joinSentences(diagnosis.message, diagnosis.action),
+      meta,
+      fingerprint: parsed.requestId || `${provider}:${parsed.statusText}:${errorCode}:${parsed.detail}`,
+    };
+  }
   return {
     title: t(titleKey),
     message: taskApiErrorMessage(messageKey, credential, provider),

@@ -32,7 +32,7 @@ async fn interrupt_missing_browser_targets(
         .await
     {
         let task_id = snapshot.task_id.clone();
-        if snapshot.provider.as_deref() == Some("socai") && socai_core::cloud::pro_activated() {
+        if snapshot.provider.as_deref() == Some("socai") {
             if let Some(settlement) =
                 commands::settle_hosted_task_with_retry(&task_id, "interrupted").await
             {
@@ -354,6 +354,7 @@ pub fn run() {
             commands::config_unset,
             commands::pro_activate,
             commands::auth_session,
+            commands::diagnose_error,
             commands::auth_sms_send,
             commands::auth_sms_verify,
             commands::auth_logout,

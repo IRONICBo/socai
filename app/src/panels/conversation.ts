@@ -27,6 +27,7 @@ import {
   formatTokenUsage,
   isTaskApiError,
   t,
+  taskApiErrorNeedsDiagnosis,
   taskStatusLabel,
 } from "../lib/i18n";
 import { sendShortcutLabel } from "../lib/shortcuts";
@@ -298,7 +299,7 @@ function renderTurn(
       answer = renderTaskCommandErrorCard(commandError);
       if (finishedAt) metaBits.push(finishedAt);
     } else if (apiError) {
-      answer = renderTaskApiErrorCard(apiError);
+      answer = renderTaskApiErrorCard(apiError, task.task_id);
       if (finishedAt) metaBits.push(finishedAt);
     } else if (task.final_text) {
       exportText = task.final_text;
@@ -564,8 +565,14 @@ function renderTaskApiErrorEvent(ev: AgentTaskEventPayload): string {
   </div>`;
 }
 
-function renderTaskApiErrorCard(error: string): string {
+function renderTaskApiErrorCard(error: string, taskId: string): string {
   const presentation = formatTaskApiError(error);
+  const diagnose = taskApiErrorNeedsDiagnosis(error)
+    ? `<div class="task-api-error-card__actions">
+        <button type="button" class="btn-ghost btn-compact" data-diagnose-task-error="${esc(taskId)}">${esc(t("task.diagnoseError"))}</button>
+        <span class="t-small result-error" data-diagnosis-error="${esc(taskId)}" hidden></span>
+      </div>`
+    : "";
   return `<div class="task-api-error-card" role="alert">
     <div class="task-api-error-card__heading">
       <i class="runtime-error-notice__dot" aria-hidden="true"></i>
@@ -573,6 +580,7 @@ function renderTaskApiErrorCard(error: string): string {
     </div>
     <p class="task-api-error-card__message">${esc(presentation.message)}</p>
     <p class="task-api-error-card__meta">${esc(presentation.meta)}</p>
+    ${diagnose}
   </div>`;
 }
 

@@ -4,7 +4,8 @@ use serde_json::json;
 
 use super::auth::{
     cache_active_until, cache_balance_points, cache_wallet_snapshot, configured_base_url,
-    http_client, load_credentials, require_success,
+    http_client, llm_gateway_config, llm_gateway_config_for_settlement, load_credentials,
+    mark_trial_completed, require_success, reset_llm_gateway_for_task,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +60,10 @@ pub struct LlmSettlement {
     pub balance_points: i64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default)]
+    pub trial_completed: bool,
+    #[serde(default)]
+    pub trial: bool,
 }
 
 fn authenticated_request(method: reqwest::Method, path: &str) -> Result<reqwest::RequestBuilder> {
@@ -170,14 +175,44 @@ pub async fn settle_llm_task(task_id: &str, final_status: &str) -> Result<LlmSet
         anyhow::bail!("invalid hosted LLM final status");
     }
     let path = format!("/v1/llm/tasks/{task_id}/settle?final_status={final_status}");
-    let response = authenticated_request(reqwest::Method::POST, &path)?
+    let gateway = llm_gateway_config_for_settlement(task_id)?;
+    let request = |gateway: &super::auth::LlmGatewayConfig| -> Result<reqwest::RequestBuilder> {
+        Ok(http_client()?
+            .post(format!(
+                "{}{}",
+                gateway.base_url.trim_end_matches('/'),
+                path
+            ))
+            .bearer_auth(&gateway.device_token))
+    };
+    let mut response = request(&gateway)?
         .send()
         .await
         .context("failed to settle hosted LLM task")?;
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        let current = llm_gateway_config()?;
+        if current.device_token != gateway.device_token {
+            response = request(&current)?
+                .send()
+                .await
+                .context("failed to settle hosted LLM task")?;
+        }
+    }
     let settlement: LlmSettlement = require_success(response, "hosted LLM settlement")
         .await?
         .json()
         .await?;
-    cache_balance_points(settlement.balance_points);
+    if settlement.trial_completed {
+        mark_trial_completed();
+    }
+    if !settlement.trial {
+        cache_balance_points(settlement.balance_points);
+    }
+    if settlement.status != "settlement_pending" {
+        reset_llm_gateway_for_task(task_id);
+    }
     Ok(settlement)
 }

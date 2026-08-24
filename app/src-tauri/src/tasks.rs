@@ -56,6 +56,10 @@ pub struct AgentTaskSnapshot {
     pub(crate) cost_currency: Option<String>,
     /// Server-authoritative LLM + paid cloud-tool charge for the latest turn.
     pub(crate) points_used: Option<i64>,
+    /// This conversation started with the one-device anonymous hosted trial.
+    /// Persisting the bit keeps admission checks scoped to the trial itself.
+    #[serde(default)]
+    pub(crate) anonymous_trial: bool,
     // The text driving the in-flight/most recent run — distinct from `task`,
     // which stays the thread's original title across replies. It is process-
     // local; interrupted startup recovery reads the canonical run.json task.
@@ -134,8 +138,17 @@ impl AgentTaskRegistry {
         model: Option<String>,
         run_dir: String,
         session_dir: String,
-    ) -> AgentTaskSnapshot {
+        reject_if_active: bool,
+    ) -> Result<AgentTaskSnapshot, String> {
         let mut guard = self.inner.lock().await;
+        if reject_if_active
+            && guard.tasks.iter().any(|task| {
+                task.anonymous_trial
+                    && matches!(task.status.as_str(), "queued" | "running")
+            })
+        {
+            return Err("anonymous trial task is already queued or running".into());
+        }
         guard.next_seq += 1;
         let task_id = format!("task-{}-{}", now_ms(), guard.next_seq);
         let snapshot = AgentTaskSnapshot {
@@ -164,10 +177,11 @@ impl AgentTaskRegistry {
             estimated_cost: None,
             cost_currency: None,
             points_used: None,
+            anonymous_trial: reject_if_active,
         };
         guard.tasks.push(snapshot.clone());
         persist_task_index(&guard.tasks);
-        snapshot
+        Ok(snapshot)
     }
 
     pub(crate) async fn acquire_run_permit(&self) -> Option<OwnedSemaphorePermit> {
@@ -521,6 +535,15 @@ fn hydrate_task_snapshot(mut snapshot: AgentTaskSnapshot) -> AgentTaskSnapshot {
         snapshot.final_text = final_text_from_run_dir(run_dir);
         if let Ok(text) = std::fs::read_to_string(PathBuf::from(run_dir).join("run.json")) {
             if let Ok(run) = serde_json::from_str::<Value>(&text) {
+                if snapshot.provider.is_none() {
+                    snapshot.provider = run
+                        .get("provider")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
+                if snapshot.model.is_none() {
+                    snapshot.model = run.get("model").and_then(Value::as_str).map(str::to_string);
+                }
                 snapshot.run_id = run.get("id").and_then(Value::as_str).map(str::to_string);
                 snapshot.error = run.get("error").and_then(Value::as_str).map(str::to_string);
                 // Pre-rename runs (< #190) recorded the step count as "turns".
@@ -588,6 +611,9 @@ fn load_task_index() -> Vec<AgentTaskSnapshot> {
     };
     let mut tasks = serde_json::from_str::<Vec<AgentTaskSnapshot>>(&text).unwrap_or_default();
     for task in &mut tasks {
+        let hydrated = hydrate_task_snapshot(task.clone());
+        task.provider = hydrated.provider;
+        task.model = hydrated.model;
         task.final_text = None;
     }
     tasks

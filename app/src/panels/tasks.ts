@@ -14,7 +14,13 @@ import type {
   ShellState,
 } from "../main";
 import { esc } from "../lib/html";
-import { t } from "../lib/i18n";
+import {
+  getLanguage,
+  isTaskApiError,
+  setTaskApiErrorDiagnosis,
+  t,
+  type ErrorDiagnosis,
+} from "../lib/i18n";
 import { isSendShortcut } from "../lib/shortcuts";
 import { settingsMenu } from "./settings";
 import { renderConfirmDeleteDialog, renderSidebar as renderSidebarMarkup } from "./task_history";
@@ -973,6 +979,7 @@ export namespace agentPanel {
     });
 
     bindComposer(shell);
+    bindErrorDiagnosis(shell);
 
     // Fold/unfold a turn's activity detail. The explicit choice is remembered
     // per task+turn until the run's terminal transition clears it.
@@ -1466,6 +1473,47 @@ export namespace agentPanel {
     });
   }
 
+  function bindErrorDiagnosis(shell: ShellState): void {
+    document.querySelectorAll<HTMLButtonElement>("[data-diagnose-task-error]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const taskId = button.dataset.diagnoseTaskError;
+        const task = tasks.find((item) => item.task_id === taskId);
+        const error = task ? taskApiErrorText(task) : null;
+        if (!taskId || !error) return;
+        button.disabled = true;
+        button.textContent = t("task.diagnosingError");
+        try {
+          const diagnosis = await invoke<ErrorDiagnosis>("diagnose_error", {
+            error,
+            language: getLanguage(),
+          });
+          setTaskApiErrorDiagnosis(error, diagnosis);
+          shell.rerender();
+        } catch (diagnosisError) {
+          console.error("diagnose_error failed:", diagnosisError);
+          button.disabled = false;
+          button.textContent = t("task.diagnoseError");
+          const message = document.querySelector<HTMLElement>(
+            `[data-diagnosis-error="${CSS.escape(taskId)}"]`,
+          );
+          if (message) {
+            message.hidden = false;
+            message.textContent = t("task.diagnosisUnavailable");
+          }
+        }
+      });
+    });
+  }
+
+  function taskApiErrorText(task: AgentTaskView): string | null {
+    const error = task.error?.trim();
+    if (error && isTaskApiError(error)) return error;
+    const finalText = task.final_text?.trim();
+    return finalText && /^API error:\s*/i.test(finalText)
+      ? finalText.replace(/^API error:\s*/i, "")
+      : null;
+  }
+
   function syncChromeSetupDetection(shell: ShellState): void {
     chromeSetupStatus = shell.status;
 
@@ -1549,7 +1597,11 @@ export namespace agentPanel {
       draft = "";
     } catch (err) {
       console.error("agent_task_start failed:", err);
-      submitError = shell.notifyTaskCommandError(err) ? "" : `${err}`;
+      if (shell.notifyTaskCommandError(err)) {
+        submitError = "";
+      } else {
+        submitError = t("task.preflightUnknown");
+      }
     } finally {
       submittingTask = false;
       shell.rerender();
@@ -1581,7 +1633,11 @@ export namespace agentPanel {
       replyDraft = "";
     } catch (err) {
       console.error("agent_task_reply failed:", err);
-      replyError = shell.notifyTaskCommandError(err) ? "" : `${err}`;
+      if (shell.notifyTaskCommandError(err)) {
+        replyError = "";
+      } else {
+        replyError = t("task.preflightUnknown");
+      }
     } finally {
       submittingReply = false;
       shell.rerender();

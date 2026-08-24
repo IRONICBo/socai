@@ -351,7 +351,18 @@ pub async fn agent_save_api_key(provider: String, api_key: String) -> Result<(),
 #[tauri::command]
 pub async fn agent_list_models() -> Result<Vec<Value>, String> {
     use socai_core::agent::PROVIDERS;
-    let _ = socai_core::cloud::take_hosted_llm_default().map_err(|err| format!("{err:#}"))?;
+    if !socai_core::cloud::auth_session()
+        .map_err(|err| format!("{err:#}"))?
+        .logged_in
+    {
+        if let Err(error) = socai_core::cloud::ensure_trial_device().await {
+            eprintln!("anonymous trial registration failed: {error:#}");
+        }
+    }
+    if !provider_env_override_present() && configured_default_provider().is_none() {
+        let _ = socai_core::cloud::take_hosted_llm_default()
+            .map_err(|err| format!("{err:#}"))?;
+    }
     // The provider/model that would be used right now. Environment overrides
     // win when present; otherwise the desktop restores persisted defaults even
     // if the selected provider still needs a key. The frontend uses
@@ -591,7 +602,9 @@ pub async fn agent_task_start(
     if task_text.is_empty() {
         return Err("task is empty".into());
     }
-    run_task_preflight(provider.as_deref(), model.as_deref()).await?;
+    let (anonymous_trial, resolved_provider) =
+        run_task_preflight(provider.as_deref(), model.as_deref()).await?;
+    let provider = Some(resolved_provider.as_str().to_string());
 
     // One conversation = one folder under the runs root, named after the
     // first task; each turn's run dir nests inside it (turn-01_…, turn-02_…).
@@ -610,8 +623,10 @@ pub async fn agent_task_start(
             model.clone(),
             run_dir.display().to_string(),
             session_dir,
+            anonymous_trial,
         )
-        .await;
+        .await
+        .map_err(|detail| task_preflight_error("preflight_trial_running", detail))?;
     let task_id = snapshot.task_id.clone();
     let background_media_generation = socai_core::media::begin_background_media_generation();
     let runtime = runtime.inner().clone();
@@ -684,9 +699,17 @@ pub async fn agent_task_reply(
     let Some(session_dir) = existing.session_dir.as_deref() else {
         return Err("task has no conversation to continue".into());
     };
-    let provider = existing.provider.clone();
+    let requested_provider = existing.provider.clone();
     let model = existing.model.clone();
-    run_task_preflight(provider.as_deref(), model.as_deref()).await?;
+    let (_, resolved_provider) =
+        run_task_preflight(requested_provider.as_deref(), model.as_deref()).await?;
+    let provider = Some(resolved_provider.as_str().to_string());
+    if resolved_provider == Provider::Socai {
+        // A conversation can cross the anonymous-to-signed-in boundary
+        // between turns. Pin identity during a turn, then rebind to the
+        // current account at the next reply boundary.
+        socai_core::cloud::reset_llm_gateway_for_task(&task_id);
+    }
     if let Some(previous_run_dir) = existing.run_dir.as_deref() {
         socai_core::media::cancel_background_media_for_run(previous_run_dir);
     }
@@ -718,6 +741,8 @@ pub async fn agent_task_reply(
             snapshot.cost_currency = None;
             snapshot.points_used = None;
             snapshot.current_message = Some(message_text.clone());
+            snapshot.provider = provider.clone();
+            snapshot.model = model.clone();
         })
         .await
         .ok_or_else(|| format!("unknown task: {task_id}"))?;
@@ -764,23 +789,37 @@ pub async fn agent_task_reply(
     Ok(snapshot)
 }
 
-async fn run_task_preflight(provider: Option<&str>, model: Option<&str>) -> Result<(), String> {
+async fn run_task_preflight(
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<(bool, Provider), String> {
     let resolved_provider = ensure_llm_provider_configured_for(provider, model)
         .map_err(|error| task_preflight_error("preflight_model_config", format!("{error:#}")))?;
+    let mut anonymous_trial = false;
     if resolved_provider == Provider::Socai {
-        if !socai_core::cloud::pro_activated() {
+        let session = socai_core::cloud::auth_session()
+            .map_err(|error| task_preflight_error("preflight_auth", format!("{error:#}")))?;
+        if !session.logged_in && !session.trial_available {
+            let code = if matches!(session.trial_status.as_str(), "completed" | "converted") {
+                "preflight_trial_used"
+            } else {
+                "preflight_trial_unavailable"
+            };
             return Err(task_preflight_error(
-                "preflight_auth",
-                "sign in before using Socai Agent",
+                code,
+                "anonymous trial unavailable; sign in or configure an API key",
             ));
         }
-        let wallet = socai_core::cloud::wallet_balance().await.map_err(|error| {
-            task_preflight_error("preflight_region_or_account", format!("{error:#}"))
-        })?;
-        validate_preflight_balance(wallet.balance_points)?;
+        anonymous_trial = !session.logged_in;
+        if session.logged_in {
+            let wallet = socai_core::cloud::wallet_balance().await.map_err(|error| {
+                task_preflight_error("preflight_region_or_account", format!("{error:#}"))
+            })?;
+            validate_preflight_balance(wallet.balance_points)?;
+        }
     }
 
-    Ok(())
+    Ok((anonymous_trial, resolved_provider))
 }
 
 async fn run_session_login_preflight(page: &RuntimePageSession) -> Result<(), String> {
@@ -999,9 +1038,8 @@ pub async fn agent_task_list(
     let snapshots = tasks.list().await;
     recover_run_points_from_local_telemetry(&snapshots);
     let snapshots = tasks.list().await;
-    let has_cloud_session = socai_core::cloud::pro_activated();
     for snapshot in snapshots {
-        if !has_cloud_session
+        if snapshot.provider.as_deref() != Some(Provider::Socai.as_str())
             || snapshot.points_used.is_some()
             || !matches!(
                 snapshot.status.as_str(),
@@ -2099,7 +2137,7 @@ pub async fn agent_task_cancel(
         let _ = runtime.close_target(&target_id).await;
     }
     if changed {
-        if socai_core::cloud::pro_activated() {
+        if snapshot.provider.as_deref() == Some(Provider::Socai.as_str()) {
             if let Some(settlement) = settle_hosted_task_with_retry(&task_id, "cancelled").await {
                 if let Some(updated) = tasks
                     .update(&task_id, |task| {
@@ -2455,16 +2493,17 @@ async fn run_agent_task_background(
     )
     .await;
 
-    let settlement = if socai_core::cloud::pro_activated() {
-        let final_status = if result.is_ok() {
-            "completed"
+    let settlement =
+        if resolve_provider(provider.as_deref(), model.as_deref()).ok() == Some(Provider::Socai) {
+            let final_status = if result.is_ok() {
+                "completed"
+            } else {
+                "failed"
+            };
+            settle_hosted_task_with_retry(&task_id, final_status).await
         } else {
-            "failed"
+            None
         };
-        settle_hosted_task_with_retry(&task_id, final_status).await
-    } else {
-        None
-    };
 
     let _ = registry.remove_abort_handle(&task_id).await;
 
@@ -2724,29 +2763,8 @@ async fn run_agent_task_on_session_page(
     let site = app_site()?;
     let session_id =
         session_id.ok_or_else(|| anyhow::anyhow!("task has no conversation session"))?;
-    // The tab was opened and bound to this task during admission. The browser
-    // lease and activity guard that keep it alive are held by the caller.
-    // Login is checked in the conversation's own tab rather than in a shared
-    // site tab, so a run never opens a second target just to look at the gate.
-    // Both outcomes carry a code the UI translates — a hosted browser's shared
-    // login is socai-operated, so its message differs from the local one.
-    let login_error_code = if page.is_remote_browser() {
-        "preflight_xhs_session"
-    } else {
-        "preflight_xhs_login"
-    };
-    let login = XhsPageRuntime::new(&page)
-        .login_gate(true)
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!(task_preflight_error(login_error_code, format!("{error:#}")))
-        })?;
-    if login == socai_core::sites::xhs::page::LoginGate::Required {
-        anyhow::bail!(task_preflight_error(
-            login_error_code,
-            "Xiaohongshu login is required in this conversation's Chrome tab",
-        ));
-    }
+    // Admission already validated login on this exact conversation page while
+    // holding its browser lease; do not poll the same gate a second time here.
     let outcome = async {
         let agent_tools = site.default_agent_tools.unwrap_or(site.agent_tools);
         let mut tools = agent_tools(page.clone(), llm_provider.clone()).await?;
@@ -2981,6 +2999,16 @@ pub async fn pro_activate(
 #[tauri::command]
 pub async fn auth_session() -> Result<socai_core::cloud::AuthSession, String> {
     socai_core::cloud::auth_session().map_err(|err| format!("{err:#}"))
+}
+
+#[tauri::command]
+pub async fn diagnose_error(
+    error: String,
+    language: String,
+) -> Result<socai_core::cloud::ErrorDiagnosis, String> {
+    socai_core::cloud::diagnose_error(&error, &language)
+        .await
+        .map_err(|err| format!("{err:#}"))
 }
 
 #[tauri::command]

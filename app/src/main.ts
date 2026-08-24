@@ -76,6 +76,7 @@ export interface AgentTaskSnapshot {
   estimated_cost: number | null;
   cost_currency: string | null;
   points_used: number | null;
+  anonymous_trial: boolean;
 }
 
 export interface AgentArtifact {
@@ -755,7 +756,7 @@ async function main(): Promise<void> {
       void agentPanel.loadTaskNotes(event.payload.task_id, shell());
       void agentPanel.loadTaskArtifacts(event.payload.task_id, shell());
       maybeRelaunchReadyUpdate();
-      void authMenu.refreshWallet().then(render);
+      void Promise.all([authMenu.loadSession(), agentPanel.refreshModels()]).then(() => render());
     }
   });
   await listen<BackgroundMediaEvent>("agent_task:notes_updated", (event) => {
