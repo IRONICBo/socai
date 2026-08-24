@@ -86,7 +86,7 @@ export interface AgentArtifact {
   kind: string;
   size_bytes: number;
   version: string;
-  preview_kind?: "markdown" | "csv" | "text" | "pdf" | "image" | null;
+  preview_kind?: "markdown" | "csv" | "text" | "spreadsheet" | "pdf" | "image" | null;
 }
 
 export interface AgentArtifactDownload {

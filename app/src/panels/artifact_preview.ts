@@ -18,11 +18,23 @@ export interface ArtifactPreviewPaneState {
   text?: string;
   blobUrl?: string;
   error?: string;
+  sheetIndex?: number;
+}
+
+interface SpreadsheetPreviewPayload {
+  sheets: Array<{
+    name: string;
+    rows: string[][];
+    truncated: boolean;
+  }>;
+  sheet_count: number;
+  truncated: boolean;
 }
 
 export function renderArtifactPreview(
   preview: ArtifactPreviewPaneState | null,
   downloadState: ArtifactDownloadState | undefined,
+  width: number,
 ): string {
   if (!preview) return "";
   const openingState = downloadState?.status === "downloaded"
@@ -40,7 +52,18 @@ export function renderArtifactPreview(
             ? t("artifact.openAria", { name: preview.name })
             : t("artifact.downloadAria", { name: preview.name });
   return `
-    <aside class="artifact-preview" aria-label="${esc(t("artifact.previewPanelAria", { name: preview.name }))}">
+    <aside class="artifact-preview" style="--artifact-preview-width: ${width}px" aria-label="${esc(t("artifact.previewPanelAria", { name: preview.name }))}">
+      <div
+        class="artifact-preview__resize"
+        data-artifact-preview-resize
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="${esc(t("artifact.previewResize"))}"
+        aria-valuemin="320"
+        aria-valuemax="1200"
+        aria-valuenow="${width}"
+        tabindex="0"
+      ></div>
       <header class="artifact-preview__head">
         <div class="artifact-preview__identity">
           <span class="artifact-preview__name" title="${esc(preview.name)}">${esc(preview.name)}</span>
@@ -81,6 +104,9 @@ function renderPreviewBody(preview: ArtifactPreviewPaneState): string {
   }
   if (preview.previewKind === "text") {
     return `<pre class="artifact-preview__text">${esc(formatTextPreview(preview.name, preview.text ?? ""))}</pre>`;
+  }
+  if (preview.previewKind === "spreadsheet") {
+    return renderSpreadsheet(preview.text ?? "", preview.sheetIndex ?? 0);
   }
   if (preview.previewKind === "pdf" && preview.blobUrl) {
     return `<object class="artifact-preview__pdf" data="${esc(preview.blobUrl)}" type="application/pdf"><p>${esc(t("artifact.previewPdfUnavailable"))}</p></object>`;
@@ -129,6 +155,79 @@ function renderCsv(text: string, delimiter: string): string {
     maxColumns,
     rows.reduce((maximum, row) => Math.max(maximum, row.length), 0),
   );
+  return renderArtifactTable(
+    rows,
+    columnCount,
+    truncated ? t("artifact.previewTableLimit", { rows: maxRows, columns: maxColumns }) : "",
+  );
+}
+
+function renderSpreadsheet(text: string, selectedSheetIndex: number): string {
+  const workbook = parseSpreadsheetPreview(text);
+  if (!workbook) {
+    return `<div class="artifact-preview__state artifact-preview__state--error">${esc(t("artifact.previewFailed"))}</div>`;
+  }
+  if (workbook.sheets.length === 0) {
+    return `<div class="artifact-preview__state">${esc(t("artifact.previewWorkbookEmpty"))}</div>`;
+  }
+  const activeIndex = Math.min(Math.max(selectedSheetIndex, 0), workbook.sheets.length - 1);
+  const activeSheet = workbook.sheets[activeIndex];
+  const columnCount = Math.min(
+    80,
+    activeSheet.rows.reduce((maximum, row) => Math.max(maximum, row.length), 0),
+  );
+  const tabs = workbook.sheets.map((sheet, index) => `<button
+    type="button"
+    id="artifact-preview-sheet-tab-${index}"
+    class="artifact-preview__workbook-tab${index === activeIndex ? " is-active" : ""}"
+    data-artifact-preview-sheet="${index}"
+    role="tab"
+    aria-selected="${index === activeIndex ? "true" : "false"}"
+    aria-controls="artifact-preview-sheet-panel"
+    tabindex="${index === activeIndex ? "0" : "-1"}"
+  >${esc(sheet.name)}</button>`).join("");
+  const shown = workbook.sheets.length;
+  const workbookLimit = workbook.truncated
+    ? `<p class="artifact-preview__workbook-limit">${esc(t("artifact.previewWorkbookLimit", { shown, total: workbook.sheet_count }))}</p>`
+    : "";
+  const worksheetLimit = activeSheet.truncated
+    ? t("artifact.previewWorksheetLimit")
+    : "";
+  return `<div class="artifact-preview__workbook">
+    <div class="artifact-preview__workbook-tabs" role="tablist" aria-label="${esc(t("artifact.previewWorkbookSheets"))}">${tabs}</div>
+    <section
+      id="artifact-preview-sheet-panel"
+      class="artifact-preview__workbook-sheet"
+      role="tabpanel"
+      aria-labelledby="artifact-preview-sheet-tab-${activeIndex}"
+    >${renderArtifactTable(activeSheet.rows, columnCount, worksheetLimit)}</section>
+    ${workbookLimit}
+  </div>`;
+}
+
+function parseSpreadsheetPreview(text: string): SpreadsheetPreviewPayload | null {
+  try {
+    const value: unknown = JSON.parse(text);
+    if (!value || typeof value !== "object") return null;
+    const candidate = value as Partial<SpreadsheetPreviewPayload>;
+    if (!Array.isArray(candidate.sheets)
+      || !Number.isSafeInteger(candidate.sheet_count)
+      || (candidate.sheet_count ?? -1) < 0
+      || typeof candidate.truncated !== "boolean") return null;
+    if (!candidate.sheets.every((sheet) => sheet
+      && typeof sheet.name === "string"
+      && typeof sheet.truncated === "boolean"
+      && Array.isArray(sheet.rows)
+      && sheet.rows.every((row) => Array.isArray(row) && row.every((cell) => typeof cell === "string")))) {
+      return null;
+    }
+    return candidate as SpreadsheetPreviewPayload;
+  } catch {
+    return null;
+  }
+}
+
+function renderArtifactTable(rows: string[][], columnCount: number, limitMessage: string): string {
   const body = rows.map((row, rowIndex) => `
     <tr>
       <th class="artifact-preview__row-number" scope="row">${rowIndex + 1}</th>
@@ -142,7 +241,7 @@ function renderCsv(text: string, delimiter: string): string {
   return `
     <div class="artifact-preview__sheet">
       <table><tbody>${body}</tbody></table>
-      ${truncated ? `<p class="artifact-preview__limit">${esc(t("artifact.previewTableLimit", { rows: maxRows, columns: maxColumns }))}</p>` : ""}
+      ${limitMessage ? `<p class="artifact-preview__limit">${esc(limitMessage)}</p>` : ""}
     </div>
   `;
 }

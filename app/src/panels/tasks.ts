@@ -56,6 +56,11 @@ type PersistedArtifactDownload = {
 };
 
 const ARTIFACT_DOWNLOAD_STORAGE_KEY = "socai.artifact-downloads.v2";
+const ARTIFACT_PREVIEW_WIDTH_STORAGE_KEY = "socai.artifact-preview-width.v1";
+const ARTIFACT_PREVIEW_DEFAULT_WIDTH = 560;
+const ARTIFACT_PREVIEW_MIN_WIDTH = 320;
+const ARTIFACT_PREVIEW_MAX_STORED_WIDTH = 1_200;
+const ARTIFACT_PREVIEW_CONVERSATION_MIN_WIDTH = 360;
 
 // ── Agent task workspace ──────────────────────────────────────────────────
 
@@ -93,7 +98,9 @@ export namespace agentPanel {
   const artifactDownloads = restoreArtifactDownloads();
   const artifactLoadGenerations = new Map<string, number>();
   let artifactPreview: ArtifactPreviewPaneState | null = null;
+  let artifactPreviewResizeObserver: ResizeObserver | null = null;
   let artifactPreviewGeneration = 0;
+  let artifactPreviewWidth = restoreArtifactPreviewWidth();
 
   function artifactDownloadKey(taskId: string, path: string): string {
     return `${taskId}\0${path}`;
@@ -911,7 +918,7 @@ export namespace agentPanel {
     const previewDownload = preview
       ? artifactDownloads.get(artifactDownloadKey(task.task_id, preview.path))
       : undefined;
-    return `<div class="conversation-workspace">${conversation}${renderArtifactPreview(preview, previewDownload)}</div>`;
+    return `<div class="conversation-workspace">${conversation}${renderArtifactPreview(preview, previewDownload, artifactPreviewWidth)}</div>`;
   }
 
   // Dialogs live in a sibling layer above the right-side task view, rather
@@ -1084,6 +1091,7 @@ export namespace agentPanel {
           version: artifact.version,
           previewKind: artifact.preview_kind,
           status: "loading",
+          sheetIndex: 0,
         };
         shell.rerender();
         requestAnimationFrame(() => {
@@ -1143,10 +1151,126 @@ export namespace agentPanel {
           ?.focus();
       });
     });
+    bindArtifactPreviewSheets(shell);
+    bindArtifactPreviewResize();
+  }
+
+  function bindArtifactPreviewSheets(shell: ShellState): void {
+    const tabs = [...document.querySelectorAll<HTMLButtonElement>("[data-artifact-preview-sheet]")];
+    const activate = (index: number): void => {
+      if (!artifactPreview || artifactPreview.previewKind !== "spreadsheet") return;
+      if (artifactPreview.sheetIndex === index) return;
+      artifactPreview.sheetIndex = index;
+      shell.rerender();
+      requestAnimationFrame(() => {
+        document.querySelector<HTMLButtonElement>(`[data-artifact-preview-sheet="${index}"]`)?.focus();
+      });
+    };
+    tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => activate(index));
+      tab.addEventListener("keydown", (event) => {
+        let next = index;
+        if (event.key === "ArrowLeft") next = (index - 1 + tabs.length) % tabs.length;
+        else if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+        else if (event.key === "Home") next = 0;
+        else if (event.key === "End") next = tabs.length - 1;
+        else return;
+        event.preventDefault();
+        activate(next);
+      });
+    });
+  }
+
+  function bindArtifactPreviewResize(): void {
+    const handle = document.querySelector<HTMLElement>("[data-artifact-preview-resize]");
+    const pane = handle?.closest<HTMLElement>(".artifact-preview");
+    const workspace = handle?.closest<HTMLElement>(".conversation-workspace");
+    if (!handle || !pane || !workspace) return;
+
+    const bounds = (): { min: number; max: number } => {
+      const workspaceWidth = workspace.getBoundingClientRect().width;
+      const layoutMax = workspaceWidth <= 760
+        ? workspaceWidth
+        : workspaceWidth - ARTIFACT_PREVIEW_CONVERSATION_MIN_WIDTH;
+      const max = Math.max(0, Math.min(ARTIFACT_PREVIEW_MAX_STORED_WIDTH, layoutMax));
+      return { min: Math.min(ARTIFACT_PREVIEW_MIN_WIDTH, max), max };
+    };
+    const applyWidth = (width: number, persist: boolean): void => {
+      const { min, max } = bounds();
+      artifactPreviewWidth = Math.round(Math.min(Math.max(width, min), max));
+      pane.style.setProperty("--artifact-preview-width", `${artifactPreviewWidth}px`);
+      handle.setAttribute("aria-valuemin", String(Math.round(min)));
+      handle.setAttribute("aria-valuemax", String(Math.round(max)));
+      handle.setAttribute("aria-valuenow", String(artifactPreviewWidth));
+      if (persist) persistArtifactPreviewWidth();
+    };
+
+    applyWidth(artifactPreviewWidth, false);
+    artifactPreviewResizeObserver?.disconnect();
+    artifactPreviewResizeObserver = new ResizeObserver(() => applyWidth(artifactPreviewWidth, false));
+    artifactPreviewResizeObserver.observe(workspace);
+
+    let pointerId: number | null = null;
+    let startX = 0;
+    let startWidth = 0;
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      pointerId = event.pointerId;
+      startX = event.clientX;
+      startWidth = pane.getBoundingClientRect().width;
+      handle.setPointerCapture(event.pointerId);
+      handle.classList.add("is-resizing");
+      event.preventDefault();
+    });
+    handle.addEventListener("pointermove", (event) => {
+      if (pointerId !== event.pointerId) return;
+      applyWidth(startWidth + startX - event.clientX, false);
+    });
+    const finishResize = (event: PointerEvent): void => {
+      if (pointerId !== event.pointerId) return;
+      pointerId = null;
+      handle.classList.remove("is-resizing");
+      if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+      persistArtifactPreviewWidth();
+    };
+    handle.addEventListener("pointerup", finishResize);
+    handle.addEventListener("pointercancel", finishResize);
+    handle.addEventListener("keydown", (event) => {
+      let width = artifactPreviewWidth;
+      if (event.key === "ArrowLeft") width += 32;
+      else if (event.key === "ArrowRight") width -= 32;
+      else if (event.key === "Home") width = bounds().min;
+      else if (event.key === "End") width = bounds().max;
+      else return;
+      event.preventDefault();
+      applyWidth(width, true);
+    });
+  }
+
+  function restoreArtifactPreviewWidth(): number {
+    try {
+      const stored = Number(window.localStorage.getItem(ARTIFACT_PREVIEW_WIDTH_STORAGE_KEY));
+      if (Number.isFinite(stored) && stored >= ARTIFACT_PREVIEW_MIN_WIDTH) {
+        return Math.min(stored, ARTIFACT_PREVIEW_MAX_STORED_WIDTH);
+      }
+    } catch {
+      // Storage can be disabled; the in-memory default remains usable.
+    }
+    return ARTIFACT_PREVIEW_DEFAULT_WIDTH;
+  }
+
+  function persistArtifactPreviewWidth(): void {
+    try {
+      window.localStorage.setItem(ARTIFACT_PREVIEW_WIDTH_STORAGE_KEY, String(artifactPreviewWidth));
+    } catch {
+      // Resizing still works for the current session when storage is unavailable.
+    }
   }
 
   function clearArtifactPreview(): void {
     artifactPreviewGeneration += 1;
+    artifactPreviewResizeObserver?.disconnect();
+    artifactPreviewResizeObserver = null;
     if (artifactPreview?.blobUrl) URL.revokeObjectURL(artifactPreview.blobUrl);
     artifactPreview = null;
   }

@@ -554,6 +554,7 @@ const messages = {
   "artifact.previewAria": { en: "preview {name}", zh: "预览 {name}" },
   "artifact.previewPanelAria": { en: "preview of {name}", zh: "{name} 预览" },
   "artifact.previewClose": { en: "close preview", zh: "关闭预览" },
+  "artifact.previewResize": { en: "resize preview", zh: "调整预览宽度" },
   "artifact.previewLoading": { en: "loading preview…", zh: "正在加载预览…" },
   "artifact.previewFailed": { en: "preview unavailable", zh: "无法预览" },
   "artifact.previewPdfUnavailable": {
@@ -563,6 +564,19 @@ const messages = {
   "artifact.previewTableLimit": {
     en: "preview limited to {rows} rows and {columns} columns",
     zh: "预览最多显示 {rows} 行、{columns} 列",
+  },
+  "artifact.previewWorkbookEmpty": {
+    en: "this workbook has no visible data",
+    zh: "工作簿中没有可显示的数据",
+  },
+  "artifact.previewWorkbookSheets": { en: "workbook sheets", zh: "工作表" },
+  "artifact.previewWorkbookLimit": {
+    en: "preview truncated ({shown} of {total} sheets shown); download the file for complete data",
+    zh: "预览内容已截断（显示 {shown}/{total} 个工作表）；完整数据请下载文件查看",
+  },
+  "artifact.previewWorksheetLimit": {
+    en: "worksheet preview truncated; download the file for complete data",
+    zh: "工作表预览内容已截断；完整数据请下载文件查看",
   },
 
   "feishu.export": { en: "export to feishu", zh: "导出到飞书" },

@@ -3,6 +3,8 @@ use crate::tasks::{app_data_dir, now_ms, AgentTaskRegistry, AgentTaskSnapshot};
 use crate::telemetry::{duration_ms, short_error, DesktopTelemetry};
 use crate::timeline::{agent_event_to_timeline, AgentTaskEventKind, AgentTaskEventPayload};
 use anyhow::Result;
+use calamine::{Data, DataRef, Reader, SheetType, Xlsx};
+use quick_xml::{events::Event as XmlEvent, Reader as XmlReader};
 use serde_json::{json, Map, Value};
 use socai_core::agent::{
     catalog_models_for, configured_default_model_for, configured_default_provider,
@@ -22,7 +24,7 @@ use socai_core::telemetry::tool_call::{summarize_tool_args, summarize_tool_resul
 use socai_core::telemetry::trace::mark_run_trace_status;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::io::{BufReader, Cursor, Read, Write};
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -974,6 +976,31 @@ pub struct AgentArtifactDownload {
 const ARTIFACT_TEXT_PREVIEW_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const ARTIFACT_BINARY_PREVIEW_MAX_BYTES: u64 = 24 * 1024 * 1024;
 const ARTIFACT_IMAGE_PREVIEW_MAX_PIXELS: u64 = 24_000_000;
+const ARTIFACT_SPREADSHEET_PREVIEW_MAX_BYTES: u64 = 12 * 1024 * 1024;
+const ARTIFACT_SPREADSHEET_MAX_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+const ARTIFACT_SPREADSHEET_MAX_ARCHIVE_ENTRIES: usize = 4_096;
+const ARTIFACT_SPREADSHEET_MAX_SHEETS: usize = 5;
+const ARTIFACT_SPREADSHEET_MAX_ROWS: usize = 500;
+const ARTIFACT_SPREADSHEET_MAX_COLUMNS: usize = 80;
+const ARTIFACT_SPREADSHEET_MAX_CELL_BYTES: usize = 8 * 1024;
+const ARTIFACT_SPREADSHEET_MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
+const ARTIFACT_SPREADSHEET_MAX_CELL_RECORDS: usize =
+    ARTIFACT_SPREADSHEET_MAX_ROWS * ARTIFACT_SPREADSHEET_MAX_COLUMNS;
+const ARTIFACT_SPREADSHEET_MAX_SHARED_STRINGS: usize = 100_000;
+
+#[derive(serde::Serialize)]
+struct SpreadsheetPreview {
+    sheets: Vec<SpreadsheetSheetPreview>,
+    sheet_count: usize,
+    truncated: bool,
+}
+
+#[derive(serde::Serialize)]
+struct SpreadsheetSheetPreview {
+    name: String,
+    rows: Vec<Vec<String>>,
+    truncated: bool,
+}
 
 /// Download cards include tool-registered artifacts (`artifacts/**`) and
 /// explicit user deliverables (`outputs/**`). Runtime logs, note media and
@@ -1015,6 +1042,9 @@ pub async fn agent_task_artifact_preview(
     let source_identity = artifact.identity;
     tokio::task::spawn_blocking(move || {
         let file = open_artifact_source(&source, &source_identity)?;
+        if preview_kind == "spreadsheet" {
+            return spreadsheet_preview_response(file);
+        }
         let limit = if matches!(preview_kind.as_str(), "pdf" | "image") {
             ARTIFACT_BINARY_PREVIEW_MAX_BYTES
         } else {
@@ -1269,6 +1299,7 @@ fn artifact_preview_kind(path: &std::path::Path, size_bytes: u64) -> Option<&'st
         | "swift" | "sh" | "zsh" | "fish" | "ps1" | "sql" | "log" => {
             ("text", ARTIFACT_TEXT_PREVIEW_MAX_BYTES)
         }
+        "xlsx" | "xlsm" => ("spreadsheet", ARTIFACT_SPREADSHEET_PREVIEW_MAX_BYTES),
         "pdf" => ("pdf", ARTIFACT_BINARY_PREVIEW_MAX_BYTES),
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => {
             ("image", ARTIFACT_BINARY_PREVIEW_MAX_BYTES)
@@ -1290,6 +1321,237 @@ fn read_artifact_preview(file: std::fs::File, max_bytes: u64) -> Result<Vec<u8>,
         ));
     }
     Ok(bytes)
+}
+
+fn spreadsheet_preview_response(file: std::fs::File) -> Result<tauri::ipc::Response, String> {
+    let bytes = read_artifact_preview(file, ARTIFACT_SPREADSHEET_PREVIEW_MAX_BYTES)?;
+    let mut source = Cursor::new(bytes);
+    validate_spreadsheet_archive(&mut source)?;
+    let mut workbook =
+        Xlsx::new(source).map_err(|error| format!("could not open Excel workbook: {error}"))?;
+    let sheet_names = workbook
+        .sheets_metadata()
+        .iter()
+        .filter(|sheet| sheet.typ == SheetType::WorkSheet)
+        .map(|sheet| sheet.name.clone())
+        .collect::<Vec<_>>();
+    let mut remaining_text_bytes = ARTIFACT_SPREADSHEET_MAX_TEXT_BYTES;
+    let mut sheets = Vec::new();
+
+    for name in sheet_names.iter().take(ARTIFACT_SPREADSHEET_MAX_SHEETS) {
+        let mut reader = workbook
+            .worksheet_cells_reader(name)
+            .map_err(|error| format!("could not read worksheet {name}: {error}"))?;
+        let dimensions = reader.dimensions();
+        let declared_rows = dimensions.end.0.saturating_sub(dimensions.start.0) as usize + 1;
+        let declared_columns = dimensions.end.1.saturating_sub(dimensions.start.1) as usize + 1;
+        let mut truncated = declared_rows > ARTIFACT_SPREADSHEET_MAX_ROWS
+            || declared_columns > ARTIFACT_SPREADSHEET_MAX_COLUMNS;
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut cell_records = 0_usize;
+
+        loop {
+            if cell_records >= ARTIFACT_SPREADSHEET_MAX_CELL_RECORDS {
+                truncated = true;
+                break;
+            }
+            let Some(cell) = reader
+                .next_cell()
+                .map_err(|error| format!("could not read worksheet {name}: {error}"))?
+            else {
+                break;
+            };
+            cell_records += 1;
+            if matches!(cell.get_value(), DataRef::Empty) {
+                continue;
+            }
+            let (row, column) = cell.get_position();
+            let Some(row) = row
+                .checked_sub(dimensions.start.0)
+                .map(|value| value as usize)
+            else {
+                truncated = true;
+                continue;
+            };
+            let Some(column) = column
+                .checked_sub(dimensions.start.1)
+                .map(|value| value as usize)
+            else {
+                truncated = true;
+                continue;
+            };
+            if row >= ARTIFACT_SPREADSHEET_MAX_ROWS || column >= ARTIFACT_SPREADSHEET_MAX_COLUMNS {
+                truncated = true;
+                continue;
+            }
+            if remaining_text_bytes == 0 {
+                truncated = true;
+                break;
+            }
+
+            let raw = spreadsheet_cell_text(cell.get_value());
+            let cell_limit = ARTIFACT_SPREADSHEET_MAX_CELL_BYTES.min(remaining_text_bytes);
+            let (text, cell_truncated) = truncate_utf8_bytes(&raw, cell_limit);
+            truncated |= cell_truncated;
+            remaining_text_bytes = remaining_text_bytes.saturating_sub(text.len());
+            rows.resize_with(row + 1, Vec::new);
+            rows[row].resize(column + 1, String::new());
+            rows[row][column] = text;
+        }
+
+        sheets.push(SpreadsheetSheetPreview {
+            name: name.clone(),
+            rows,
+            truncated,
+        });
+        if remaining_text_bytes == 0 {
+            break;
+        }
+    }
+
+    let payload = SpreadsheetPreview {
+        truncated: sheets.len() < sheet_names.len(),
+        sheets,
+        sheet_count: sheet_names.len(),
+    };
+    serde_json::to_vec(&payload)
+        .map(tauri::ipc::Response::new)
+        .map_err(|error| format!("could not encode Excel preview: {error}"))
+}
+
+fn validate_spreadsheet_archive(file: &mut Cursor<Vec<u8>>) -> Result<(), String> {
+    let mut archive = zip::ZipArchive::new(&mut *file)
+        .map_err(|error| format!("invalid Excel workbook: {error}"))?;
+    if archive.len() > ARTIFACT_SPREADSHEET_MAX_ARCHIVE_ENTRIES {
+        return Err(format!(
+            "Excel workbook exceeds the {} entry preview limit",
+            ARTIFACT_SPREADSHEET_MAX_ARCHIVE_ENTRIES
+        ));
+    }
+    let mut uncompressed_bytes = 0_u64;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|error| format!("could not inspect Excel workbook: {error}"))?;
+        uncompressed_bytes = uncompressed_bytes
+            .checked_add(entry.size())
+            .ok_or_else(|| "Excel workbook uncompressed size overflowed".to_string())?;
+        if uncompressed_bytes > ARTIFACT_SPREADSHEET_MAX_UNCOMPRESSED_BYTES {
+            return Err(format!(
+                "Excel workbook exceeds the {} MB expanded preview limit",
+                ARTIFACT_SPREADSHEET_MAX_UNCOMPRESSED_BYTES / (1024 * 1024)
+            ));
+        }
+    }
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|error| format!("could not inspect Excel workbook: {error}"))?;
+        let is_xml = entry
+            .name()
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("xml"));
+        if is_xml {
+            validate_spreadsheet_xml(entry)?;
+        }
+    }
+    drop(archive);
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| format!("could not reset Excel workbook: {error}"))?;
+    Ok(())
+}
+
+fn validate_spreadsheet_xml(reader: impl Read) -> Result<(), String> {
+    let mut xml = XmlReader::from_reader(BufReader::new(reader));
+    let mut buffer = Vec::new();
+    let mut shared_strings = false;
+    let mut worksheet = false;
+    let mut shared_string_count = 0_usize;
+    let mut cell_count = 0_usize;
+
+    loop {
+        buffer.clear();
+        match xml.read_event_into(&mut buffer) {
+            Ok(XmlEvent::Start(event)) | Ok(XmlEvent::Empty(event)) => {
+                let name = event.local_name();
+                if name.as_ref() == b"sst" {
+                    shared_strings = true;
+                    for attribute in event.attributes().with_checks(false) {
+                        let attribute = attribute
+                            .map_err(|error| format!("invalid Excel shared strings: {error}"))?;
+                        if attribute.key.local_name().as_ref() != b"uniqueCount" {
+                            continue;
+                        }
+                        let count = std::str::from_utf8(attribute.value.as_ref())
+                            .ok()
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .ok_or_else(|| {
+                                "invalid Excel shared string count metadata".to_string()
+                            })?;
+                        if count > ARTIFACT_SPREADSHEET_MAX_SHARED_STRINGS {
+                            return Err(format!(
+                                "Excel workbook exceeds the {} shared string preview limit",
+                                ARTIFACT_SPREADSHEET_MAX_SHARED_STRINGS
+                            ));
+                        }
+                    }
+                } else if name.as_ref() == b"worksheet" {
+                    worksheet = true;
+                } else if shared_strings && name.as_ref() == b"si" {
+                    shared_string_count += 1;
+                    if shared_string_count > ARTIFACT_SPREADSHEET_MAX_SHARED_STRINGS {
+                        return Err(format!(
+                            "Excel workbook exceeds the {} shared string preview limit",
+                            ARTIFACT_SPREADSHEET_MAX_SHARED_STRINGS
+                        ));
+                    }
+                } else if worksheet && name.as_ref() == b"c" {
+                    cell_count += 1;
+                    if cell_count > ARTIFACT_SPREADSHEET_MAX_CELL_RECORDS {
+                        return Ok(());
+                    }
+                }
+            }
+            Ok(XmlEvent::Eof) => return Ok(()),
+            Err(error) => return Err(format!("invalid Excel XML: {error}")),
+            _ => {}
+        }
+    }
+}
+
+fn spreadsheet_cell_text(value: &DataRef<'_>) -> String {
+    let value: Data = value.clone().into();
+    match value {
+        Data::DateTime(value) if value.is_datetime() => {
+            let (year, month, day, hour, minute, second, millis) = value.to_ymd_hms_milli();
+            if hour == 0 && minute == 0 && second == 0 && millis == 0 {
+                format!("{year:04}-{month:02}-{day:02}")
+            } else if millis == 0 {
+                format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+            } else {
+                format!(
+                    "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{millis:03}"
+                )
+            }
+        }
+        value => value.to_string(),
+    }
+}
+
+fn truncate_utf8_bytes(text: &str, max_bytes: usize) -> (String, bool) {
+    if text.len() <= max_bytes {
+        return (text.to_string(), false);
+    }
+    if max_bytes < '…'.len_utf8() {
+        return (String::new(), true);
+    }
+    let mut end = max_bytes - '…'.len_utf8();
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = text[..end].to_string();
+    truncated.push('…');
+    (truncated, true)
 }
 
 fn artifact_version(identity: &same_file::Handle, metadata: &std::fs::Metadata) -> String {
