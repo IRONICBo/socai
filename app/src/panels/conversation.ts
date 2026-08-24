@@ -425,7 +425,7 @@ function renderArtifactCards(
             aria-label="${esc(t("artifact.previewAria", { name: artifact.name }))}"
             aria-pressed="${previewPath === artifact.path ? "true" : "false"}"
           >
-            <span class="artifact-card__icon" aria-hidden="true">${artifactFileIcon()}</span>
+            <span class="artifact-card__icon" aria-hidden="true">${artifactFileIcon(artifact.name)}</span>
             <span class="artifact-card__copy">
               <span class="artifact-card__name">${esc(artifact.name)}</span>
               <span class="artifact-card__meta">${esc(artifact.kind)} · ${esc(formatArtifactSize(artifact.size_bytes))}</span>
@@ -433,7 +433,7 @@ function renderArtifactCards(
             <span class="artifact-card__eye" aria-hidden="true">${eyeIcon()}</span>
           </button>`
         : `<div class="artifact-card__main artifact-card__main--static">
-            <span class="artifact-card__icon" aria-hidden="true">${artifactFileIcon()}</span>
+            <span class="artifact-card__icon" aria-hidden="true">${artifactFileIcon(artifact.name)}</span>
             <span class="artifact-card__copy">
               <span class="artifact-card__name">${esc(artifact.name)}</span>
               <span class="artifact-card__meta">${esc(artifact.kind)} · ${esc(formatArtifactSize(artifact.size_bytes))}</span>

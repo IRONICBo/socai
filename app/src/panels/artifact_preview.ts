@@ -166,8 +166,23 @@ export function formatArtifactSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
-export function artifactFileIcon(): string {
-  return `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5h7l4 4v13h-11z"></path><path d="M13.5 3.5v4h4"></path><path d="M9 13h6M9 16h4"></path></svg>`;
+const artifactIconLabels: Record<string, string> = {
+  json: "JSON", jsonl: "JSON",
+  csv: "CSV", tsv: "CSV",
+  xls: "XLS", xlsx: "XLS", xlsm: "XLS", ods: "XLS",
+  doc: "DOC", docx: "DOC", odt: "DOC", rtf: "DOC",
+  pdf: "PDF",
+  ppt: "PPT", pptx: "PPT", odp: "PPT",
+  md: "MD", markdown: "MD",
+  png: "IMG", jpg: "IMG", jpeg: "IMG", gif: "IMG", webp: "IMG", bmp: "IMG", svg: "IMG",
+  zip: "ZIP", "7z": "ZIP", rar: "ZIP", tar: "ZIP", gz: "ZIP",
+};
+
+export function artifactFileIcon(name: string): string {
+  const extensionIndex = name.lastIndexOf(".");
+  const extension = extensionIndex > 0 ? name.slice(extensionIndex + 1).toLowerCase() : "";
+  const label = artifactIconLabels[extension] ?? "FILE";
+  return `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 2.5h9l5 5v14H5z"></path><path d="M14 2.5v5h5"></path><text x="12" y="17.5" fill="currentColor" stroke="none" text-anchor="middle" font-family="ui-monospace, monospace" font-size="5.2" font-weight="700">${label}</text></svg>`;
 }
 
 export function eyeIcon(): string {
