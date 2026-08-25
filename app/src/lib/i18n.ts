@@ -489,6 +489,18 @@ const messages = {
     en: "{provider} denied this model to the API key you provided. check the model permission and account region.",
     zh: "{provider} 拒绝您提供的 API Key 访问该模型。请检查模型权限和账号区域。",
   },
+  "task.apiErrorModelNotActivatedTitle": {
+    en: "selected model is not enabled",
+    zh: "所选模型尚未开通",
+  },
+  "task.apiErrorModelNotActivated": {
+    en: "the selected model is not enabled for the current {provider} account. this task has stopped and will not retry automatically. enable the model in the provider console, or switch to an enabled model and send the task again.",
+    zh: "当前 {provider} 账号尚未开通所选模型。本次任务已停止，不会自动重试。请先在模型服务商控制台开通该模型，或在右上角模型菜单切换到已开通的模型后重新发送。",
+  },
+  "task.apiErrorModelNotActivatedOwnKey": {
+    en: "the account for your {provider} API key does not have the selected model enabled. this task has stopped and will not retry automatically. enable the model in the provider console, or use an enabled model or API key and send the task again.",
+    zh: "您提供的 {provider} API Key 对应账号尚未开通所选模型。本次任务已停止，不会自动重试。请先在模型服务商控制台开通该模型，或更换已开通的模型/API Key 后重新发送。",
+  },
   "task.apiErrorRateLimitTitle": { en: "model requests are too frequent", zh: "模型请求过于频繁" },
   "task.apiErrorRateLimit": {
     en: "{provider} is rate limiting requests. wait briefly and send the task again, or switch models.",
@@ -722,6 +734,7 @@ const ownKeyMessages: Partial<Record<MessageKey, MessageKey>> = {
   "task.apiErrorBalance": "task.apiErrorBalanceOwnKey",
   "task.apiErrorUsageLimit": "task.apiErrorUsageLimitOwnKey",
   "task.apiErrorForbidden": "task.apiErrorForbiddenOwnKey",
+  "task.apiErrorModelNotActivated": "task.apiErrorModelNotActivatedOwnKey",
   "task.apiErrorRateLimit": "task.apiErrorRateLimitOwnKey",
 };
 
@@ -746,10 +759,22 @@ export function formatTaskApiError(error: string): TaskApiErrorPresentation {
   const status = parsed.status;
   const signal = parsed.signal;
   const explicitCode = parsed.code || parsed.type;
+  const entitlementCode = `${parsed.code} ${parsed.type}`.toLowerCase();
+  const detail = parsed.message.toLowerCase();
+  const modelNotActivated = (status === 403 || status === 404)
+    && (
+      /\bmodel[_-]?not[_-]?(?:activated|open)\b/.test(entitlementCode)
+      || /model (?:is )?not (?:activated|enabled|open)|not (?:activated|enabled|opened) (?:the )?model/.test(detail)
+      || /模型(?:尚未|未)开通|(?:尚未|未)开通(?:此|该|所选)?模型/.test(detail)
+    );
   let fallbackCode: string;
   let titleKey: MessageKey;
   let messageKey: MessageKey;
-  if (status === 401 || /auth|unauthor|invalid.*(?:api|x-api).*key/.test(signal)) {
+  if (modelNotActivated) {
+    titleKey = "task.apiErrorModelNotActivatedTitle";
+    messageKey = "task.apiErrorModelNotActivated";
+    fallbackCode = "model_not_activated";
+  } else if (status === 401 || /auth|unauthor|invalid.*(?:api|x-api).*key/.test(signal)) {
     titleKey = "task.apiErrorAuthTitle";
     messageKey = "task.apiErrorAuth";
     fallbackCode = "authentication_error";
@@ -863,6 +888,7 @@ interface ParsedTaskApiError {
   statusText: string;
   code: string;
   type: string;
+  message: string;
   detail: string;
   requestId: string;
   signal: string;
@@ -887,7 +913,8 @@ function parseTaskApiError(error: string): ParsedTaskApiError {
   const status = Number.isFinite(parsedStatus) ? parsedStatus : null;
   const code = fields.get("code") || embedded.code || "";
   const type = fields.get("type") || embedded.type || "";
-  const detail = fields.get("message") || embedded.message || raw;
+  const message = fields.get("message") || embedded.message || "";
+  const detail = message || raw;
   const requestId = fields.get("request_id") || embedded.request_id || "";
   return {
     provider: providerLabel(providerValue),
@@ -896,6 +923,7 @@ function parseTaskApiError(error: string): ParsedTaskApiError {
     statusText,
     code,
     type,
+    message,
     detail,
     requestId,
     signal: `${code} ${type} ${detail} ${raw}`.toLowerCase(),
