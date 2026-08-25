@@ -24,7 +24,7 @@ const LEGACY_EVIDENCE_HEADING: &str = "# Earlier tool evidence";
 /// verbatim at the front; the last `keep_recent` messages remain verbatim
 /// (widened backward when the window would open on a tool_result message, so
 /// tool_use/tool_result pairs never split); older tool outputs become artifact
-/// locators. Follow-up runs (`anchor_user_index > 0`) also get a short task
+/// locators. Follow-up runs (`is_follow_up`) also get a short task
 /// reminder adjacent to the recent tail. `anchor_user_index` is updated to the
 /// anchor's new position after a rewrite so a later compaction in the same run
 /// cannot accidentally pin a tool message; `is_follow_up` remains stable so
