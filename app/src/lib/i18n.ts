@@ -387,6 +387,10 @@ const messages = {
   "task.you": { en: "you", zh: "你" },
   "task.working": { en: "working…", zh: "运行中…" },
   "task.activityLabel": { en: "activity", zh: "运行过程" },
+  "task.interruptedAppClosed": {
+    en: "the app was closed before this task finished.",
+    zh: "应用在任务完成前已关闭。",
+  },
   "task.searchLabel": { en: "search", zh: "搜索" },
   "task.progressReading": { en: "reading", zh: "读取笔记" },
   "task.progressOcr": { en: "reading images", zh: "识别图片文字" },
@@ -432,6 +436,10 @@ const messages = {
   "task.preflightBrowserRemote": {
     en: "socai could not connect to the hosted browser. check your network and socai account, then try again.",
     zh: "socai 无法连接云端浏览器。请检查网络和 socai 账号状态，然后重试。",
+  },
+  "task.preflightBrowserRemoteQuota": {
+    en: "this device has used up today's hosted browser time. try again tomorrow, or switch the browser source to a local chrome in settings.",
+    zh: "本设备今日的云端浏览器时长已用完。请明天再试，或在设置中将浏览器来源切换为本地 chrome。",
   },
   "task.preflightXhsLogin": {
     en: "xiaohongshu is signed out in the connected chrome profile. complete sign-in there, then try again.",
@@ -728,6 +736,7 @@ const taskPreflightMessages = {
   preflight_browser_config: "task.preflightBrowserConfig",
   preflight_browser: "task.preflightBrowser",
   preflight_browser_remote: "task.preflightBrowserRemote",
+  preflight_browser_remote_quota: "task.preflightBrowserRemoteQuota",
   preflight_xhs_login: "task.preflightXhsLogin",
   preflight_xhs_session: "task.preflightXhsSession",
 } as const satisfies Record<string, MessageKey>;
@@ -1111,6 +1120,15 @@ export function setTimezone(timezone: string): void {
 
 export function taskStatusLabel(status: TaskStatusKey): string {
   return taskStatusLabels[status][currentLanguage];
+}
+
+export function formatTaskInterruptionMessage(message: string): string {
+  const appClosed = "app was closed before this task finished";
+  const normalized = message.trim().toLowerCase();
+  if (normalized === appClosed || normalized === `[task interrupted: ${appClosed}]`) {
+    return t("task.interruptedAppClosed");
+  }
+  return message;
 }
 
 export function formatTabs(count: number): string {

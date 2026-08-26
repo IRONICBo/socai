@@ -1113,16 +1113,38 @@ body.has-paper > * { position: relative; z-index: 1; }
 }
 .task-row-open:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .task-row-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 18px;
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
   color: var(--fg-soft);
 }
+.task-row-glyph-queued::before,
+.task-row-glyph-running::before {
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border: 1px solid var(--fg-faint);
+  border-radius: 50%;
+  content: "";
+}
 .task-row-glyph-running {
   color: var(--ink-0);
-  animation: pulse 1.4s ease-in-out infinite;
+}
+.task-row-glyph-running::before {
+  border-color: var(--line-strong);
+  border-top-color: var(--ink-0);
+  animation: task-row-spin 0.8s linear infinite;
 }
 .task-row-glyph-failed { color: var(--status-error-fg); }
+@keyframes task-row-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .task-row-glyph-running::before { animation: pulse 1.4s ease-in-out infinite; }
+}
 .task-row-main {
   display: flex;
   min-width: 0;

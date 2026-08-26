@@ -10,8 +10,8 @@
 //!   · the answer inline as rich markdown with note citations — no separate
 //!     panel, no "jump to answer" bridge
 //! The same chat composer serves both faces: pinned under the thread in
-//! "reply" mode (disabled while the task runs — the app owns a single agent
-//! slot), and centered with the hero in the new-task compose pane
+//! "reply" mode (disabled while that conversation runs), and centered with the
+//! hero in the new-task compose pane
 //! (renderComposePane), which the connect overlay masks until chrome is up.
 //!
 //! Rendering only; state and bindings live in tasks.ts.
@@ -21,6 +21,8 @@ import { esc } from "../lib/html";
 import {
   formatStepCount,
   formatTaskApiError,
+  formatTaskCommandErrorPresentation,
+  formatTaskInterruptionMessage,
   formatTaskTimestamp,
   formatTokenUsage,
   isTaskApiError,
@@ -291,7 +293,11 @@ function renderTurn(
   if (isLast) {
     const finishedAt = task.finished_at ? formatTaskTimestamp(task.finished_at) : null;
     const apiError = taskApiError(task);
-    if (apiError) {
+    const commandError = task.error ? formatTaskCommandErrorPresentation(task.error) : null;
+    if (commandError) {
+      answer = renderTaskCommandErrorCard(commandError);
+      if (finishedAt) metaBits.push(finishedAt);
+    } else if (apiError) {
       answer = renderTaskApiErrorCard(apiError);
       if (finishedAt) metaBits.push(finishedAt);
     } else if (task.final_text) {
@@ -314,7 +320,10 @@ function renderTurn(
         metaBits.push(t("billing.pointsUsed", { points: metrics.pointsUsed }));
       }
     } else if (task.error) {
-      answer = `<pre class="conv-error">${esc(task.error)}</pre>`;
+      const error = task.status === "interrupted"
+        ? formatTaskInterruptionMessage(task.error)
+        : task.error;
+      answer = `<pre class="conv-error">${esc(error)}</pre>`;
       if (finishedAt) metaBits.push(finishedAt);
     }
   } else if (answerText != null) {
@@ -537,7 +546,9 @@ export function renderEventRow(ev: AgentTaskEventPayload): string {
   const progressKey = ev.kind === "tool_progress" ? `${ev.id ?? ""}:${ev.phase ?? ""}` : "";
   const progressAttr = progressKey ? ` data-tool-progress="${esc(progressKey)}"` : "";
   if (ev.kind === "api_error") return renderTaskApiErrorEvent(ev);
-  const text = ev.kind === "tool_progress" ? toolProgressText(ev) : ev.text;
+  const text = ev.kind === "tool_progress"
+    ? toolProgressText(ev)
+    : formatTaskInterruptionMessage(ev.text);
   return `<div class="act-row act-row--${esc(ev.kind)}"${progressAttr}><span class="act-row__glyph" aria-hidden="true">${eventGlyph(ev.kind)}</span><span class="act-row__text">${esc(text)}</span></div>`;
 }
 
@@ -555,6 +566,19 @@ function renderTaskApiErrorEvent(ev: AgentTaskEventPayload): string {
 
 function renderTaskApiErrorCard(error: string): string {
   const presentation = formatTaskApiError(error);
+  return `<div class="task-api-error-card" role="alert">
+    <div class="task-api-error-card__heading">
+      <i class="runtime-error-notice__dot" aria-hidden="true"></i>
+      <p class="task-api-error-card__title">${esc(presentation.title)}</p>
+    </div>
+    <p class="task-api-error-card__message">${esc(presentation.message)}</p>
+    <p class="task-api-error-card__meta">${esc(presentation.meta)}</p>
+  </div>`;
+}
+
+function renderTaskCommandErrorCard(
+  presentation: NonNullable<ReturnType<typeof formatTaskCommandErrorPresentation>>,
+): string {
   return `<div class="task-api-error-card" role="alert">
     <div class="task-api-error-card__heading">
       <i class="runtime-error-notice__dot" aria-hidden="true"></i>
