@@ -242,11 +242,18 @@ fn process_alive(pid: i32) -> bool {
 }
 
 /// Resolve the chrome/chromium executable: explicit env override first
-/// (`SOCAI_CHROME_EXECUTABLE`, then `CHROME`), then well-known per-OS install
-/// locations.
+/// (`SOCAI_CHROME_EXECUTABLE`, then `CHROME`), then Windows App Paths, then
+/// well-known per-OS install locations.
 pub(crate) fn find_chrome_executable() -> Option<PathBuf> {
     if let Some(path) = chrome_executable_override() {
         return Some(path);
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(found) = registered_chrome_executables()
+        .into_iter()
+        .find(|path| path.exists())
+    {
+        return Some(found);
     }
     if let Some(found) = default_chrome_executables()
         .into_iter()
@@ -296,11 +303,55 @@ fn default_chrome_executables() -> Vec<PathBuf> {
         "microsoft-edge",
         "brave-browser",
     ];
-    let roots = ["/usr/bin", "/usr/local/bin", "/snap/bin", "/opt/google/chrome"];
+    let roots = [
+        "/usr/bin",
+        "/usr/local/bin",
+        "/snap/bin",
+        "/opt/google/chrome",
+    ];
     let mut out = Vec::new();
     for root in roots {
         for name in names {
             out.push(PathBuf::from(root).join(name));
+        }
+    }
+    out
+}
+
+#[cfg(target_os = "windows")]
+fn registered_chrome_executables() -> Vec<PathBuf> {
+    use winreg::enums::{
+        HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
+    };
+    use winreg::RegKey;
+
+    let roots = [
+        RegKey::predef(HKEY_CURRENT_USER),
+        RegKey::predef(HKEY_LOCAL_MACHINE),
+    ];
+    let views = [KEY_READ | KEY_WOW64_64KEY, KEY_READ | KEY_WOW64_32KEY];
+    let executable_names = ["chrome.exe", "chromium.exe", "msedge.exe", "brave.exe"];
+    let mut out = Vec::new();
+
+    for executable_name in executable_names {
+        let subkey =
+            format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{executable_name}");
+        for root in &roots {
+            for flags in views {
+                let Ok(key) = root.open_subkey_with_flags(&subkey, flags) else {
+                    continue;
+                };
+                let Ok(value) = key.get_value::<String, _>("") else {
+                    continue;
+                };
+                let value = value.trim().trim_matches('"');
+                if !value.is_empty() {
+                    let path = PathBuf::from(value);
+                    if !out.contains(&path) {
+                        out.push(path);
+                    }
+                }
+            }
         }
     }
     out

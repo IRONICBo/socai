@@ -35,6 +35,9 @@ symphonia = { version = "0.5", default-features = false, features = ["isomp4"] }
 [target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
 oar-ocr = "0.7"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.55"
+
 [dev-dependencies]
 tracing-subscriber.workspace = true
 tempfile = "3"

@@ -123,7 +123,7 @@ pub async fn wait_for_existing_chrome_endpoint(
     }
 }
 
-/// Open the chrome://inspect remote-debugging page in the user's default
+/// Open the chrome://inspect remote-debugging page in the user's installed
 /// chrome for the existing-browser attach flow.
 pub fn open_remote_debugging_page() -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
@@ -135,11 +135,26 @@ pub fn open_remote_debugging_page() -> anyhow::Result<()> {
         .arg(INSPECT_URL)
         .status()?;
     #[cfg(target_os = "windows")]
-    let status = std::process::Command::new("cmd")
-        .args(["/C", "start", "", INSPECT_URL])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("chrome could not open the remote debugging page");
+    {
+        use anyhow::Context;
+
+        let executable = super::launch::find_chrome_executable().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no chrome/chromium executable found. install Google Chrome, or set \
+                 SOCAI_CHROME_EXECUTABLE / CHROME to its path."
+            )
+        })?;
+        std::process::Command::new(&executable)
+            .arg(INSPECT_URL)
+            .spawn()
+            .with_context(|| format!("failed to launch chrome at {}", executable.display()))?;
+        return Ok(());
+    }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        if !status.success() {
+            anyhow::bail!("chrome could not open the remote debugging page");
+        }
     }
     Ok(())
 }
