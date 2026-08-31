@@ -26,6 +26,7 @@ struct AgentTaskRegistryInner {
     abort_handles: HashMap<String, AbortHandle>,
     timeline_next_seq: HashMap<String, u64>,
     timeline_locks: HashMap<String, Arc<Mutex<()>>>,
+    recovered_interrupted_tasks: Vec<AgentTaskSnapshot>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -66,8 +67,10 @@ impl Default for AgentTaskRegistry {
     fn default() -> Self {
         let mut tasks = load_task_index();
         let interrupted_at = now_ms();
+        let mut recovered_interrupted_tasks = Vec::new();
         for task in &mut tasks {
             if matches!(task.status.as_str(), "queued" | "running") {
+                let started = task.started_at.is_some();
                 task.status = "interrupted".into();
                 task.finished_at = Some(interrupted_at);
                 task.error = Some("app was closed before this task finished".into());
@@ -96,6 +99,9 @@ impl Default for AgentTaskRegistry {
                         );
                     }
                 }
+                if started {
+                    recovered_interrupted_tasks.push(task.clone());
+                }
             }
         }
         let next_seq = tasks.len() as u64;
@@ -109,6 +115,7 @@ impl Default for AgentTaskRegistry {
                 abort_handles: HashMap::new(),
                 timeline_next_seq: HashMap::new(),
                 timeline_locks: HashMap::new(),
+                recovered_interrupted_tasks,
             })),
             runner_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_AGENT_TASKS)),
         }
@@ -127,6 +134,17 @@ fn persisted_run_task(run_dir: &str) -> Option<String> {
 }
 
 impl AgentTaskRegistry {
+    /// Return running tasks recovered as interrupted during startup exactly
+    /// once. Their start event was already captured by the previous process;
+    /// the new process uses this queue to close that telemetry lifecycle.
+    pub(crate) async fn take_recovered_interrupted_tasks(&self) -> Vec<AgentTaskSnapshot> {
+        let recovered = {
+            let mut guard = self.inner.lock().await;
+            std::mem::take(&mut guard.recovered_interrupted_tasks)
+        };
+        recovered.into_iter().map(hydrate_task_snapshot).collect()
+    }
+
     pub(crate) async fn create(
         &self,
         task: String,

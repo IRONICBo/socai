@@ -189,7 +189,7 @@ and model in use are captured on `socai_agent_task_start`.
 | `socai_subscription_checkout` | A WeChat Pay or Alipay order is created or fails | `provider`, `plan_id`, `outcome`, `order_id`, `amount_fen`, `points`, `duration_days`, `error` |
 | `socai_subscription_paid` | Polling first observes a paid subscription order | `order_id`, `amount_fen`, `added_points`, `duration_days`, `pro_active_until` |
 | `socai_agent_task_start` | A task begins running | `task_id`, `provider`, `model`, `task_len`, `task_text` |
-| `socai_agent_task_end` | A task reaches a terminal state | `task_id`, `run_id`, `provider`, `model`, `outcome`, `steps`, token/cache usage, estimated cost breakdown, authoritative `points_used` when settlement completes, `duration_ms`, `error` |
+| `socai_agent_task_end` | A task reaches a terminal state, including a previously running task recovered as interrupted on the next startup | `task_id`, `run_id`, `provider`, `model`, `outcome`, `steps`, token/cache usage, estimated cost breakdown, authoritative `points_used` when settlement completes, `duration_ms`, `error`, and `recovered_on_startup` for a recovered lifecycle |
 | `socai_tool_call` | Each tool call completes | `task_id`, `run_id`, `tool_name`, `turn`, `sequence`, `duration_ms`, `ok`, `error`, query/result summaries, and bounded unexpected-page diagnostics when present |
 | `socai_feishu_export` | A Feishu export completes/fails, including user-visible setup failures before the native export command starts | `task_id`, `run_id`, `destination`, optional `stage`, `outcome`, `duration_ms`, `error`; chat sends also include privacy-safe CLI failure metadata (`cli_exit_code`, `cli_error_type`, `cli_error_subtype`, `cli_error_code`, `cli_log_id`, `cli_update_available`) and `message_id_present` |
 | `socai_server_payment_callback` | The backend accepts, rejects, or fails a merchant callback | `provider`, `stage`, `outcome`, `order_id`, `amount_fen`, `added_points`, `duration_days`, `error` |
@@ -226,6 +226,7 @@ profile, document/chat ID, URL, or credential is reported.
 | `cost_pricing_source` | string | Model catalog pricing provenance. |
 | `task_len` | number | Agent prompt length in Unicode scalar values. |
 | `task_text` | string | Full agent prompt. Always sent on desktop; see privacy boundaries. |
+| `recovered_on_startup` | boolean | Present and true when startup recovery emits the terminal event for a task left running by the previous process. |
 | `turn` / `sequence` | number | Position of a tool call within the run. |
 | `destination` | string | Feishu export target: `document`, `chat`, or `setup` for failures before a destination can be used. |
 | `stage` | string | Feishu operation stage, such as `load_accounts`, `connect_account`, `prepare_document`, `export_document`, `load_chats`, or `send_chat`. |

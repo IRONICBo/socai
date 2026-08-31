@@ -152,9 +152,34 @@ pub fn run() {
             let handle = app.handle().clone();
             let media_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
-                // A graceful app shutdown marks active tasks interrupted in
-                // tasks.json before this process starts. If its trace drop
-                // guard finished during shutdown, recover and upload it now.
+                // Startup recovery marks tasks left running by the previous
+                // process as interrupted. Their start telemetry already
+                // exists, so close each lifecycle once before uploading any
+                // trace that became ready during shutdown.
+                for snapshot in tasks.take_recovered_interrupted_tasks().await {
+                    let interruption_reason = snapshot
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "app was closed before this task finished".into());
+                    telemetry.capture(
+                        "socai_agent_task_end",
+                        json!({
+                            "task_id": snapshot.task_id,
+                            "provider": snapshot.provider,
+                            "run_id": snapshot.run_id,
+                            "model": snapshot.model,
+                            "outcome": "interrupted",
+                            "steps": snapshot.steps,
+                            "input_tokens": snapshot.input_tokens,
+                            "output_tokens": snapshot.output_tokens,
+                            "points_used": snapshot.points_used,
+                            "duration_ms": duration_ms(snapshot.started_at, snapshot.finished_at),
+                            "error": crate::telemetry::short_error(&interruption_reason),
+                            "recovered_on_startup": true,
+                        }),
+                    );
+                }
+
                 for snapshot in tasks.list().await {
                     if snapshot.status == "interrupted" {
                         if let Some(run_dir) = snapshot.run_dir.as_deref() {
