@@ -176,6 +176,45 @@ pub fn summarize_tool_result(value: &Value) -> Map<String, Value> {
     props
 }
 
+/// Summarize the model-visible content blocks emitted by a trusted site tool.
+/// Local tools such as `read_file` and `shell` may return arbitrary user JSON,
+/// so their text blocks must remain opaque to telemetry.
+pub fn summarize_site_tool_result(tool_name: &str, value: &Value) -> Map<String, Value> {
+    if !is_site_tool_result(tool_name) {
+        return Map::new();
+    }
+    result_json_from_content_blocks(value)
+        .as_ref()
+        .map(summarize_tool_result)
+        .unwrap_or_default()
+}
+
+pub(crate) fn is_site_tool_result(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "search" | "get_notes" | "author_scan" | "page_state"
+    )
+}
+
+/// Desktop and trace events serialize a tool result as model-visible content:
+/// `[{"type":"text","text":"<tool JSON>"}, ...]`. Parse only a complete
+/// JSON text block after the caller has established that the tool is a site
+/// tool. Non-JSON prose and image blocks stay opaque.
+fn result_json_from_content_blocks(value: &Value) -> Option<Value> {
+    let blocks = value.as_array()?;
+    blocks.iter().find_map(|block| {
+        let block = block.as_object()?;
+        if block.get("type").and_then(Value::as_str) != Some("text") {
+            return None;
+        }
+        let text = block.get("text").and_then(Value::as_str)?.trim();
+        if !(text.starts_with('{') || text.starts_with('[')) {
+            return None;
+        }
+        serde_json::from_str(text).ok()
+    })
+}
+
 fn find_string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     match value {
         Value::Object(map) => map
@@ -295,7 +334,7 @@ mod tests {
     #[test]
     fn result_summary_extracts_safe_counts_without_copying_text() {
         let page_ocr = "限".repeat(PAGE_OCR_MAX_CHARS + 1);
-        let props = summarize_tool_result(&json!({
+        let result = json!({
             "run_dir": "/tmp/socai-run",
             "data": {
                 "ok": false,
@@ -319,7 +358,8 @@ mod tests {
                     { "skipped": true, "comments": ["must not be copied"] }
                 ]
             }
-        }));
+        });
+        let props = summarize_tool_result(&result);
         assert_eq!(props.get("result_ok"), Some(&json!(false)));
         assert_eq!(props.get("cards_count"), Some(&json!(2)));
         assert_eq!(props.get("search_cards_count"), Some(&json!(3)));
@@ -364,5 +404,32 @@ mod tests {
         );
         assert!(!props.contains_key("body"));
         assert!(!props.contains_key("comments"));
+
+        let content = json!([
+            { "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() },
+            { "type": "image", "media_type": "image/png" }
+        ]);
+        assert_eq!(summarize_site_tool_result("search", &content), props);
+
+        let hostile_local_json = json!([
+            {
+                "type": "text",
+                "text": r#"{"ok":false,"reason":"private user value","page_ocr_text":"private file contents","recovery_tool":"private command"}"#
+            }
+        ]);
+        assert!(summarize_site_tool_result("read_file", &hostile_local_json).is_empty());
+        assert!(summarize_site_tool_result("shell", &hostile_local_json).is_empty());
+        assert!(!is_site_tool_result("read_file"));
+        assert!(!is_site_tool_result("shell"));
+        assert!(summarize_site_tool_result(
+            "search",
+            &json!([{ "type": "image", "media_type": "image/png" }])
+        )
+        .is_empty());
+        assert!(summarize_site_tool_result(
+            "search",
+            &json!([{ "type": "text", "text": "ordinary non-JSON output" }])
+        )
+        .is_empty());
     }
 }

@@ -21,7 +21,7 @@ use socai_core::runtime::{
 use socai_core::sites::xhs::{XhsHistoryStore, XhsPageRuntime};
 use socai_core::sites::{find_site, SiteSpec};
 use socai_core::telemetry::query_text_enabled;
-use socai_core::telemetry::tool_call::{summarize_tool_args, summarize_tool_result};
+use socai_core::telemetry::tool_call::{summarize_site_tool_result, summarize_tool_args};
 use socai_core::telemetry::trace::mark_run_trace_status;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -2861,14 +2861,14 @@ fn pump_agent_task_events(
                     props.insert("duration_ms".into(), json!(tool_duration_ms));
                     props.insert("ok".into(), json!(error.is_none()));
                     props.insert("error".into(), json!(error.as_deref().map(short_error)));
-                    // Same shared summarizer the CLI daemon uses: the search
-                    // query is lifted into query_text/query_len (gated by
-                    // query_text_enabled) and every other arg folds into
-                    // metadata; result counts and bounded unexpected-page OCR
-                    // diagnostics are extracted from the output. Note bodies
-                    // and comments are never included.
+                    // The search query is lifted into query_text/query_len
+                    // (gated by query_text_enabled), and every other arg folds
+                    // into metadata. Trusted site results are decoded from the
+                    // desktop content blocks before the shared summarizer
+                    // extracts counts and bounded diagnostics. Local tool
+                    // output, note bodies, and comments are never included.
                     props.extend(summarize_tool_args(input, query_text_enabled()));
-                    props.extend(summarize_tool_result(content));
+                    props.extend(summarize_site_tool_result(name, content));
                     telemetry.capture("socai_tool_call", Value::Object(props));
                 }
                 _ => {}
