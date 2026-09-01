@@ -1,0 +1,19 @@
+{
+  "id": "@socai-io/dsh-socai",
+  "version": "0.1.0",
+  "main": "./lib/index.js",
+  "description": "socai for DeepSeek Harness: typed Xiaohongshu research tools backed by the local socai CLI",
+  "engines": {
+    "dsh": "0.1.1-rc.2 || 0.1.2-alpha.2"
+  },
+  "contributes": {
+    "tools": [
+      "socai_xhs_search",
+      "socai_xhs_author",
+      "socai_xhs_get_notes"
+    ],
+    "skills": [
+      "socai-xhs-research"
+    ]
+  }
+}

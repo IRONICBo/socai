@@ -1,0 +1,4 @@
+# dsh bundle patch: insert the socai plugin into an installed profile.
+- insert:
+    - id: dsh-socai
+      name: '@socai-io/dsh-socai'
