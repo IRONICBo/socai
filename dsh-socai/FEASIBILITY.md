@@ -73,6 +73,8 @@ more likely to retain a plugin that provides immediate, inspectable value.
   requires a repository to be at least one day old and to have at least ten
   commits. Do not manufacture empty commits to bypass that anti-spam gate;
   submit after the standalone repository satisfies it through normal work.
+  The `v0.1.0` GitHub Release provides a version-independent
+  `dsh-socai.tgz` asset suitable for the registry's optional `tarball` field.
 - The independent DSH Plugin Registry at `dshplugin.app` has a separate manual
   quality-gate submission form. Treat it as an additional distribution channel,
   not an official DeepSeek endorsement.
@@ -107,6 +109,9 @@ more likely to retain a plugin that provides immediate, inspectable value.
 - `publint` passes, the npm tarball contains only runtime/package assets, and
   both a local-directory install and packed-tarball install boot in temporary
   DSH profiles against `0.1.2-alpha.2`.
+- A fresh `0.1.1-rc.2` profile installs directly from the public standalone Git
+  URL, composes the `dsh-socai` row, boots `dsh web`, and serves HTTP 200. The
+  standalone repository's CI passes against both supported DSH revisions.
 - The public npm CLI executable for `0.1.1-rc.2` was not treated as evidence:
   its one-off `npx` install was stopped after prolonged high resource use. The
   exact public source tag is validated separately instead.
@@ -125,6 +130,8 @@ more likely to retain a plugin that provides immediate, inspectable value.
 - [x] Add repository topics: `deepseek-harness`, `dsh-plugin`, `socai`,
   `xiaohongshu`.
 - [x] Add CI for both pinned supported DSH source revisions.
+- [x] Publish GitHub Release `v0.1.0` with the precompiled, stable-name
+  `dsh-socai.tgz` asset.
 - [ ] After the repository is at least one day old and has ten meaningful
   commits, submit one `tools` entry to `awesome-dsh-plugin`; its downstream
   `dsh-market` catalog updates automatically after merge.

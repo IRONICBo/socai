@@ -56,6 +56,12 @@ install does not need to run a package build script):
 dsh plugin --profile web add git+https://github.com/socai-io/dsh-socai.git
 ```
 
+For a pinned precompiled release artifact:
+
+```bash
+dsh plugin --profile web add https://github.com/socai-io/dsh-socai/releases/download/v0.1.0/dsh-socai.tgz
+```
+
 Restart `dsh web` after adding or updating a bundle.
 
 ## Configuration
