@@ -35,9 +35,6 @@ jobs:
         with:
           version: 11.7.0
 
-      - name: Install plugin development dependencies
-        run: npm install --ignore-scripts
-
       - name: Check out and build DeepSeek Harness
         env:
           DSH_REF: ${{ matrix.ref }}
@@ -54,5 +51,5 @@ jobs:
 
       - name: Validate package
         run: |
-          npx --yes publint
+          "$RUNNER_TEMP/deepseek-harness/node_modules/.bin/publint"
           npm pack --dry-run
