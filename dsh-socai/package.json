@@ -1,0 +1,71 @@
+{
+  "name": "@socai-io/dsh-socai",
+  "description": "socai for DeepSeek Harness: typed Xiaohongshu research tools backed by the local socai CLI",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "assets",
+    "cordis.patch.yml",
+    "dsh.plugin.json",
+    "README.md",
+    "FEASIBILITY.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22",
+    "dsh": "0.1.1-rc.2 || 0.1.2-alpha.2"
+  },
+  "dshx": {
+    "contributes": {
+      "tools": [
+        "socai_xhs_search",
+        "socai_xhs_author",
+        "socai_xhs_get_notes"
+      ],
+      "skills": [
+        "socai-xhs-research"
+      ]
+    }
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-skill": "0.1.1-rc.2 || 0.1.2-alpha.2",
+    "@deepseek-ai/dsh-system-prompt": "0.1.1-rc.2 || 0.1.2-alpha.2",
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2 || 0.1.2-alpha.2",
+    "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true },
+    "@deepseek-ai/dsh-skill": { "optional": true },
+    "@deepseek-ai/dsh-system-prompt": { "optional": true },
+    "@deepseek-ai/dsh-tools": { "optional": true },
+    "@deepseek-ai/schemastery": { "optional": true }
+  },
+  "devDependencies": {
+    "publint": "^0.3.21",
+    "tsdown": "^0.22.2",
+    "typescript": "^5.9.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/test.mjs",
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

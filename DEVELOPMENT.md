@@ -34,6 +34,22 @@ terminal, so non-interactive agents and scripts receive no progress output.
 Desktop and TUI agents call core tools directly and continue to receive the
 unchanged `ToolResult`.
 
+### DeepSeek Harness plugin
+
+The experimental DSH acquisition/integration bundle lives in
+[`dsh-socai/`](./dsh-socai/). It registers typed, read-first Xiaohongshu tools
+that call the existing local `socai` CLI; it does not duplicate browser logic
+or bypass SocAI authentication. Its compatibility evidence, rollout boundary,
+and remaining go-live items are in
+[`dsh-socai/FEASIBILITY.md`](./dsh-socai/FEASIBILITY.md).
+
+Run its isolated verification against a built DeepSeek Harness checkout:
+
+```bash
+cd dsh-socai
+DSH_CHECKOUT=/path/to/deepseek-harness node scripts/test.mjs
+```
+
 ### TUI
 
 Running `socai` with no subcommand opens the terminal UI (same `socai-cli`
