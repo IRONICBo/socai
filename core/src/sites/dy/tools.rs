@@ -7,7 +7,7 @@ use crate::agent::tool::ToolProgressSender;
 use crate::agent::{Backend as LlmProvider, Tool, ToolContext, ToolResult};
 use crate::cdp::PageSession;
 use crate::sites::content::{
-    author_scan_input_schema, content_platform_tools, empty_filters_schema, get_notes_input_schema,
+    author_scan_input_schema, empty_filters_schema, get_notes_input_schema,
     page_state_input_schema, search_input_schema, video_note_locator_schema, ContentCapabilities,
     ContentOperation, ContentPlatform,
 };
@@ -95,6 +95,13 @@ impl ContentPlatform for DouyinContentPlatform {
         }
     }
 
+    fn supports_operation(&self, operation: ContentOperation) -> bool {
+        matches!(
+            operation,
+            ContentOperation::Search | ContentOperation::PageState
+        )
+    }
+
     fn input_schema(&self, operation: ContentOperation) -> Value {
         match operation {
             ContentOperation::GetNotes => {
@@ -119,13 +126,6 @@ impl ContentPlatform for DouyinContentPlatform {
     }
 
     async fn search(&self, mut input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
-        if !input
-            .get("preview")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            return Ok(Self::unsupported(ContentOperation::Search));
-        }
         if let Some(num_notes) = input
             .as_object_mut()
             .and_then(|obj| obj.remove("num_notes"))
@@ -167,16 +167,6 @@ pub fn dy_content_platform(
     })
 }
 
-pub async fn dy_default_agent_tools(
-    page: Arc<PageSession>,
-    llm_provider: Arc<dyn LlmProvider>,
-) -> anyhow::Result<Vec<Arc<dyn Tool>>> {
-    Ok(content_platform_tools(dy_content_platform(
-        page,
-        Some(llm_provider),
-    )))
-}
-
 pub fn dy_agent_instructions(extra: &str) -> String {
     let base = DY_KNOWLEDGE.trim().to_string();
     let extra = extra.trim();
@@ -195,9 +185,9 @@ pub static DY_SITE: SiteSpec = SiteSpec {
     home_url: "",
     content_platform: dy_content_platform,
     agent_tools: |page, llm| Box::pin(dy_agent_tools(page, llm)),
-    default_agent_tools: Some(|page, llm| Box::pin(dy_default_agent_tools(page, llm))),
+    default_agent_tools: None,
     agent_instructions: dy_agent_instructions,
-    default_agent_instructions: Some(dy_agent_instructions),
+    default_agent_instructions: None,
     commands: &[
         SiteCommand {
             name: "search",

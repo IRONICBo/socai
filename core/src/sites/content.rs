@@ -55,6 +55,9 @@ pub trait ContentPlatform: Send + Sync {
     fn site_id(&self) -> &'static str;
     fn display_name(&self) -> &'static str;
     fn capabilities(&self) -> ContentCapabilities;
+    fn supports_operation(&self, _operation: ContentOperation) -> bool {
+        true
+    }
     fn input_schema(&self, operation: ContentOperation) -> Value;
 
     fn effective_input(&self, _operation: ContentOperation, input: &Value) -> Value {
@@ -139,6 +142,7 @@ pub fn content_platform_tools(platform: Arc<dyn ContentPlatform>) -> Vec<Arc<dyn
         ContentOperation::PageState,
     ]
     .into_iter()
+    .filter(|operation| platform.supports_operation(*operation))
     .map(|operation| {
         Arc::new(ContentPlatformTool::new(platform.clone(), operation)) as Arc<dyn Tool>
     })
