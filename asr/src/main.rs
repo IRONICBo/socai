@@ -17,6 +17,10 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 const PROTOCOL_VERSION: u32 = 1;
+const TARGET_SAMPLE_RATE: i32 = 16_000;
+const MAX_AUDIO_SECONDS: u64 = 60 * 60;
+const MAX_AUDIO_CHANNELS: usize = 8;
+const MAX_PACKET_FRAMES: u64 = 1_048_576;
 
 #[derive(Deserialize)]
 struct Request {
@@ -141,14 +145,7 @@ fn transcribe_file(
     paths: &ModelPaths,
     recognizer: &OfflineRecognizer,
 ) -> Result<String> {
-    let (samples, sample_rate) = decode_audio_file(path, max_seconds)?;
-    let samples = if sample_rate == 16_000 {
-        samples
-    } else {
-        let resampler = LinearResampler::create(sample_rate, 16_000)
-            .ok_or_else(|| anyhow!("failed to create {sample_rate} Hz to 16000 Hz resampler"))?;
-        resampler.resample(&samples, true)
-    };
+    let samples = decode_audio_file(path, max_seconds)?;
     if samples.is_empty() {
         anyhow::bail!("{} contains no decoded audio samples", path.display());
     }
@@ -230,7 +227,14 @@ fn decode_samples(recognizer: &OfflineRecognizer, samples: &[f32], transcripts: 
     }
 }
 
-fn decode_audio_file(path: &Path, max_seconds: u64) -> Result<(Vec<f32>, i32)> {
+fn decode_audio_file(path: &Path, max_seconds: u64) -> Result<Vec<f32>> {
+    if !(1..=MAX_AUDIO_SECONDS).contains(&max_seconds) {
+        anyhow::bail!("max_seconds must be between 1 and {MAX_AUDIO_SECONDS}, got {max_seconds}");
+    }
+    let max_samples = max_seconds
+        .checked_mul(TARGET_SAMPLE_RATE as u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .context("requested audio duration is too large")?;
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let stream = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -248,8 +252,9 @@ fn decode_audio_file(path: &Path, max_seconds: u64) -> Result<(Vec<f32>, i32)> {
     let mut format = probed.format;
     let (track_id, mut decoder) = audio_decoder(&mut *format)
         .ok_or_else(|| anyhow!("no supported audio track in {}", path.display()))?;
-    let mut mono = Vec::new();
+    let mut output = Vec::with_capacity(max_samples.min(4 * 1024 * 1024));
     let mut sample_rate = None;
+    let mut resampler = None;
 
     loop {
         let packet = match format.next_packet() {
@@ -273,24 +278,55 @@ fn decode_audio_file(path: &Path, max_seconds: u64) -> Result<(Vec<f32>, i32)> {
             Err(err) => return Err(err.into()),
         };
         let spec = *decoded.spec();
+        if !(8_000..=384_000).contains(&spec.rate) {
+            anyhow::bail!("unsupported audio sample rate {} Hz", spec.rate);
+        }
+        let channels = spec.channels.count();
+        if !(1..=MAX_AUDIO_CHANNELS).contains(&channels) {
+            anyhow::bail!("unsupported audio channel count {channels}");
+        }
+        if decoded.capacity() as u64 > MAX_PACKET_FRAMES {
+            anyhow::bail!(
+                "decoded audio packet is too large: {} frames",
+                decoded.capacity()
+            );
+        }
         let rate = spec.rate as i32;
         if sample_rate.is_some_and(|current| current != rate) {
             anyhow::bail!("audio sample rate changed in {}", path.display());
         }
-        sample_rate = Some(rate);
-        let mut buffer = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
-        buffer.copy_interleaved_ref(decoded);
-        let channels = spec.channels.count().max(1);
-        for frame in buffer.samples().chunks(channels) {
-            mono.push(frame.iter().copied().sum::<f32>() / frame.len() as f32);
-            if mono.len() >= max_seconds.saturating_mul(rate as u64) as usize {
-                return Ok((mono, rate));
+        if sample_rate.is_none() {
+            sample_rate = Some(rate);
+            if rate != TARGET_SAMPLE_RATE {
+                resampler = Some(
+                    LinearResampler::create(rate, TARGET_SAMPLE_RATE).ok_or_else(|| {
+                        anyhow!("failed to create {rate} Hz to {TARGET_SAMPLE_RATE} Hz resampler")
+                    })?,
+                );
             }
         }
+        let mut buffer = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
+        buffer.copy_interleaved_ref(decoded);
+        let mut mono = Vec::with_capacity(buffer.samples().len() / channels);
+        for frame in buffer.samples().chunks(channels) {
+            mono.push(frame.iter().copied().sum::<f32>() / frame.len() as f32);
+        }
+        let chunk = match &resampler {
+            Some(resampler) => resampler.resample(&mono, false),
+            None => mono,
+        };
+        let remaining = max_samples.saturating_sub(output.len());
+        output.extend(chunk.into_iter().take(remaining));
+        if output.len() >= max_samples {
+            return Ok(output);
+        }
     }
-    let rate =
-        sample_rate.ok_or_else(|| anyhow!("{} contains no decoded audio", path.display()))?;
-    Ok((mono, rate))
+    sample_rate.ok_or_else(|| anyhow!("{} contains no decoded audio", path.display()))?;
+    if let Some(resampler) = resampler {
+        let remaining = max_samples.saturating_sub(output.len());
+        output.extend(resampler.resample(&[], true).into_iter().take(remaining));
+    }
+    Ok(output)
 }
 
 fn audio_decoder(

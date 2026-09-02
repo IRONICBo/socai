@@ -2929,6 +2929,8 @@ pub struct DesktopConfig {
     output_dir: String,
     /// Resolved default run-artifact root (shown as the input placeholder).
     output_dir_default: String,
+    /// Local video-transcription model and bundled helper readiness.
+    asr: socai_core::media::AsrModelStatus,
 }
 
 #[tauri::command]
@@ -2945,7 +2947,25 @@ pub fn config_get() -> Result<DesktopConfig, String> {
         chrome_profile_dir_default: default_managed_profile_dir(),
         output_dir: config.runs.dir.unwrap_or_default(),
         output_dir_default: default_runs_root_display(),
+        asr: socai_core::media::asr_model_status().map_err(|err| format!("{err:#}"))?,
     })
+}
+
+#[tauri::command]
+pub fn asr_model_status() -> Result<socai_core::media::AsrModelStatus, String> {
+    socai_core::media::asr_model_status().map_err(|err| format!("{err:#}"))
+}
+
+#[tauri::command]
+pub async fn asr_model_install(
+    app: AppHandle,
+) -> Result<socai_core::media::AsrModelStatus, String> {
+    let progress_app = app.clone();
+    socai_core::media::install_asr_model(move |progress| {
+        let _ = progress_app.emit("asr:model-progress", progress);
+    })
+    .await
+    .map_err(|err| format!("{err:#}"))
 }
 
 #[tauri::command]

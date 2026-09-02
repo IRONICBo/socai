@@ -23,6 +23,7 @@ const VAD_FILE: &str = "silero_vad.onnx";
 const VAD_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx";
 const VAD_SHA256: &str = "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6";
+const VAD_BYTES: u64 = 643_854;
 const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize)]
@@ -207,7 +208,7 @@ where
     let staging = parent.join(format!(".{MODEL_ID}.install-{}", uuid::Uuid::new_v4()));
     let archive_for_unpack = archive.clone();
     let staging_for_unpack = staging.clone();
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    let extraction_result = tokio::task::spawn_blocking(move || -> Result<()> {
         std::fs::create_dir_all(&staging_for_unpack)?;
         let file = File::open(&archive_for_unpack)?;
         let decoder = BzDecoder::new(file);
@@ -217,7 +218,12 @@ where
         Ok(())
     })
     .await
-    .context("ASR model extraction task panicked")??;
+    .context("ASR model extraction task panicked")
+    .and_then(|result| result);
+    if let Err(error) = extraction_result {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(error);
+    }
 
     let staged_root = staging.join(MODEL_ID);
     let staged_paths = ModelPaths::from_root(staged_root.clone());
@@ -239,7 +245,7 @@ where
             VAD_URL,
             &staged_paths.vad,
             VAD_SHA256,
-            None,
+            Some(VAD_BYTES),
             "vad",
             &mut progress,
         )
@@ -487,20 +493,45 @@ where
         .send()
         .await?
         .error_for_status()?;
-    let total = response.content_length().or(expected_size);
+    if let (Some(actual), Some(expected)) = (response.content_length(), expected_size) {
+        if actual != expected {
+            anyhow::bail!(
+                "content length mismatch for {url}: expected {expected} bytes, got {actual}"
+            );
+        }
+    }
+    let total = expected_size.or(response.content_length());
     let mut stream = response.bytes_stream();
     let mut file = tokio::fs::File::create(&part).await?;
     let mut hasher = Sha256::new();
     let mut downloaded = 0u64;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
+        let next_downloaded = downloaded
+            .checked_add(chunk.len() as u64)
+            .context("ASR download byte count overflowed")?;
+        if expected_size.is_some_and(|limit| next_downloaded > limit) {
+            drop(file);
+            let _ = tokio::fs::remove_file(&part).await;
+            anyhow::bail!(
+                "download exceeded pinned size for {url}: expected at most {} bytes",
+                expected_size.unwrap_or_default()
+            );
+        }
         file.write_all(&chunk).await?;
         hasher.update(&chunk);
-        downloaded += chunk.len() as u64;
+        downloaded = next_downloaded;
         progress_event(progress, stage, downloaded, total);
     }
     file.flush().await?;
     drop(file);
+    if expected_size.is_some_and(|expected| downloaded != expected) {
+        let _ = tokio::fs::remove_file(&part).await;
+        anyhow::bail!(
+            "download size mismatch for {url}: expected {} bytes, got {downloaded}",
+            expected_size.unwrap_or_default()
+        );
+    }
     let digest = format!("{:x}", hasher.finalize());
     if digest != expected_sha256 {
         let _ = tokio::fs::remove_file(&part).await;

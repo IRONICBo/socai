@@ -182,6 +182,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          node scripts/prepare-sherpa-onnx-libs.mjs aarch64-apple-darwin x86_64-apple-darwin
           cargo build -p socai-cli --release --target aarch64-apple-darwin
           cargo build -p socai-cli --release --target x86_64-apple-darwin
           cargo build -p socai-asr --release --target aarch64-apple-darwin
@@ -716,6 +717,7 @@ jobs:
           SOCAI_PRO_BASE_URL: ${{ secrets.SOCAI_PRO_BASE_URL }}
         run: |
           $ErrorActionPreference = 'Stop'
+          node scripts/prepare-sherpa-onnx-libs.mjs x86_64-pc-windows-msvc
           cargo build -p socai-cli -p socai-asr --release
           $versionOutput = & .\target\release\socai.exe --version
           $versionOutput

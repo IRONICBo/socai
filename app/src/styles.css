@@ -863,6 +863,7 @@ body.has-paper > * { position: relative; z-index: 1; }
 .settings-field { display: flex; flex-direction: column; gap: 6px; }
 .settings-field-label { color: var(--fg-muted); }
 .settings-field-hint { margin: 0; line-height: 1.45; text-wrap: pretty; }
+.settings-asr-ready { color: var(--success, #2f7d4f); }
 .settings-input-mono { font-family: var(--font-mono); font-size: 12px; }
 .settings-path-row { display: flex; align-items: stretch; gap: var(--sp-2); }
 .settings-path-row .input-field { flex: 1; min-width: 0; }

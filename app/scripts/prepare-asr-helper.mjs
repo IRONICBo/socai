@@ -35,6 +35,11 @@ function build(target) {
 
 const target = explicitTarget || rustHost();
 if (target === "universal-apple-darwin") {
+  execFileSync(
+    process.execPath,
+    [path.join(REPO_DIR, "scripts", "prepare-sherpa-onnx-libs.mjs"), "aarch64-apple-darwin", "x86_64-apple-darwin"],
+    { cwd: REPO_DIR, stdio: "inherit" },
+  );
   const arm = build("aarch64-apple-darwin");
   const intel = build("x86_64-apple-darwin");
   const universal = path.join(BIN_DIR, "socai-asr-universal-apple-darwin");
@@ -42,5 +47,10 @@ if (target === "universal-apple-darwin") {
   chmodSync(universal, 0o755);
   console.log(`[socai-asr] ready ${path.relative(APP_DIR, universal)}`);
 } else {
+  execFileSync(
+    process.execPath,
+    [path.join(REPO_DIR, "scripts", "prepare-sherpa-onnx-libs.mjs"), target],
+    { cwd: REPO_DIR, stdio: "inherit" },
+  );
   build(target);
 }

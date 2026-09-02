@@ -100,6 +100,7 @@ If a prebuilt binary is unavailable for your platform, or you need a source buil
 ```bash
 git clone https://github.com/socai-io/socai.git
 cd socai
+node scripts/prepare-sherpa-onnx-libs.mjs
 cargo install --path asr --force
 cargo install --path cli --force
 ```

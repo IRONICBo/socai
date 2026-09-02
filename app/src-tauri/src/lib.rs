@@ -352,6 +352,8 @@ pub fn run() {
             commands::config_get,
             commands::config_set,
             commands::config_unset,
+            commands::asr_model_status,
+            commands::asr_model_install,
             commands::pro_activate,
             commands::auth_session,
             commands::auth_sms_send,

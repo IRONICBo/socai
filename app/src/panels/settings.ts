@@ -12,6 +12,7 @@
 //! display preference kept in localStorage via `setTimezone`.
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { ShellState } from "../main";
 import { esc } from "../lib/html";
 import {
@@ -31,6 +32,21 @@ interface DesktopConfig {
   chrome_profile_dir_default: string;
   output_dir: string;
   output_dir_default: string;
+  asr: AsrModelStatus;
+}
+
+interface AsrModelStatus {
+  model: string;
+  installed: boolean;
+  helper_available: boolean;
+  available: boolean;
+  archive_bytes: number;
+}
+
+interface AsrInstallProgress {
+  stage: "download" | "extract" | "vad" | "complete" | string;
+  downloaded_bytes: number;
+  total_bytes: number | null;
 }
 
 interface SettingsDraft {
@@ -70,6 +86,10 @@ export namespace settingsMenu {
   let draft: SettingsDraft | null = null;
   let status: SaveStatus = "";
   let inviteMessage = "";
+  let asrInstalling = false;
+  let asrInstallError = "";
+  let asrProgress: AsrInstallProgress | null = null;
+  let asrProgressListenerStarted = false;
   let statusTimer: number | null = null;
   let appVersion = "";
 
@@ -182,6 +202,7 @@ export namespace settingsMenu {
     return `
       <div class="topbar-popover settings-popover" role="dialog" aria-label="${esc(t("settings.title"))}">
         ${renderGeneralGroup(draft)}
+        ${renderAsrGroup(config)}
         ${renderOutputGroup(config, draft)}
         ${renderInviteGroup(draft)}
         ${renderStatus()}
@@ -268,6 +289,42 @@ export namespace settingsMenu {
     `;
   }
 
+  function renderAsrGroup(c: DesktopConfig): string {
+    const ready = c.asr.available;
+    const helperMissing = c.asr.installed && !c.asr.helper_available;
+    const progress = asrInstalling ? asrProgressLabel() : "";
+    return `
+      <section class="settings-group">
+        <p class="settings-group-label">${esc(t("settings.asr"))}</p>
+        <div class="settings-field">
+          <div class="settings-row">
+            <span class="t-small settings-row-label">${esc(c.asr.model)}</span>
+            ${
+              ready
+                ? `<span class="t-small settings-asr-ready">${esc(t("settings.asrReady"))}</span>`
+                : helperMissing
+                  ? `<span class="t-small result-error">${esc(t("settings.asrHelperMissing"))}</span>`
+                  : `<button type="button" class="btn-ghost btn-compact" data-settings-install-asr ${asrInstalling ? "disabled" : ""}>${esc(asrInstalling ? t("settings.asrInstalling") : t("settings.asrInstall"))}</button>`
+            }
+          </div>
+          <p class="t-small subtle settings-field-hint">${esc(t("settings.asrHint"))}</p>
+          ${progress ? `<p class="t-small subtle settings-field-hint">${esc(progress)}</p>` : ""}
+          ${asrInstallError ? `<p class="t-small result-error settings-field-hint">${esc(asrInstallError)}</p>` : ""}
+        </div>
+      </section>
+    `;
+  }
+
+  function asrProgressLabel(): string {
+    if (!asrProgress) return t("settings.asrPreparing");
+    if (asrProgress.stage === "extract") return t("settings.asrExtracting");
+    if (asrProgress.stage === "vad") return t("settings.asrFinalizing");
+    if (asrProgress.stage === "complete") return t("settings.asrReady");
+    const total = asrProgress.total_bytes ?? 0;
+    const percent = total > 0 ? Math.min(100, Math.floor((asrProgress.downloaded_bytes * 100) / total)) : 0;
+    return t("settings.asrDownloading", { percent });
+  }
+
   function renderStatus(): string {
     const text =
       status === "saving"
@@ -286,6 +343,13 @@ export namespace settingsMenu {
     onOpen: () => void = () => {},
     onInviteRedeemed: () => Promise<void> = async () => {},
   ): void {
+    if (!asrProgressListenerStarted) {
+      asrProgressListenerStarted = true;
+      void listen<AsrInstallProgress>("asr:model-progress", (event) => {
+        asrProgress = event.payload;
+        shell.rerender();
+      });
+    }
     document.getElementById("settings-toggle")?.addEventListener("click", (event) => {
       event.stopPropagation();
       if (!open) onOpen();
@@ -343,6 +407,9 @@ export namespace settingsMenu {
     });
     document.querySelector<HTMLButtonElement>("[data-settings-redeem-invite]")?.addEventListener("click", () => {
       void redeemInvite(shell, onInviteRedeemed);
+    });
+    document.querySelector<HTMLButtonElement>("[data-settings-install-asr]")?.addEventListener("click", () => {
+      void installAsrModel(shell);
     });
 
     document.querySelectorAll<HTMLButtonElement>("[data-settings-browse]").forEach((button) => {
@@ -448,6 +515,30 @@ export namespace settingsMenu {
       seedDraft();
       status = "";
       inviteMessage = t("settings.inviteInvalid");
+      shell.rerender();
+    }
+  }
+
+  async function installAsrModel(shell: ShellState): Promise<void> {
+    if (asrInstalling || config?.asr.available) return;
+    asrInstalling = true;
+    asrInstallError = "";
+    asrProgress = null;
+    shell.rerender();
+    try {
+      await invoke<AsrModelStatus>("asr_model_install");
+      await loadConfig();
+    } catch (err) {
+      console.error("asr_model_install failed:", err);
+      asrInstallError = t("settings.asrInstallFailed");
+      try {
+        await loadConfig();
+      } catch {
+        // Keep the install error visible when status refresh also fails.
+      }
+    } finally {
+      asrInstalling = false;
+      asrProgress = null;
       shell.rerender();
     }
   }
