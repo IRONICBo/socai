@@ -187,9 +187,9 @@ pub fn video_note_locator_schema() -> Value {
         "type": "object",
         "properties": {
             "note_id": { "type": "string", "description": "Platform video/content id." },
-            "url": { "type": "string", "description": "Canonical content URL when available." }
+            "url": { "type": "string", "description": "Canonical content URL returned by search or author_scan." }
         },
-        "required": ["note_id"],
+        "required": ["note_id", "url"],
         "additionalProperties": false
     })
 }
