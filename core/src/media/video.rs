@@ -295,10 +295,9 @@ impl MediaProcessor {
                 .await;
         }
 
-        // Inline transcription only when cloud ASR is enabled for this run;
-        // attempting it without an eligible hosted-agent session would stamp
-        // every enriched video with the same availability error.
-        if !source.is_empty() && self.config.use_cloud_asr {
+        // Inline transcription only when local ASR is enabled for this run;
+        // tool schemas hide this option until the model is installed.
+        if !source.is_empty() && self.config.use_local_asr {
             if let Some(map) = result.as_object_mut() {
                 map.remove("transcript_error");
             }

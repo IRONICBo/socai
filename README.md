@@ -100,6 +100,7 @@ If a prebuilt binary is unavailable for your platform, or you need a source buil
 ```bash
 git clone https://github.com/socai-io/socai.git
 cd socai
+cargo install --path asr --force
 cargo install --path cli --force
 ```
 
@@ -170,7 +171,7 @@ socai xhs get-notes \
 | `--preview` | Read only search-result or author-page post cards. |
 | `--download-media` | Download images and videos from opened posts and record local paths. |
 | `--ocr` | Run local OCR on post images or a video post's cover. |
-| `--transcribe-audio` | Download opened videos and transcribe speech; requires signing in and selecting socai agent. |
+| `--transcribe-audio` | Download opened videos and transcribe speech locally with Qwen3-ASR 0.6B Int8. |
 | `--filter <group=option>` | Apply a Xiaohongshu search-page filter; repeat to combine filters. |
 | `--pretty` | Pretty-print the final JSON result. |
 | `--debug-snapshot` | Save page DOM, accessibility trees, and screenshots for development diagnostics. |
@@ -193,6 +194,17 @@ socai xhs search "Shanghai weekend activities" \
   --filter note_type=图文 \
   --filter sort=最新
 ```
+
+### Local video transcription
+
+Install the local Qwen3-ASR model once before using `--transcribe-audio`:
+
+```bash
+socai asr install
+socai asr status --json
+```
+
+The compressed download is about 0.88 GB and the installed model uses about 0.95 GB. Audio stays on the device, and transcription does not require a socai account, credits, or an API key.
 
 ## Browser and login modes
 

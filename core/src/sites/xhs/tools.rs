@@ -83,7 +83,7 @@ pub fn xhs_tools_with_llm_provider(
     llm_provider: Option<Arc<dyn LlmProvider>>,
 ) -> Vec<Arc<dyn Tool>> {
     let history = Arc::new(XhsHistoryStore::open_default());
-    let asr_enabled = crate::cloud::hosted_llm_selected();
+    let asr_enabled = crate::media::local_asr_available();
     vec![
         Arc::new(GetNotesTool {
             page: page.clone(),
@@ -143,7 +143,7 @@ pub fn xhs_macro_tools_with_llm_provider(
     llm_provider: Option<Arc<dyn LlmProvider>>,
 ) -> Vec<Arc<dyn Tool>> {
     let history = Arc::new(XhsHistoryStore::open_default());
-    let asr_enabled = crate::cloud::hosted_llm_selected();
+    let asr_enabled = crate::media::local_asr_available();
     // The app/TUI agent interface always downloads note media so the offline
     // files are on hand for deeper analysis, and always OCRs every image; the
     // CLI keeps its --download-media / --ocr opt-ins via the full tool set above.
@@ -213,7 +213,7 @@ impl ContentPlatform for XhsContentPlatform {
             comment_replies: true,
             media_download: true,
             ocr: true,
-            audio_transcription: crate::cloud::hosted_llm_selected(),
+            audio_transcription: crate::media::local_asr_available(),
             cross_run_history: true,
             artifacts: true,
         }
@@ -256,13 +256,13 @@ impl ContentPlatform for XhsContentPlatform {
 
 /// XHS is the reference adapter and therefore owns product defaults for the
 /// shared content surface: media download and OCR are enabled for app/TUI
-/// calls, while ASR remains gated by the hosted-agent selection.
+/// calls, while ASR is exposed after its local model is installed.
 pub fn xhs_content_platform(
     page: Arc<PageSession>,
     llm_provider: Option<Arc<dyn LlmProvider>>,
 ) -> Arc<dyn ContentPlatform> {
     let history = Arc::new(XhsHistoryStore::open_default());
-    let asr_enabled = crate::cloud::hosted_llm_selected();
+    let asr_enabled = crate::media::local_asr_available();
     Arc::new(XhsContentPlatform {
         tools: vec![
             Arc::new(GetNotesTool {
@@ -378,7 +378,7 @@ pub static XHS_SITE: SiteSpec = SiteSpec {
                     key: "transcribe_audio",
                     long: Some("transcribe-audio"),
                     value_name: "TRANSCRIBE_AUDIO",
-                    help: "For video notes, transcribe audio while signed in with socai agent selected.",
+                    help: "For video notes, transcribe audio with the locally installed Qwen3-ASR model.",
                     required: false,
                     kind: ArgKind::Flag,
                 },
@@ -455,7 +455,7 @@ pub static XHS_SITE: SiteSpec = SiteSpec {
                     long: Some("transcribe-audio"),
                     value_name: "TRANSCRIBE_AUDIO",
                     help: "For opened video notes, download the video file and transcribe audio \
-                           while signed in with socai agent selected. Ignored with --preview.",
+                           with the locally installed Qwen3-ASR model. Ignored with --preview.",
                     required: false,
                     kind: ArgKind::Flag,
                 },
@@ -531,7 +531,7 @@ pub static XHS_SITE: SiteSpec = SiteSpec {
                     long: Some("transcribe-audio"),
                     value_name: "TRANSCRIBE_AUDIO",
                     help: "For opened video notes, download the video file and transcribe audio \
-                           while signed in with socai agent selected. Ignored with --preview.",
+                           with the locally installed Qwen3-ASR model. Ignored with --preview.",
                     required: false,
                     kind: ArgKind::Flag,
                 },
@@ -992,31 +992,30 @@ fn read_note_options(input: &Value) -> ReadNoteOptions {
     }
 }
 
-/// Tool args available only to signed-in users while socai agent is selected.
-const HOSTED_AGENT_ARG_KEYS: &[&str] = &["transcribe_audio"];
+/// Tool args available only after the local model has been installed.
+const LOCAL_ASR_ARG_KEYS: &[&str] = &["transcribe_audio"];
 
-/// Attached when an unavailable call asked for a hosted-agent-only argument,
-/// so the agent can relay the remedy instead of failing the whole call.
-const HOSTED_AGENT_SKIP_NOTE: &str = "video transcription requires a signed-in account \
-     with socai agent selected; the call ran without transcription.";
+/// Attached when a stale call requested ASR before local model installation.
+const LOCAL_ASR_SKIP_NOTE: &str = "video transcription requires the local Qwen3-ASR model; \
+     run `socai asr install`, then retry. The call ran without transcription.";
 
-/// Hide hosted-agent-only properties when the current session cannot use them.
-fn strip_hosted_agent_schema(schema: &mut Value) {
+/// Hide local-ASR properties until the current installation can use them.
+fn strip_unavailable_asr_schema(schema: &mut Value) {
     if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
-        for key in HOSTED_AGENT_ARG_KEYS {
+        for key in LOCAL_ASR_ARG_KEYS {
             props.remove(*key);
         }
     }
 }
 
-/// Drop hosted-agent-only args when unavailable (a stale conversation can
-/// still carry one). Returns whether the argument was actually requested.
-fn strip_hosted_agent_input(input: &mut Value) -> bool {
+/// Drop unavailable local-ASR args from stale conversations. Returns whether
+/// transcription was actually requested.
+fn strip_unavailable_asr_input(input: &mut Value) -> bool {
     let Some(obj) = input.as_object_mut() else {
         return false;
     };
     let mut requested = false;
-    for key in HOSTED_AGENT_ARG_KEYS {
+    for key in LOCAL_ASR_ARG_KEYS {
         requested |= obj
             .remove(*key)
             .and_then(|value| value.as_bool())
@@ -1025,14 +1024,14 @@ fn strip_hosted_agent_input(input: &mut Value) -> bool {
     requested
 }
 
-fn attach_hosted_agent_skip_note(payload: &mut Value, skipped: bool) {
+fn attach_local_asr_skip_note(payload: &mut Value, skipped: bool) {
     if !skipped {
         return;
     }
     if let Some(obj) = payload.as_object_mut() {
         obj.insert(
             "transcribe_audio_skipped".into(),
-            json!(HOSTED_AGENT_SKIP_NOTE),
+            json!(LOCAL_ASR_SKIP_NOTE),
         );
     }
 }
@@ -1068,8 +1067,7 @@ fn media_for(
 ) -> anyhow::Result<Option<MediaProcessor>> {
     if include_media || transcribe_audio {
         let mut media = MediaProcessor::for_run_dir(ctx.output_dir(), llm_provider)?;
-        media.set_cloud_asr(transcribe_audio);
-        media.set_billing_task_id(ctx.billing_task_id.as_deref());
+        media.set_local_asr(transcribe_audio);
         Ok(Some(media))
     } else {
         Ok(None)
@@ -1322,7 +1320,7 @@ async fn scan_card_note(
     // itself would incorrectly skip an upgrade requested later in the same
     // agent run (for example, a plain read followed by transcribe_audio=true).
     // In particular, that could reuse a pre-upgrade entity carrying the old
-    // ffmpeg transcription error instead of retrying through cloud ASR.
+    // ffmpeg transcription error instead of retrying through local ASR.
     let processed_in_run =
         !card.note_id.is_empty() && ctx.has_processed_note(&card.note_id, level, requested_media);
     if !card.note_id.is_empty()
@@ -1366,7 +1364,7 @@ async fn scan_card_note(
                 include_media,
                 download_media,
                 download_video_file: download_video_file_inline,
-                // Scans never transcribe inline: the caller runs cloud ASR in a
+                // Scans never transcribe inline: the caller runs local ASR in a
                 // background task (spawn_note_transcribe) so it overlaps the
                 // next note's read + download. The dedup check above still uses
                 // the real `transcribe_audio` flag, so a cache hit returns the
@@ -1690,14 +1688,12 @@ async fn join_note_ocr(
     timings
 }
 
-/// Max cloud ASR tasks in flight at once. Transcription is network-bound
-/// (upload + provider poll), so this bounds concurrent load on socai-server
-/// while still letting note N's transcription overlap the read + download of
-/// note N+1.
-const ASR_PIPELINE_CONCURRENCY: usize = 2;
+/// Max local ASR tasks in flight. Qwen3-ASR shares one in-memory recognizer;
+/// serial decoding avoids competing CPU work and duplicate model pressure.
+const ASR_PIPELINE_CONCURRENCY: usize = 1;
 
 /// Spawn a background task that transcribes a freshly-read video note's
-/// already-downloaded video file through cloud ASR. `None` when there's
+/// already-downloaded video file through local ASR. `None` when there's
 /// nothing to transcribe (not a fresh successful read, no media processor, no
 /// downloaded video, or the cached entity already carries a transcript).
 fn spawn_note_transcribe(
@@ -1909,7 +1905,7 @@ pub fn note_data_record(
         }
     }
     record.insert("stats".into(), Value::Object(stats));
-    // Video audio transcript (cloud ASR), so the app's note viewer can show
+    // Video audio transcript from local ASR, so the app's note viewer can show
     // the spoken content alongside the media.
     if let Some(transcript) = entity
         .get("video")
@@ -2482,7 +2478,7 @@ const LEAN_NOTE_FIELDS: &[&str] = &[
     // Per-note OCR summary (joined from each image's ocr_text). Only present
     // when the scan ran with `ocr`; the per-image texts stay in the artifact.
     "ocr_text",
-    // Video audio transcript from cloud ASR. The full video object stays in the
+    // Video audio transcript from local ASR. The full video object stays in the
     // artifact; this keeps the usable text in the compact result.
     "audio_transcript",
 ];
@@ -3290,7 +3286,7 @@ impl Tool for GetNotesTool {
                 },
                 "transcribe_audio": {
                     "type": "boolean",
-                    "description": "For video notes, download the video and transcribe audio while signed in with socai agent selected.",
+                    "description": "For video notes, download the video and transcribe audio with the locally installed Qwen3-ASR model.",
                     "default": false
                 }
             },
@@ -3298,7 +3294,7 @@ impl Tool for GetNotesTool {
             "additionalProperties": false
         });
         if !self.asr_enabled {
-            strip_hosted_agent_schema(&mut schema);
+            strip_unavailable_asr_schema(&mut schema);
         }
         schema
     }
@@ -3308,7 +3304,7 @@ impl Tool for GetNotesTool {
     }
 
     async fn call(&self, mut input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
-        let asr_skipped = !self.asr_enabled && strip_hosted_agent_input(&mut input);
+        let asr_skipped = !self.asr_enabled && strip_unavailable_asr_input(&mut input);
         let targets = direct_note_refs(&input)?;
         let gate = XhsPageRuntime::new(&self.page);
         let login = match gate.login_gate(true).await {
@@ -3519,7 +3515,7 @@ impl Tool for GetNotesTool {
             .map(|rel| ctx.run_dir.join(rel).to_string_lossy().into_owned());
         lean_scan_payload(&mut payload);
         attach_artifact_pointer(&mut payload, artifact_path, ARTIFACT_EXTRA_NOTE_PROPERTIES);
-        attach_hosted_agent_skip_note(&mut payload, asr_skipped);
+        attach_local_asr_skip_note(&mut payload, asr_skipped);
         Ok(json_result(&payload))
     }
 }
@@ -3529,8 +3525,8 @@ pub struct ReadNoteTool {
     page: Arc<PageSession>,
     llm_provider: Option<Arc<dyn LlmProvider>>,
     history: Arc<XhsHistoryStore>,
-    /// Signed in with socai agent selected; when false, managed-ASR arguments
-    /// are hidden from the schema and skipped at runtime.
+    /// Whether the local Qwen3-ASR model is installed; when false, ASR
+    /// arguments are hidden from the schema and skipped at runtime.
     asr_enabled: bool,
 }
 
@@ -3561,13 +3557,13 @@ impl Tool for ReadNoteTool {
             }
         });
         if !self.asr_enabled {
-            strip_hosted_agent_schema(&mut schema);
+            strip_unavailable_asr_schema(&mut schema);
         }
         schema
     }
 
     async fn call(&self, mut input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
-        let asr_skipped = !self.asr_enabled && strip_hosted_agent_input(&mut input);
+        let asr_skipped = !self.asr_enabled && strip_unavailable_asr_input(&mut input);
         let note_id = get_str(&input, "note_id").map(str::to_string);
         let index = input
             .get("index")
@@ -3646,7 +3642,7 @@ impl Tool for ReadNoteTool {
         if let Some(perf) = value.as_object_mut().and_then(|map| map.remove("perf")) {
             write_run_perf_file(ctx, "read.json", &json!({ "read": perf }));
         }
-        attach_hosted_agent_skip_note(&mut value, asr_skipped);
+        attach_local_asr_skip_note(&mut value, asr_skipped);
         Ok(json_result(&value))
     }
 }
@@ -3684,13 +3680,13 @@ impl Tool for ExtractNoteTool {
             }
         });
         if !self.asr_enabled {
-            strip_hosted_agent_schema(&mut schema);
+            strip_unavailable_asr_schema(&mut schema);
         }
         schema
     }
 
     async fn call(&self, mut input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
-        let asr_skipped = !self.asr_enabled && strip_hosted_agent_input(&mut input);
+        let asr_skipped = !self.asr_enabled && strip_unavailable_asr_input(&mut input);
         let wait_seconds = get_f64(&input, "wait_seconds", 8.0);
         let options = read_note_options(&input);
         let xhs = XhsPageRuntime::new_with_media(
@@ -3711,7 +3707,7 @@ impl Tool for ExtractNoteTool {
         attach_top_comments(&xhs, &mut value).await;
         self.history
             .record(&value, &options.level, options.include_media);
-        attach_hosted_agent_skip_note(&mut value, asr_skipped);
+        attach_local_asr_skip_note(&mut value, asr_skipped);
         Ok(json_result(&value))
     }
 }
@@ -4248,7 +4244,7 @@ impl Tool for SearchTool {
                 },
                 "transcribe_audio": {
                     "type": "boolean",
-                    "description": "For opened video notes, download the video file and transcribe audio while signed in with socai agent selected. Ignored in preview mode.",
+                    "description": "For opened video notes, download the video file and transcribe audio with the locally installed Qwen3-ASR model. Ignored in preview mode.",
                     "default": false
                 },
                 "preview": {
@@ -4260,7 +4256,7 @@ impl Tool for SearchTool {
             "required": ["query"]
         });
         if !self.asr_enabled {
-            strip_hosted_agent_schema(&mut schema);
+            strip_unavailable_asr_schema(&mut schema);
         }
         schema
     }
@@ -4275,7 +4271,7 @@ impl Tool for SearchTool {
     }
 
     async fn call(&self, mut input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
-        let asr_skipped = !self.asr_enabled && strip_hosted_agent_input(&mut input);
+        let asr_skipped = !self.asr_enabled && strip_unavailable_asr_input(&mut input);
         let query = get_str(&input, "query")
             .ok_or_else(|| anyhow::anyhow!("missing query"))?
             .to_string();
@@ -4536,7 +4532,7 @@ impl Tool for SearchTool {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut cursor = 0usize;
         let mut stalls = 0usize;
-        // OCR and cloud ASR run in the background so they overlap the next
+        // OCR and local ASR run in the background so they overlap the next
         // note's read + download; tasks are joined after the browse loop.
         let ocr_sem = Arc::new(tokio::sync::Semaphore::new(OCR_PIPELINE_CONCURRENCY));
         let mut pending_ocr: Vec<(usize, tokio::task::JoinHandle<NoteOcrResult>)> = Vec::new();
@@ -4995,7 +4991,7 @@ impl Tool for SearchTool {
         // agent/CLI output stays small, then point at the artifact for the rest.
         lean_scan_payload(&mut payload);
         attach_artifact_pointer(&mut payload, artifact_path, ARTIFACT_EXTRA_NOTE_PROPERTIES);
-        attach_hosted_agent_skip_note(&mut payload, asr_skipped);
+        attach_local_asr_skip_note(&mut payload, asr_skipped);
         Ok(json_result(&payload))
     }
 }
@@ -5083,14 +5079,14 @@ impl Tool for AuthorScanTool {
                 },
                 "transcribe_audio": {
                     "type": "boolean",
-                    "description": "For opened video notes, download the video file and transcribe audio while signed in with socai agent selected. Ignored in preview mode.",
+                    "description": "For opened video notes, download the video file and transcribe audio with the locally installed Qwen3-ASR model. Ignored in preview mode.",
                     "default": false
                 }
             },
             "required": ["author_id"]
         });
         if !self.asr_enabled {
-            strip_hosted_agent_schema(&mut schema);
+            strip_unavailable_asr_schema(&mut schema);
         }
         schema
     }
@@ -5100,7 +5096,7 @@ impl Tool for AuthorScanTool {
     }
 
     async fn call(&self, mut input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
-        let asr_skipped = !self.asr_enabled && strip_hosted_agent_input(&mut input);
+        let asr_skipped = !self.asr_enabled && strip_unavailable_asr_input(&mut input);
         let author_id = get_str(&input, "author_id")
             .map(str::trim)
             .filter(|id| !id.is_empty())
@@ -5212,7 +5208,7 @@ impl Tool for AuthorScanTool {
         let mut notes: Vec<Value> = Vec::new();
         let mut stop_reason = String::new();
         if !preview {
-            // OCR and cloud ASR run in the background so they overlap the next
+            // OCR and local ASR run in the background so they overlap the next
             // note's read + download; tasks are joined after the loop.
             let ocr_sem = Arc::new(tokio::sync::Semaphore::new(OCR_PIPELINE_CONCURRENCY));
             let mut pending_ocr: Vec<(usize, tokio::task::JoinHandle<NoteOcrResult>)> = Vec::new();
@@ -5432,7 +5428,7 @@ impl Tool for AuthorScanTool {
         // agent/CLI output stays small, then point at the artifact for the rest.
         lean_scan_payload(&mut payload);
         attach_artifact_pointer(&mut payload, artifact_path, ARTIFACT_EXTRA_NOTE_PROPERTIES);
-        attach_hosted_agent_skip_note(&mut payload, asr_skipped);
+        attach_local_asr_skip_note(&mut payload, asr_skipped);
         Ok(json_result(&payload))
     }
 }
@@ -5529,7 +5525,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_hosted_agent_schema_hides_asr_args() {
+    fn strip_unavailable_asr_schema_hides_asr_args() {
         let mut schema = json!({
             "type": "object",
             "properties": {
@@ -5537,22 +5533,22 @@ mod tests {
                 "transcribe_audio": { "type": "boolean" }
             }
         });
-        strip_hosted_agent_schema(&mut schema);
+        strip_unavailable_asr_schema(&mut schema);
         assert!(schema["properties"].get("transcribe_audio").is_none());
         assert!(schema["properties"].get("query").is_some());
     }
 
     #[test]
-    fn strip_hosted_agent_input_drops_args_and_reports_requests() {
+    fn strip_unavailable_asr_input_drops_args_and_reports_requests() {
         let mut input = json!({ "query": "咖啡", "transcribe_audio": true });
-        assert!(strip_hosted_agent_input(&mut input));
+        assert!(strip_unavailable_asr_input(&mut input));
         assert!(input.get("transcribe_audio").is_none());
         assert_eq!(input["query"], json!("咖啡"));
 
         // Not requested (absent or false) → no skip note owed.
         let mut plain = json!({ "query": "咖啡" });
-        assert!(!strip_hosted_agent_input(&mut plain));
+        assert!(!strip_unavailable_asr_input(&mut plain));
         let mut off = json!({ "query": "咖啡", "transcribe_audio": false });
-        assert!(!strip_hosted_agent_input(&mut off));
+        assert!(!strip_unavailable_asr_input(&mut off));
     }
 }

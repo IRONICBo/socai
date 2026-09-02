@@ -5,6 +5,7 @@ mod version;
 
 use anyhow::Result;
 use clap::{Arg, ArgAction, ArgMatches};
+use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::{Map, Value};
 use socai_core::cloud as socai_pro;
 use socai_core::config as socai_config;
@@ -91,6 +92,44 @@ fn build_cli() -> clap::Command {
                                 .help("Optional device label shown in server records."),
                         ),
                 ),
+        )
+        .subcommand(
+            clap::Command::new("asr")
+                .about("Manage fully local Qwen3-ASR video transcription.")
+                .subcommand(
+                    clap::Command::new("status")
+                        .about("Show local ASR model readiness.")
+                        .arg(
+                            Arg::new("json")
+                                .long("json")
+                                .action(ArgAction::SetTrue)
+                                .help("Print machine-readable JSON."),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("install")
+                        .about("Download and verify Qwen3-ASR once for offline inference."),
+                )
+                .subcommand(
+                    clap::Command::new("transcribe")
+                        .about("Transcribe a local audio or video file without an ASR API.")
+                        .arg(Arg::new("path").required(true).value_name("FILE"))
+                        .arg(
+                            Arg::new("max-seconds")
+                                .long("max-seconds")
+                                .value_parser(clap::value_parser!(u64))
+                                .default_value("1200")
+                                .help("Maximum leading audio duration to transcribe."),
+                        )
+                        .arg(
+                            Arg::new("json")
+                                .long("json")
+                                .action(ArgAction::SetTrue)
+                                .help("Print machine-readable JSON."),
+                        ),
+                )
+                .subcommand_required(true)
+                .arg_required_else_help(true),
         )
         .subcommand(clap::Command::new("__daemon").hide(true));
     for site in all_sites() {
@@ -237,7 +276,7 @@ async fn run_site_command(
 fn should_warn_for_update(subcommand: &str) -> bool {
     !matches!(
         subcommand,
-        "__daemon" | "update" | "version" | "config" | "pro"
+        "__daemon" | "update" | "version" | "config" | "pro" | "asr"
     )
 }
 
@@ -271,6 +310,7 @@ async fn main() -> Result<()> {
         "update" => version::run_update_command().await?,
         "config" => run_config_command(sub_matches)?,
         "pro" => run_pro_command(sub_matches).await?,
+        "asr" => run_asr_command(sub_matches).await?,
         "stop" => {
             // Graceful shutdown reaches whoever owns the IPC endpoint; the
             // sweep then kills any orphan daemon from any binary or SOCAI_HOME,
@@ -300,6 +340,72 @@ async fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+async fn run_asr_command(matches: &ArgMatches) -> Result<()> {
+    match matches.subcommand() {
+        Some(("install", _)) => {
+            let progress = ProgressBar::new(878_702_423);
+            progress.set_style(
+                ProgressStyle::with_template(
+                    "{spinner:.white} {msg} [{bar:36.white/dim}] {bytes}/{total_bytes} {bytes_per_sec} {eta}",
+                )?
+                .progress_chars("=>-"),
+            );
+            let mut stage = String::new();
+            let progress_view = progress.clone();
+            let status = socai_core::media::install_asr_model(move |event| {
+                if event.stage != stage {
+                    stage = event.stage.clone();
+                    progress_view.set_message(match stage.as_str() {
+                        "download" => "Downloading Qwen3-ASR",
+                        "extract" => "Extracting Qwen3-ASR",
+                        "vad" => "Downloading local VAD",
+                        "complete" => "Local ASR ready",
+                        _ => "Preparing local ASR",
+                    });
+                }
+                if let Some(total) = event.total_bytes {
+                    progress_view.set_length(total);
+                    progress_view.set_position(event.downloaded_bytes.min(total));
+                }
+            })
+            .await;
+            progress.finish_and_clear();
+            let status = status?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+        }
+        Some(("transcribe", sub)) => {
+            let path = sub.get_one::<String>("path").expect("path is required");
+            let max_seconds = *sub
+                .get_one::<u64>("max-seconds")
+                .expect("max-seconds has a default");
+            let spinner = ProgressBar::new_spinner();
+            spinner.set_message("Transcribing locally with Qwen3-ASR");
+            spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+            let result = socai_core::media::transcribe_local_file(path, max_seconds).await;
+            spinner.finish_and_clear();
+            let transcript = result?;
+            if sub.get_flag("json") {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "model": "Qwen3-ASR-0.6B-Int8",
+                        "runtime": "local/sherpa-onnx",
+                        "path": path,
+                        "transcript": transcript,
+                    }))?
+                );
+            } else {
+                println!("{transcript}");
+            }
+        }
+        _ => {
+            let status = socai_core::media::asr_model_status()?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+        }
+    }
     Ok(())
 }
 

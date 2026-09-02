@@ -12,12 +12,12 @@ AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36";
 pub struct MediaConfig {
     pub base_dir: PathBuf,
     pub request_timeout_s: u64,
-    /// Wall-clock cap for one cloud ASR round trip (upload + poll).
+    /// Wall-clock cap for one local ASR decode.
     pub asr_timeout_s: u64,
     pub max_audio_seconds: u64,
     pub use_ocr: bool,
     pub use_vision: bool,
-    pub use_cloud_asr: bool,
+    pub use_local_asr: bool,
     pub vision_concurrency: usize,
 }
 
@@ -30,7 +30,7 @@ impl MediaConfig {
             max_audio_seconds: 20 * 60,
             use_ocr: true,
             use_vision: true,
-            use_cloud_asr: false,
+            use_local_asr: false,
             vision_concurrency: 3,
         }
     }

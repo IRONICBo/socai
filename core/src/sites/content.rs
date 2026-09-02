@@ -231,7 +231,7 @@ pub fn get_notes_input_schema(
             },
             "transcribe_audio": {
                 "type": "boolean",
-                "description": "For video notes, download the video and transcribe audio while signed in with socai agent selected.",
+                "description": "For video notes, download the video and transcribe audio with the locally installed Qwen3-ASR model.",
                 "default": false
             }
         },
@@ -239,7 +239,7 @@ pub fn get_notes_input_schema(
         "additionalProperties": false
     });
     if !asr_enabled {
-        strip_hosted_transcription_schema(&mut schema);
+        strip_unavailable_transcription_schema(&mut schema);
     }
     schema
 }
@@ -279,7 +279,7 @@ pub fn search_input_schema(
             },
             "transcribe_audio": {
                 "type": "boolean",
-                "description": "For opened video notes, download the video and transcribe audio while signed in with socai agent selected. Ignored in preview mode.",
+                "description": "For opened video notes, download the video and transcribe audio with the locally installed Qwen3-ASR model. Ignored in preview mode.",
                 "default": false
             },
             "preview": {
@@ -291,7 +291,7 @@ pub fn search_input_schema(
         "required": ["query"]
     });
     if !asr_enabled {
-        strip_hosted_transcription_schema(&mut schema);
+        strip_unavailable_transcription_schema(&mut schema);
     }
     schema
 }
@@ -329,14 +329,14 @@ pub fn author_scan_input_schema(default_comments: i64, asr_enabled: bool) -> Val
             },
             "transcribe_audio": {
                 "type": "boolean",
-                "description": "For opened video notes, download the video and transcribe audio while signed in with socai agent selected. Ignored in preview mode.",
+                "description": "For opened video notes, download the video and transcribe audio with the locally installed Qwen3-ASR model. Ignored in preview mode.",
                 "default": false
             }
         },
         "required": ["author_id"]
     });
     if !asr_enabled {
-        strip_hosted_transcription_schema(&mut schema);
+        strip_unavailable_transcription_schema(&mut schema);
     }
     schema
 }
@@ -372,13 +372,13 @@ pub fn xhs_product_effective_input(operation: ContentOperation, input: &Value) -
     effective
 }
 
-pub fn strip_hosted_transcription_schema(schema: &mut Value) {
+pub fn strip_unavailable_transcription_schema(schema: &mut Value) {
     if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
         properties.remove("transcribe_audio");
     }
 }
 
-pub fn strip_hosted_transcription_input(input: &mut Value) -> bool {
+pub fn strip_unavailable_transcription_input(input: &mut Value) -> bool {
     input
         .as_object_mut()
         .and_then(|object| object.remove("transcribe_audio"))
