@@ -1,7 +1,7 @@
 {
   "name": "@socai-io/dsh-socai",
   "description": "socai for DeepSeek Harness: typed Xiaohongshu research tools backed by the local socai CLI",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
