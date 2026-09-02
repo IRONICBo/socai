@@ -297,7 +297,11 @@ pub fn author_scan_input_schema(default_comments: i64, asr_enabled: bool) -> Val
         "type": "object",
         "properties": {
             "author_id": { "type": "string", "description": "Platform author id or profile URL." },
-            "num_notes": { "type": "integer", "minimum": 1 },
+            "num_notes": {
+                "type": "integer",
+                "description": "Collect at least this many note cards by scrolling. Omit for the first visible profile screen.",
+                "minimum": 1
+            },
             "num_comments": {
                 "type": "integer",
                 "description": "Comments to load per note. Ignored in preview mode.",
