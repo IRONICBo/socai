@@ -4,8 +4,8 @@ Checked on 2026-08-31 through 2026-09-02 (Asia/Shanghai).
 
 ## Verdict
 
-**Feasible as a standalone DSH acquisition/integration plugin, with a local CLI
-backend. Do not directly copy OpenMAIC's remote-API flow.**
+**Feasible as a standalone DSH acquisition/integration plugin with a local CLI
+backend.**
 
 The correct boundary for SocAI today is:
 
@@ -24,7 +24,6 @@ first success instead of a promotional-only wrapper.
 
 | Source | Revision/version inspected | Relevant evidence |
 | --- | --- | --- |
-| `THU-MAIC/dsh-openmaic` | `09c1693cfe83224db89fdd4abd245ac9174d3a05` | Bundle patch, typed tools, prompt sections, bundled Skills, compiled `lib/`, git install path |
 | `deepseek-ai/deepseek-harness` | `0a53fb55bea101816fa226bb964ae2bed71c343b` | Official bundle manifest, `dsh plugin --profile ... add`, tool and Skill APIs; developer-preview compatibility warning |
 | npm `@deepseek-ai/dsh` | `0.1.1-rc.2` (`latest`) | Public minimum compatibility target; exact source tag used for build/test/profile validation |
 | local `socai` | `9a4fb56cc05c5aef23138e9a3f293a91cb3fbc49` | `xhs search`, `xhs author`, and `xhs get-notes` emit JSON on stdout and share the existing Rust daemon/runtime |
@@ -34,16 +33,16 @@ confirmed that it is the first release containing the complete three-command
 contract used here (`search`, `author`, and `get-notes`). The plugin checks
 `socai --version` before its first browser operation.
 
-## What aligns directly
+## Integration contract
 
-| OpenMAIC pattern | SocAI equivalent | Decision |
+| Capability | SocAI implementation | Decision |
 | --- | --- | --- |
 | Installable `dsh.bundle` + `cordis.patch.yml` | Same | Directly align |
 | Typed tool registration | Typed wrappers around stable CLI commands | Directly align |
 | Bundled task Skill | `socai-xhs-research` workflow | Directly align |
 | System prompt teaches tool routing | Prefer SocAI for Xiaohongshu research | Directly align |
 | Compiled `lib/` for git install | Commit generated bundle before public release | Directly align |
-| Remote async generation API | Local CLI + browser daemon | Must adapt |
+| Execution backend | Local CLI + browser daemon | Preserve the existing SocAI boundary |
 | Inline React renderer/card | Structured native tool result | Defer; unnecessary for acquisition MVP |
 
 ## Acquisition funnel
@@ -73,7 +72,7 @@ more likely to retain a plugin that provides immediate, inspectable value.
   requires a repository to be at least one day old and to have at least ten
   commits. Do not manufacture empty commits to bypass that anti-spam gate;
   submit after the standalone repository satisfies it through normal work.
-  The `v0.1.0` GitHub Release provides a version-independent
+  GitHub Releases provide a version-independent
   `dsh-socai.tgz` asset suitable for the registry's optional `tarball` field.
 - The independent DSH Plugin Registry at `dshplugin.app` has a separate manual
   quality-gate submission form. Treat it as an additional distribution channel,
@@ -130,7 +129,7 @@ more likely to retain a plugin that provides immediate, inspectable value.
 - [x] Add repository topics: `deepseek-harness`, `dsh-plugin`, `socai`,
   `xiaohongshu`.
 - [x] Add CI for both pinned supported DSH source revisions.
-- [x] Publish GitHub Release `v0.1.0` with the precompiled, stable-name
+- [x] Publish GitHub Releases with the precompiled, stable-name
   `dsh-socai.tgz` asset.
 - [ ] After the repository is at least one day old and has ten meaningful
   commits, submit one `tools` entry to `awesome-dsh-plugin`; its downstream
