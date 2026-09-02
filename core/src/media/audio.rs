@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
-use crate::media::asr::transcribe_local_file;
+use crate::media::asr::transcribe_local_file_with_timeout;
 use crate::media::common::{url_suffix, MediaUnavailable};
 use crate::media::processor::MediaProcessor;
 
@@ -24,17 +24,12 @@ impl MediaProcessor {
             ));
         }
         let source_path = self.local_audio_source(source, referer).await?;
-        tokio::time::timeout(
+        transcribe_local_file_with_timeout(
+            &source_path,
+            self.config.max_audio_seconds,
             Duration::from_secs(self.config.asr_timeout_s.max(60)),
-            transcribe_local_file(&source_path, self.config.max_audio_seconds),
         )
         .await
-        .with_context(|| {
-            format!(
-                "local Qwen3-ASR timed out after {}s",
-                self.config.asr_timeout_s.max(60)
-            )
-        })?
     }
 
     async fn local_audio_source(&self, source: &str, referer: &str) -> Result<PathBuf> {

@@ -3,6 +3,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use bzip2::read::BzDecoder;
@@ -276,6 +277,22 @@ where
 }
 
 pub async fn transcribe_local_file(path: impl AsRef<Path>, max_seconds: u64) -> Result<String> {
+    transcribe_local_file_inner(path.as_ref(), max_seconds, None).await
+}
+
+pub(crate) async fn transcribe_local_file_with_timeout(
+    path: impl AsRef<Path>,
+    max_seconds: u64,
+    timeout: Duration,
+) -> Result<String> {
+    transcribe_local_file_inner(path.as_ref(), max_seconds, Some(timeout)).await
+}
+
+async fn transcribe_local_file_inner(
+    path: &Path,
+    max_seconds: u64,
+    timeout: Option<Duration>,
+) -> Result<String> {
     let status = asr_model_status()?;
     if !status.installed {
         anyhow::bail!(
@@ -285,7 +302,6 @@ pub async fn transcribe_local_file(path: impl AsRef<Path>, max_seconds: u64) -> 
     }
     let helper = find_asr_helper()
         .context("local ASR helper is unavailable; reinstall socai or set SOCAI_ASR_HELPER")?;
-    let path = path.as_ref();
     let path = path
         .canonicalize()
         .with_context(|| format!("failed to resolve media path {}", path.display()))?;
@@ -305,10 +321,34 @@ pub async fn transcribe_local_file(path: impl AsRef<Path>, max_seconds: u64) -> 
     if slot.is_none() {
         *slot = Some(start_worker(&helper, &status.model_dir).await?);
     }
-    slot.as_mut()
-        .expect("worker initialized")
-        .transcribe(path_text, max_seconds)
+    let result = match timeout {
+        Some(timeout) => match tokio::time::timeout(
+            timeout,
+            slot.as_mut()
+                .expect("worker initialized")
+                .transcribe(path_text, max_seconds),
+        )
         .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow!(
+                "local Qwen3-ASR timed out after {}s",
+                timeout.as_secs()
+            )),
+        },
+        None => {
+            slot.as_mut()
+                .expect("worker initialized")
+                .transcribe(path_text, max_seconds)
+                .await
+        }
+    };
+    if result.is_err() {
+        // A transport or protocol error can leave a late response in stdout.
+        // Drop the worker so the next request starts with a clean protocol stream.
+        *slot = None;
+    }
+    result
 }
 
 impl AsrWorker {
