@@ -1,8 +1,12 @@
 <div align="center">
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · **한국어**
+<a href="https://socai.io/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=main-repo-logo">
+  <img src="site/public/icon-192.png" width="80" alt="socai 아이콘">
+</a>
 
 # socai
+
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · **한국어**
 
 **샤오홍슈(레드노트) 리서치에 최적화된 로컬 웹 에이전트**
 
@@ -13,6 +17,12 @@
 [![release](https://img.shields.io/github/v/release/socai-io/socai?style=flat-square&color=blue&label=release)](https://github.com/socai-io/socai/releases/latest)
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-555?style=flat-square)](#데스크톱-앱)
 [![license](https://img.shields.io/badge/license-Apache--2.0-555?style=flat-square)](LICENSE)
+
+<br>
+
+<a href="https://socai.io/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=main-repo-banner">
+  <img src="docs/assets/socai-readme-banner.png" width="100%" alt="브라우저 검색에서 LLM 처리와 구조화된 조사 결과까지 이어지는 socai 워크플로">
+</a>
 
 </div>
 
