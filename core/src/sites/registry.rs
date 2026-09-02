@@ -14,12 +14,15 @@ use serde_json::Value;
 use crate::agent::tool::ToolProgressSender;
 use crate::agent::{Backend as LlmProvider, Tool};
 use crate::cdp::PageSession;
+use crate::sites::content::ContentPlatform;
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send>>;
 
 /// Async factory: build the site's agent tools against a shared page.
 pub type AgentToolsFn = fn(Arc<PageSession>, Arc<dyn LlmProvider>) -> BoxFuture<Vec<Arc<dyn Tool>>>;
 pub type AgentInstructionsFn = fn(&str) -> String;
+pub type ContentPlatformFn =
+    fn(Arc<PageSession>, Option<Arc<dyn LlmProvider>>) -> Arc<dyn ContentPlatform>;
 
 /// One-shot CLI/daemon command: `(page, JSON args, debug_snapshot, progress)` → JSON.
 pub type CommandRunFn =
@@ -31,6 +34,8 @@ pub struct SiteSpec {
     pub id: &'static str,
     pub about: &'static str,
     pub home_url: &'static str,
+    /// XHS-shaped content adapter selected by this site's id.
+    pub content_platform: ContentPlatformFn,
     pub agent_tools: AgentToolsFn,
     /// Optional default tool surface for normal app/TUI agents. Sites can keep
     /// a broader command/debug surface in `agent_tools` while exposing a

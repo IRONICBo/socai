@@ -145,18 +145,16 @@ pub fn content_platform_tools(platform: Arc<dyn ContentPlatform>) -> Vec<Arc<dyn
     .collect()
 }
 
-/// Select the site implementation while keeping entrypoints independent from
-/// platform modules. TikTok registers the same adapter in its integration PR.
+/// Select the site implementation through the existing registry so adding a
+/// platform does not require another dispatch branch in the shared contract.
 pub fn select_content_platform(
     site_id: &str,
     page: Arc<PageSession>,
     llm_provider: Option<Arc<dyn LlmProvider>>,
 ) -> anyhow::Result<Arc<dyn ContentPlatform>> {
-    match site_id {
-        "xhs" => Ok(crate::sites::xhs::xhs_content_platform(page, llm_provider)),
-        "dy" => Ok(crate::sites::dy::dy_content_platform(page, llm_provider)),
-        _ => anyhow::bail!("site does not implement the content-platform contract: {site_id}"),
-    }
+    let site = crate::sites::find_site(site_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown content platform: {site_id}"))?;
+    Ok((site.content_platform)(page, llm_provider))
 }
 
 pub fn empty_filters_schema() -> Value {

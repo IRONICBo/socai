@@ -193,6 +193,7 @@ pub static DY_SITE: SiteSpec = SiteSpec {
     // Let Douyin tools own first navigation so they can use a much longer
     // timeout for the site's occasional 4-5 minute blank-page throttling.
     home_url: "",
+    content_platform: dy_content_platform,
     agent_tools: |page, llm| Box::pin(dy_agent_tools(page, llm)),
     default_agent_tools: Some(|page, llm| Box::pin(dy_default_agent_tools(page, llm))),
     agent_instructions: dy_agent_instructions,

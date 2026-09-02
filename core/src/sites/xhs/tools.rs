@@ -331,6 +331,7 @@ pub static XHS_SITE: SiteSpec = SiteSpec {
     id: "xhs",
     about: "Xiaohongshu (xiaohongshu.com)",
     home_url: XHS_HOME_URL,
+    content_platform: xhs_content_platform,
     agent_tools: |page, llm| Box::pin(xhs_agent_tools(page, llm)),
     default_agent_tools: Some(|page, llm| Box::pin(xhs_default_agent_tools(page, llm))),
     agent_instructions: xhs_agent_instructions,
