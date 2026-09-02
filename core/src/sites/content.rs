@@ -79,13 +79,17 @@ struct ContentPlatformTool {
 impl ContentPlatformTool {
     fn new(platform: Arc<dyn ContentPlatform>, operation: ContentOperation) -> Self {
         let site = platform.display_name();
+        let capabilities = platform.capabilities();
         let description = match operation {
             ContentOperation::GetNotes => format!(
                 "Read one or more {site} notes by the locators returned from search or author_scan."
             ),
-            ContentOperation::Search => format!(
+            ContentOperation::Search if capabilities.full_search => format!(
                 "Research {site} by keyword. The default is an XHS-style full scan; preview=true returns note cards only."
             ),
+            ContentOperation::Search => {
+                format!("Search {site} by keyword and return visible note cards.")
+            }
             ContentOperation::AuthorScan => format!(
                 "Research one {site} author and their notes. The default is a full scan; preview=true returns note cards only."
             ),

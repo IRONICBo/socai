@@ -7,9 +7,8 @@ use crate::agent::tool::ToolProgressSender;
 use crate::agent::{Backend as LlmProvider, Tool, ToolContext, ToolResult};
 use crate::cdp::PageSession;
 use crate::sites::content::{
-    author_scan_input_schema, empty_filters_schema, get_notes_input_schema,
-    page_state_input_schema, search_input_schema, video_note_locator_schema, ContentCapabilities,
-    ContentOperation, ContentPlatform,
+    author_scan_input_schema, get_notes_input_schema, page_state_input_schema,
+    video_note_locator_schema, ContentCapabilities, ContentOperation, ContentPlatform,
 };
 use crate::sites::dy::DouyinPageRuntime;
 use crate::sites::registry::{
@@ -107,7 +106,20 @@ impl ContentPlatform for DouyinContentPlatform {
             ContentOperation::GetNotes => {
                 get_notes_input_schema(video_note_locator_schema(), 8, false)
             }
-            ContentOperation::Search => search_input_schema(empty_filters_schema(), 10, 5, false),
+            ContentOperation::Search => json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "num_notes": {
+                        "type": "integer",
+                        "description": "Number of visible video cards to collect by scrolling.",
+                        "default": 10,
+                        "minimum": 1
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
             ContentOperation::AuthorScan => author_scan_input_schema(5, false),
             ContentOperation::PageState => page_state_input_schema(),
         }
