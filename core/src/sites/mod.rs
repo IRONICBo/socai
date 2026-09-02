@@ -5,8 +5,8 @@ pub mod runner;
 pub mod xhs;
 
 pub use content::{
-    content_platform_tools, select_content_platform, ContentCapabilities, ContentOperation,
-    ContentPlatform,
+    content_platform_tools, select_content_platform, xhs_product_effective_input,
+    ContentCapabilities, ContentOperation, ContentPlatform,
 };
 pub use registry::{
     all_sites, find_site, required_string, AgentInstructionsFn, AgentToolsFn, ArgKind, BoxFuture,

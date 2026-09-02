@@ -333,6 +333,33 @@ pub fn page_state_input_schema() -> Value {
     json!({"type": "object", "properties": {}, "additionalProperties": false})
 }
 
+/// Apply the established XHS app/TUI defaults to every platform adapter.
+/// Preview scans OCR covers in memory; full scans also retain downloaded media.
+pub fn xhs_product_effective_input(operation: ContentOperation, input: &Value) -> Value {
+    let mut effective = input.clone();
+    if operation == ContentOperation::Search && effective.get("num_notes").is_none() {
+        effective["num_notes"] = json!(10);
+    }
+    if operation == ContentOperation::PageState {
+        return effective;
+    }
+
+    effective["ocr"] = json!(true);
+    let preview = effective
+        .get("preview")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if preview {
+        if let Some(object) = effective.as_object_mut() {
+            object.remove("download_media");
+            object.remove("transcribe_audio");
+        }
+    } else {
+        effective["download_media"] = json!(true);
+    }
+    effective
+}
+
 pub fn strip_hosted_transcription_schema(schema: &mut Value) {
     if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
         properties.remove("transcribe_audio");
