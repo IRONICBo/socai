@@ -6,6 +6,11 @@ use serde_json::{json, Value};
 use crate::agent::tool::ToolProgressSender;
 use crate::agent::{Backend as LlmProvider, Tool, ToolContext, ToolResult};
 use crate::cdp::PageSession;
+use crate::sites::content::{
+    author_scan_input_schema, content_platform_tools, empty_filters_schema, get_notes_input_schema,
+    page_state_input_schema, search_input_schema, video_note_locator_schema, ContentCapabilities,
+    ContentOperation, ContentPlatform,
+};
 use crate::sites::dy::DouyinPageRuntime;
 use crate::sites::registry::{
     required_string, ArgKind, BoxFuture, CommandArg, SiteCommand, SiteSpec, SlowWhen,
@@ -38,6 +43,140 @@ pub async fn dy_agent_tools(
     Ok(dy_tools_with_llm_provider(page, Some(llm_provider)))
 }
 
+struct DouyinContentPlatform {
+    tools: Vec<Arc<dyn Tool>>,
+}
+
+impl DouyinContentPlatform {
+    fn tool(&self, operation: ContentOperation) -> anyhow::Result<&Arc<dyn Tool>> {
+        self.tools
+            .iter()
+            .find(|tool| tool.name() == operation.tool_name())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Douyin content-platform tool is missing: {}",
+                    operation.tool_name()
+                )
+            })
+    }
+
+    fn unsupported(operation: ContentOperation) -> ToolResult {
+        json_result(&json!({
+            "ok": false,
+            "site": "dy",
+            "reason": "unsupported_content_operation",
+            "operation": operation.tool_name(),
+        }))
+    }
+}
+
+#[async_trait]
+impl ContentPlatform for DouyinContentPlatform {
+    fn site_id(&self) -> &'static str {
+        "dy"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Douyin"
+    }
+
+    fn capabilities(&self) -> ContentCapabilities {
+        ContentCapabilities {
+            full_search: false,
+            author_full_scan: false,
+            search_filters: false,
+            comments: false,
+            comment_replies: false,
+            media_download: false,
+            ocr: false,
+            audio_transcription: false,
+            cross_run_history: false,
+            artifacts: false,
+        }
+    }
+
+    fn input_schema(&self, operation: ContentOperation) -> Value {
+        match operation {
+            ContentOperation::GetNotes => {
+                get_notes_input_schema(video_note_locator_schema(), 8, false)
+            }
+            ContentOperation::Search => search_input_schema(empty_filters_schema(), 10, 5, false),
+            ContentOperation::AuthorScan => author_scan_input_schema(5, false),
+            ContentOperation::PageState => page_state_input_schema(),
+        }
+    }
+
+    fn effective_input(&self, operation: ContentOperation, input: &Value) -> Value {
+        let mut effective = input.clone();
+        if operation == ContentOperation::Search && effective.get("num_notes").is_none() {
+            effective["num_notes"] = json!(10);
+        }
+        effective
+    }
+
+    async fn get_notes(&self, _input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        Ok(Self::unsupported(ContentOperation::GetNotes))
+    }
+
+    async fn search(&self, mut input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        if !input
+            .get("preview")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Ok(Self::unsupported(ContentOperation::Search));
+        }
+        if let Some(num_notes) = input
+            .as_object_mut()
+            .and_then(|obj| obj.remove("num_notes"))
+        {
+            input["num"] = num_notes;
+        }
+        if let Some(object) = input.as_object_mut() {
+            for key in [
+                "filters",
+                "num_comments",
+                "download_media",
+                "ocr",
+                "transcribe_audio",
+                "preview",
+            ] {
+                object.remove(key);
+            }
+        }
+        self.tool(ContentOperation::Search)?.call(input, ctx).await
+    }
+
+    async fn author_scan(&self, _input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        Ok(Self::unsupported(ContentOperation::AuthorScan))
+    }
+
+    async fn page_state(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        self.tool(ContentOperation::PageState)?
+            .call(input, ctx)
+            .await
+    }
+}
+
+pub fn dy_content_platform(
+    page: Arc<PageSession>,
+    _llm_provider: Option<Arc<dyn LlmProvider>>,
+) -> Arc<dyn ContentPlatform> {
+    Arc::new(DouyinContentPlatform {
+        tools: dy_tools(page),
+    })
+}
+
+pub async fn dy_default_agent_tools(
+    page: Arc<PageSession>,
+    llm_provider: Arc<dyn LlmProvider>,
+) -> anyhow::Result<Vec<Arc<dyn Tool>>> {
+    Ok(content_platform_tools(dy_content_platform(
+        page,
+        Some(llm_provider),
+    )))
+}
+
 pub fn dy_agent_instructions(extra: &str) -> String {
     let base = DY_KNOWLEDGE.trim().to_string();
     let extra = extra.trim();
@@ -55,9 +194,9 @@ pub static DY_SITE: SiteSpec = SiteSpec {
     // timeout for the site's occasional 4-5 minute blank-page throttling.
     home_url: "",
     agent_tools: |page, llm| Box::pin(dy_agent_tools(page, llm)),
-    default_agent_tools: None,
+    default_agent_tools: Some(|page, llm| Box::pin(dy_default_agent_tools(page, llm))),
     agent_instructions: dy_agent_instructions,
-    default_agent_instructions: None,
+    default_agent_instructions: Some(dy_agent_instructions),
     commands: &[
         SiteCommand {
             name: "search",

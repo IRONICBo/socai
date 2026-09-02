@@ -25,6 +25,9 @@ use crate::media::{
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 
+use crate::sites::content::{
+    content_platform_tools, ContentCapabilities, ContentOperation, ContentPlatform,
+};
 use crate::sites::registry::{
     required_string, ArgKind, BoxFuture, CommandArg, SiteCommand, SiteSpec, SlowWhen,
 };
@@ -173,6 +176,123 @@ pub fn xhs_macro_tools_with_llm_provider(
     ]
 }
 
+struct XhsContentPlatform {
+    tools: Vec<Arc<dyn Tool>>,
+}
+
+impl XhsContentPlatform {
+    fn tool(&self, operation: ContentOperation) -> anyhow::Result<&Arc<dyn Tool>> {
+        self.tools
+            .iter()
+            .find(|tool| tool.name() == operation.tool_name())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "XHS content-platform tool is missing: {}",
+                    operation.tool_name()
+                )
+            })
+    }
+}
+
+#[async_trait]
+impl ContentPlatform for XhsContentPlatform {
+    fn site_id(&self) -> &'static str {
+        "xhs"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Xiaohongshu"
+    }
+
+    fn capabilities(&self) -> ContentCapabilities {
+        ContentCapabilities {
+            full_search: true,
+            author_full_scan: true,
+            search_filters: true,
+            comments: true,
+            comment_replies: true,
+            media_download: true,
+            ocr: true,
+            audio_transcription: crate::cloud::hosted_llm_selected(),
+            cross_run_history: true,
+            artifacts: true,
+        }
+    }
+
+    fn input_schema(&self, operation: ContentOperation) -> Value {
+        self.tool(operation)
+            .map(|tool| tool.input_schema())
+            .unwrap_or_else(|_| json!({"type": "object", "properties": {}}))
+    }
+
+    fn effective_input(&self, operation: ContentOperation, input: &Value) -> Value {
+        self.tool(operation)
+            .map(|tool| tool.effective_input(input))
+            .unwrap_or_else(|_| input.clone())
+    }
+
+    async fn get_notes(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        self.tool(ContentOperation::GetNotes)?
+            .call(input, ctx)
+            .await
+    }
+
+    async fn search(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        self.tool(ContentOperation::Search)?.call(input, ctx).await
+    }
+
+    async fn author_scan(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        self.tool(ContentOperation::AuthorScan)?
+            .call(input, ctx)
+            .await
+    }
+
+    async fn page_state(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        self.tool(ContentOperation::PageState)?
+            .call(input, ctx)
+            .await
+    }
+}
+
+/// XHS is the reference adapter and therefore owns product defaults for the
+/// shared content surface: media download and OCR are enabled for app/TUI
+/// calls, while ASR remains gated by the hosted-agent selection.
+pub fn xhs_content_platform(
+    page: Arc<PageSession>,
+    llm_provider: Option<Arc<dyn LlmProvider>>,
+) -> Arc<dyn ContentPlatform> {
+    let history = Arc::new(XhsHistoryStore::open_default());
+    let asr_enabled = crate::cloud::hosted_llm_selected();
+    Arc::new(XhsContentPlatform {
+        tools: vec![
+            Arc::new(GetNotesTool {
+                page: page.clone(),
+                llm_provider: llm_provider.clone(),
+                history: history.clone(),
+                always_download_media: true,
+                always_ocr: true,
+                asr_enabled,
+            }) as Arc<dyn Tool>,
+            Arc::new(SearchTool {
+                page: page.clone(),
+                llm_provider,
+                history: history.clone(),
+                always_download_media: true,
+                always_ocr: true,
+                asr_enabled,
+            }) as Arc<dyn Tool>,
+            Arc::new(AuthorScanTool {
+                page: page.clone(),
+                history,
+                always_download_media: true,
+                always_ocr: true,
+                asr_enabled,
+            }) as Arc<dyn Tool>,
+            Arc::new(PageStateTool { page }) as Arc<dyn Tool>,
+        ],
+    })
+}
+
 pub async fn xhs_agent_tools(
     page: Arc<PageSession>,
     llm_provider: Arc<dyn LlmProvider>,
@@ -188,7 +308,11 @@ pub async fn xhs_default_agent_tools(
     // Macro tools are self-contained and perform their own navigation/typed
     // failure handling, so the default agent factory should not require the
     // current tab to already be on XHS.
-    Ok(xhs_macro_tools_with_llm_provider(page, Some(llm_provider)))
+    let platform = xhs_content_platform(page.clone(), Some(llm_provider));
+    let mut tools = content_platform_tools(platform);
+    tools.push(Arc::new(WaitForLoginTool { page }));
+    tools.push(Arc::new(WaitForRateLimitTool));
+    Ok(tools)
 }
 
 pub fn xhs_agent_instructions(extra: &str) -> String {
