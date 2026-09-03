@@ -1,11 +1,12 @@
 //! Optional local/media processing used by site runtimes.
 //!
 //! Nothing here shells out to external media tools: video covers come from
-//! their own CDN URL, audio transcription is cloud-only (socai takes the
-//! demuxed aac as-is), and OCR runs in-process. Site runtimes can opt into
-//! this crate for heavier media enrichment while keeping plain DOM extraction
-//! fast and portable.
+//! their own CDN URL, OCR runs in-process, and Whisper small audio transcription
+//! runs in a bundled local worker. Site runtimes can opt into this crate for
+//! heavier media enrichment while keeping plain DOM extraction fast and
+//! portable.
 
+mod asr;
 mod audio;
 mod background;
 mod common;

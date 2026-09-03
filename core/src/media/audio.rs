@@ -10,12 +10,13 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+use crate::media::asr::transcribe_local_file_with_timeout;
 use crate::media::common::{ensure_dir, url_suffix, MediaUnavailable};
 use crate::media::processor::MediaProcessor;
 
 impl MediaProcessor {
-    /// Transcribe a video/audio source through socai's managed cloud ASR — the
-    /// only transcription path (local whisper was removed as uncontrollable).
+    /// Transcribe a video/audio source through managed cloud ASR for paid
+    /// sessions, or through the bundled local Whisper small worker otherwise.
     pub async fn transcribe_audio(&self, source: &str, referer: &str) -> Result<String> {
         let t0 = Instant::now();
         let result = self.transcribe_audio_inner(source, referer).await;
@@ -26,10 +27,22 @@ impl MediaProcessor {
     async fn transcribe_audio_inner(&self, source: &str, referer: &str) -> Result<String> {
         if !self.config.use_cloud_asr {
             anyhow::bail!(MediaUnavailable(
-                "video transcription requires a signed-in account with socai agent selected".into()
+                "video transcription is disabled for this media request".into()
             ));
         }
         let source_path = self.local_audio_source(source, referer).await?;
+        let managed_paid_session = self
+            .llm_provider
+            .as_ref()
+            .is_some_and(|provider| provider.provider() == "socai");
+        if !managed_paid_session {
+            return transcribe_local_file_with_timeout(
+                &source_path,
+                self.config.max_audio_seconds,
+                Duration::from_secs(self.config.asr_timeout_s.max(60)),
+            )
+            .await;
+        }
         // Real clip duration (the clip is already capped at
         // max_audio_seconds); the server uses it for usage accounting.
         let (aac, duration) = self.extract_audio_aac(&source_path).await?;
