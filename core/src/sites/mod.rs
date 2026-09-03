@@ -2,6 +2,7 @@ pub mod dy;
 pub mod learning;
 pub mod registry;
 pub mod runner;
+pub mod tiktok;
 pub mod xhs;
 
 pub use learning::{
