@@ -408,19 +408,27 @@ fn redact_endpoint_in_error(endpoint: &Endpoint, err: anyhow::Error) -> anyhow::
 }
 
 async fn open_existing_endpoint() -> anyhow::Result<OpenEndpoint> {
-    let endpoint = endpoint::discover_running_chrome_endpoint()
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no running chrome with --remote-debugging-port found. \
-                 start chrome with the debug flag, set SOCAI_CDP_WS, \
-                 or run `socai config set chrome.profile managed` to use socai's managed chrome profile."
-            )
-        })?;
-    Ok(OpenEndpoint {
-        endpoint,
-        owner: BrowserOwner::None,
-    })
+    let endpoints = endpoint::discover_running_chrome_endpoints().await;
+    if endpoints.is_empty() {
+        anyhow::bail!(
+            "no running chrome with --remote-debugging-port found. \
+             start chrome with the debug flag, set SOCAI_CDP_WS, \
+             or run `socai config set chrome.profile managed` to use socai's managed chrome profile."
+        );
+    }
+    for endpoint in endpoints {
+        if reachable(&endpoint).await {
+            return Ok(OpenEndpoint {
+                endpoint,
+                owner: BrowserOwner::None,
+            });
+        }
+    }
+    anyhow::bail!(
+        "found Chrome remote-debugging markers, but none of their browser websockets are reachable. \
+         Open chrome://inspect/#remote-debugging and enable Allow remote debugging, \
+         or run `socai config set chrome.profile managed` to use socai's managed Chrome profile."
+    );
 }
 
 async fn open_managed_endpoint(options: &ChromeConnectOptions) -> anyhow::Result<OpenEndpoint> {
@@ -460,10 +468,14 @@ async fn open_managed_endpoint(options: &ChromeConnectOptions) -> anyhow::Result
 /// browser-websocket `Target.*` path the runtime will use for target inventory
 /// and lifecycle.
 async fn reachable(endpoint: &Endpoint) -> bool {
-    match RawCdpClient::connect(&endpoint.browser_ws_url).await {
-        Ok(client) => browser_ws_targets(&client).await.is_ok(),
-        Err(_) => false,
-    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        match RawCdpClient::connect(&endpoint.browser_ws_url).await {
+            Ok(client) => browser_ws_targets(&client).await.is_ok(),
+            Err(_) => false,
+        }
+    })
+    .await
+    .unwrap_or(false)
 }
 
 async fn connect_inventory(endpoint: &Endpoint) -> anyhow::Result<ConnectInventory> {

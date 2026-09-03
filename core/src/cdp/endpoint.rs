@@ -89,18 +89,61 @@ pub async fn discover_existing_chrome_endpoint() -> anyhow::Result<Option<Endpoi
 /// SOCAI_CDP_* overrides; callers that need explicit endpoints should resolve
 /// them first.
 pub(crate) async fn discover_running_chrome_endpoint() -> anyhow::Result<Option<Endpoint>> {
+    for endpoint in discover_running_chrome_endpoints().await {
+        if endpoint_tcp_reachable(&endpoint).await {
+            return Ok(Some(endpoint));
+        }
+    }
+    Ok(None)
+}
+
+/// Return every syntactically discoverable running-browser candidate in
+/// preference order. Callers that can actively probe CDP should walk this
+/// list: one profile's stale `DevToolsActivePort` must not hide a later live
+/// profile or conventional debug port.
+pub(crate) async fn discover_running_chrome_endpoints() -> Vec<Endpoint> {
+    let mut endpoints = Vec::new();
     for profile in chrome_profile_roots() {
         if let Some(endpoint) = endpoint_from_active_port(&profile).await {
-            return Ok(Some(endpoint));
+            push_unique_endpoint(&mut endpoints, endpoint);
         }
     }
     for port in DEFAULT_DEVTOOLS_PORTS {
         let url = format!("http://127.0.0.1:{port}");
         if let Ok(endpoint) = endpoint_from_http_url(&url, &format!("port:{port}")).await {
-            return Ok(Some(endpoint));
+            push_unique_endpoint(&mut endpoints, endpoint);
         }
     }
-    Ok(None)
+    endpoints
+}
+
+fn push_unique_endpoint(endpoints: &mut Vec<Endpoint>, endpoint: Endpoint) {
+    if endpoints
+        .iter()
+        .all(|candidate| candidate.browser_ws_url != endpoint.browser_ws_url)
+    {
+        endpoints.push(endpoint);
+    }
+}
+
+async fn endpoint_tcp_reachable(endpoint: &Endpoint) -> bool {
+    let Ok(url) = reqwest::Url::parse(&endpoint.browser_ws_url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let Some(port) = url.port_or_known_default() else {
+        return false;
+    };
+    matches!(
+        tokio::time::timeout(
+            Duration::from_millis(350),
+            tokio::net::TcpStream::connect((host, port)),
+        )
+        .await,
+        Ok(Ok(_))
+    )
 }
 
 /// Poll `discover_existing_chrome_endpoint` until it succeeds or `timeout`
