@@ -44,11 +44,10 @@ pub async fn transcribe_audio_file(
 ) -> Result<CloudAsrResult> {
     let base_url = configured_base_url()
         .ok_or_else(|| anyhow::anyhow!("socai server URL is not configured"))?;
-    let creds = load_credentials().ok_or_else(|| {
-        anyhow::anyhow!("sign in and select socai agent before requesting video transcription")
-    })?;
-    if creds.user_id.trim().is_empty() || !creds.hosted_llm_selected {
-        anyhow::bail!("sign in and select socai agent before requesting video transcription");
+    let creds = load_credentials()
+        .ok_or_else(|| anyhow::anyhow!("sign in before requesting cloud transcription"))?;
+    if creds.user_id.trim().is_empty() || creds.device_token.trim().is_empty() {
+        anyhow::bail!("sign in before requesting cloud transcription");
     }
     // The extension matters: the server passes the filename through to
     // DashScope, which detects the audio format from it.
@@ -56,6 +55,7 @@ pub async fn transcribe_audio_file(
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("audio.aac");
+    let content_type = audio_content_type(path);
     let size_bytes = tokio::fs::metadata(path)
         .await
         .with_context(|| format!("failed to read metadata for {}", path.display()))?
@@ -73,7 +73,7 @@ pub async fn transcribe_audio_file(
             .post(format!("{base_url}/v1/asr/upload-url"))
             .json(&json!({
                 "filename": filename,
-                "content_type": "audio/aac",
+                "content_type": content_type,
                 "size_bytes": size_bytes,
                 "duration_s": duration_s.max(0),
                 "client_task_id": client_task_id.unwrap_or(""),
@@ -163,6 +163,22 @@ pub async fn transcribe_audio_file(
     }
 }
 
+fn audio_content_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("wav") => "audio/wav",
+        Some("mp3") => "audio/mpeg",
+        Some("m4a") => "audio/mp4",
+        Some("flac") => "audio/flac",
+        Some("ogg") | Some("opus") => "audio/ogg",
+        _ => "audio/aac",
+    }
+}
+
 async fn poll_task(
     client: &reqwest::Client,
     base_url: &str,
@@ -191,4 +207,17 @@ fn short_error(error: &str) -> String {
     }
     let head: String = trimmed.chars().take(MAX).collect();
     format!("{head}… (truncated)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::audio_content_type;
+    use std::path::Path;
+
+    #[test]
+    fn upload_content_type_follows_audio_extension() {
+        assert_eq!(audio_content_type(Path::new("voice.wav")), "audio/wav");
+        assert_eq!(audio_content_type(Path::new("clip.aac")), "audio/aac");
+        assert_eq!(audio_content_type(Path::new("speech.MP3")), "audio/mpeg");
+    }
 }
