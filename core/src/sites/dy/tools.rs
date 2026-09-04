@@ -403,7 +403,7 @@ impl Tool for GetVideosTool {
         let mut results = Vec::with_capacity(videos.len());
         for locator in videos {
             let mut result = match runtime
-                .read_video(&locator, wait_seconds, num_comments)
+                .read_video(&locator, wait_seconds, num_comments, transcribe_audio)
                 .await
             {
                 Ok(value) => value,
