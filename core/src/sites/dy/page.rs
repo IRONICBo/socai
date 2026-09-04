@@ -200,6 +200,7 @@ impl<'a> DouyinPageRuntime<'a> {
         locator: &str,
         wait_seconds: f64,
         num_comments: usize,
+        require_audio: bool,
     ) -> Result<Value> {
         let target = douyin_video_url(locator)?;
         let expected_id = extract_video_id(&target);
@@ -231,7 +232,9 @@ impl<'a> DouyinPageRuntime<'a> {
             }));
         }
 
-        let raw = self.wait_for_video_detail(wait_seconds).await?;
+        let raw = self
+            .wait_for_video_detail(wait_seconds, require_audio)
+            .await?;
         let mut entity: DouyinVideo = serde_json::from_value(raw)
             .context("Douyin video detail returned an invalid entity")?;
         let landed_id = state
@@ -256,21 +259,32 @@ impl<'a> DouyinPageRuntime<'a> {
         } else {
             None
         };
-        let mut payload = json!({
-            "ok": true,
-            "entity": entity,
-        });
         if let Some(error) = comments_error {
-            payload["entity"]["comments_error"] = json!(error);
+            return Ok(json!({
+                "ok": false,
+                "reason": "video_comments_failed",
+                "error": error,
+                "entity": entity,
+            }));
         }
-        Ok(payload)
+        let reported_zero_comments = entity.comments_count.trim() == "0";
+        if num_comments > 0 && !reported_zero_comments && entity.top_comments.is_empty() {
+            return Ok(json!({
+                "ok": false,
+                "reason": "video_detail_incomplete",
+                "missing": ["comments"],
+                "entity": entity,
+            }));
+        }
+        Ok(json!({ "ok": true, "entity": entity }))
     }
 
-    async fn wait_for_video_detail(&self, wait_seconds: f64) -> Result<Value> {
+    async fn wait_for_video_detail(&self, wait_seconds: f64, require_audio: bool) -> Result<Value> {
         // The description shell commonly appears several seconds before the
         // author block and player sources hydrate. Keep this bounded, but give
         // the real detail page enough time to complete those fields.
         let deadline = Instant::now() + Duration::from_secs_f64(wait_seconds.clamp(1.0, 12.0));
+        let mut media_ready_since = None;
         loop {
             let latest = self.expect_object("videoDetail", None).await?;
             let has_author = latest
@@ -281,7 +295,22 @@ impl<'a> DouyinPageRuntime<'a> {
                 .pointer("/video/resolved_url")
                 .and_then(Value::as_str)
                 .is_some_and(|value| !value.is_empty());
-            if (has_author && has_media) || Instant::now() >= deadline {
+            let has_audio = latest
+                .pointer("/video/audio_url")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty());
+            if has_author && has_media {
+                if !require_audio || has_audio {
+                    return Ok(latest);
+                }
+                let since = media_ready_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= Duration::from_secs(3) {
+                    return Ok(latest);
+                }
+            } else {
+                media_ready_since = None;
+            }
+            if Instant::now() >= deadline {
                 return Ok(latest);
             }
             sleep_ms(250).await;
@@ -335,7 +364,10 @@ impl<'a> DouyinPageRuntime<'a> {
         let mut seen = std::collections::HashSet::new();
         let mut stalls = 0usize;
         let mut raw_profile = Value::Null;
-        while cards.len() < target_count && stalls < 4 {
+        let content_deadline =
+            Instant::now() + Duration::from_secs_f64(wait_seconds.clamp(5.0, 30.0));
+        let mut profile_reports_posts = false;
+        while cards.len() < target_count {
             raw_profile = self
                 .expect_object(
                     "authorProfile",
@@ -347,6 +379,9 @@ impl<'a> DouyinPageRuntime<'a> {
                 .await?;
             let parsed: DouyinAuthorProfile = serde_json::from_value(raw_profile.clone())
                 .context("Douyin author page returned an invalid entity")?;
+            let video_count = parsed.video_count.trim();
+            let profile_count_known = !video_count.is_empty();
+            profile_reports_posts |= profile_count_known && video_count != "0";
             let before = cards.len();
             for card in parsed.video_cards {
                 let key = if card.video_id.is_empty() {
@@ -358,13 +393,27 @@ impl<'a> DouyinPageRuntime<'a> {
                     cards.push(card);
                 }
             }
-            if first_screen_only || cards.len() >= target_count {
+            if (first_screen_only && !cards.is_empty()) || cards.len() >= target_count {
                 break;
             }
             if cards.len() == before {
                 stalls += 1;
             } else {
                 stalls = 0;
+            }
+            let settled_without_cards =
+                profile_count_known && !profile_reports_posts && stalls >= 4;
+            let pagination_stalled = !cards.is_empty() && stalls >= 4;
+            if Instant::now() >= content_deadline || settled_without_cards || pagination_stalled {
+                break;
+            }
+            // The profile header and work count hydrate before the post list.
+            // Scrolling while the list is still empty can land on the footer
+            // and leave the virtualized grid unmounted, so wait in place for
+            // the first real card before starting pagination.
+            if cards.is_empty() {
+                sleep_ms(1000).await;
+                continue;
             }
             self.expect_object("scrollFeed", Some(&json!({ "nudge_up": false })))
                 .await?;
@@ -387,6 +436,14 @@ impl<'a> DouyinPageRuntime<'a> {
             cards.truncate(target_count.max(1));
         }
         profile.video_cards = cards;
+        if profile_reports_posts && profile.video_cards.is_empty() {
+            return Ok(json!({
+                "ok": false,
+                "reason": "author_videos_not_loaded",
+                "profile": profile,
+                "state": state,
+            }));
+        }
         Ok(json!({
             "ok": true,
             "profile": profile,
