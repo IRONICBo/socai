@@ -387,7 +387,7 @@
       author_internal_id: stateAuthor.id || stateVideo.authorId || '',
       author_url: canonicalAuthorUrl,
       likes: String(stats.diggCount || text(firstVisible(['[data-e2e="like-count"]', 'a[aria-label^="Like this post on TikTok"]'])) || ''),
-      comments_count: String(stats.commentCount || text(firstVisible(['[data-e2e="comment-count"]', 'a[aria-label^="Comment this post on TikTok"]'])) || ''),
+      comments_count: String(stats.commentCount ?? (text(firstVisible(['[data-e2e="comment-count"]', 'a[aria-label^="Comment this post on TikTok"]'])) || '')),
       shares: String(stats.shareCount || text(firstVisible(['[data-e2e="share-count"]', 'a[aria-label^="Share this post on TikTok"]'])) || ''),
       favorites: String(stats.collectCount || text(firstVisible(['[data-e2e="collect-count"]', '[data-e2e="bookmark-count"]'])) || ''),
       views: String(stats.playCount || ''),
@@ -406,6 +406,54 @@
     if (!button) return { found: false };
     const rect = button.getBoundingClientRect();
     return {
+      found: rect.width > 0 && rect.height > 0,
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+    };
+  }
+
+  function commentActivation() {
+    const comments = commentNodes();
+    if (comments.length > 0) {
+      return { ready: true, count: comments.length, action: '' };
+    }
+
+    const buttons = Array.from(document.querySelectorAll('button, [role="button"]')).filter(visible);
+    const guide = buttons.find((button) => /^(got it|understood|i understand|知道了|我知道了)$/i.test(text(button)));
+    if (guide) {
+      const rect = guide.getBoundingClientRect();
+      return {
+        ready: false,
+        count: 0,
+        action: 'dismiss_guide',
+        found: rect.width > 0 && rect.height > 0,
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      };
+    }
+
+    const panel = firstVisible([
+      '[data-e2e="comment-list"]',
+      '[class*="DivCommentListContainer"]',
+      '[class*="DivCommentMain"]',
+    ]);
+    if (panel) {
+      return { ready: true, count: 0, action: '' };
+    }
+
+    const target = firstVisible([
+      '[data-e2e="comment-icon"]',
+      '[aria-label^="Read or add comments"]',
+      '[aria-label*=" comments"]',
+    ]);
+    if (!target) {
+      return { ready: false, count: 0, action: '', found: false };
+    }
+    const rect = target.getBoundingClientRect();
+    return {
+      ready: false,
+      count: 0,
+      action: 'open_comments',
       found: rect.width > 0 && rect.height > 0,
       x: rect.left + rect.width / 2,
       y: rect.top + rect.height / 2,
@@ -439,15 +487,34 @@
     for (const node of commentNodes()) {
       const authorLink = node.querySelector('a[href*="/@"]');
       const authorUrl = normUrl(authorLink && (authorLink.href || authorLink.getAttribute('href')) || '');
-      const content = node.querySelector('[data-e2e="comment-level-1"], [class*="CommentText"], p');
+      const subContent = node.querySelector('[class*="DivCommentSubContentWrapper"]');
+      let content = node.matches('[data-e2e="comment-level-1"], [data-e2e="comment-content"]')
+        ? node
+        : node.querySelector('[data-e2e="comment-level-1"]') ||
+          node.querySelector('[data-e2e="comment-content"]') ||
+          node.querySelector('[class*="CommentText"]');
+      if (!content) {
+        const username = node.querySelector('[data-e2e="comment-username-1"]');
+        content = Array.from(node.querySelectorAll('p')).find((candidate) => {
+          return text(candidate) &&
+            !(username && username.contains(candidate)) &&
+            !(subContent && subContent.contains(candidate)) &&
+            !candidate.closest('a[href*="/@"]');
+        });
+      }
+      const timeNode = node.querySelector('time') || subContent && subContent.querySelector('span');
+      const likeNode = node.querySelector('[data-e2e="comment-like-count"], [class*="LikeCount"], [class*="DivLikeContainer"]');
+      const likeControl = node.querySelector('[class*="DivLikeContainer"][aria-label], [aria-label^="Like video"], [aria-label*=" likes"]');
+      const likeLabel = likeControl && likeControl.getAttribute('aria-label') || '';
+      const likeMatch = likeLabel.match(/([\d.,]+(?:[KMB])?)\s+likes?/i);
       const item = {
         comment_id: node.getAttribute('data-comment-id') || node.id || '',
         author: text(node.querySelector('[data-e2e="comment-username-1"]')) || text(authorLink) || handleFromUrl(authorUrl),
         author_id: handleFromUrl(authorUrl),
         author_url: authorUrl,
-        text: text(content) || text(node),
-        likes: text(node.querySelector('[data-e2e="comment-like-count"], [class*="LikeCount"]')),
-        time: text(node.querySelector('time, [class*="CommentSubContent"]')),
+        text: text(content),
+        likes: text(likeNode) || (likeMatch ? likeMatch[1] : ''),
+        time: text(timeNode),
         replies: [],
       };
       const key = item.comment_id || `${item.author}\n${item.text}`;
@@ -620,6 +687,7 @@
     videoState,
     videoDetail,
     playerPlayButton,
+    commentActivation,
     comments,
     scrollComments,
     authorState,
