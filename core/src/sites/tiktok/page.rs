@@ -20,6 +20,7 @@ const TIKTOK_PAGE_SCRIPT_FUNCTIONS: &[&str] = &[
     "videoState",
     "videoDetail",
     "playerPlayButton",
+    "commentActivation",
     "comments",
     "scrollComments",
     "authorState",
@@ -267,6 +268,11 @@ impl<'a> TikTokPageRuntime<'a> {
         }
         let mut entity: TikTokVideo = serde_json::from_value(raw)
             .context("TikTok video detail returned an invalid entity")?;
+        let landed_on_player = self
+            .current_url()
+            .await
+            .unwrap_or_default()
+            .contains("/player/v1/");
         let landed_id = state
             .get("video_id")
             .and_then(Value::as_str)
@@ -278,13 +284,7 @@ impl<'a> TikTokPageRuntime<'a> {
                 "state": state,
             }));
         }
-        let comments_error = if num_comments > 0
-            && !self
-                .current_url()
-                .await
-                .unwrap_or_default()
-                .contains("/player/v1/")
-        {
+        let comments_error = if num_comments > 0 && !landed_on_player {
             match self.collect_comments(num_comments).await {
                 Ok(comments) => {
                     entity.top_comments = comments;
@@ -295,11 +295,39 @@ impl<'a> TikTokPageRuntime<'a> {
         } else {
             None
         };
-        let mut payload = json!({ "ok": true, "entity": entity });
         if let Some(error) = comments_error {
-            payload["entity"]["comments_error"] = json!(error);
+            return Ok(json!({
+                "ok": false,
+                "reason": "video_comments_failed",
+                "error": error,
+                "entity": entity,
+            }));
         }
-        Ok(payload)
+        let mut missing = Vec::new();
+        let reported_zero_comments = entity.comments_count.trim() == "0";
+        if num_comments > 0
+            && !reported_zero_comments
+            && (landed_on_player || entity.top_comments.is_empty())
+        {
+            missing.push("comments");
+        }
+        let has_media = entity
+            .video
+            .get("resolved_url")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty());
+        if resolve_media && !has_media {
+            missing.push("media");
+        }
+        if !missing.is_empty() {
+            return Ok(json!({
+                "ok": false,
+                "reason": "video_detail_incomplete",
+                "missing": missing,
+                "entity": entity,
+            }));
+        }
+        Ok(json!({ "ok": true, "entity": entity }))
     }
 
     async fn start_player_media(&self) -> Result<()> {
@@ -445,6 +473,7 @@ impl<'a> TikTokPageRuntime<'a> {
     ) -> Result<Value> {
         let deadline = Instant::now() + Duration::from_secs_f64(timeout_seconds.max(0.5));
         let mut latest = Value::Object(Map::new());
+        let mut login_gate_since = None;
         while Instant::now() < deadline {
             latest = match self
                 .expect_object("searchState", Some(&json!({ "query": query })))
@@ -474,8 +503,17 @@ impl<'a> TikTokPageRuntime<'a> {
                     "observed_state": latest,
                 }));
             }
-            if committed && is_tiktok_page_url(&current) && state_terminal(&latest) {
-                return Ok(latest);
+            if committed && is_tiktok_page_url(&current) {
+                if latest.get("login_required").and_then(Value::as_bool) == Some(true) {
+                    let since = login_gate_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= Duration::from_secs(3) {
+                        return Ok(latest);
+                    }
+                } else if state_terminal(&latest) {
+                    return Ok(latest);
+                } else {
+                    login_gate_since = None;
+                }
             }
             if committed && tiktok_search_matches(&current, query) && search_transition_ok(&latest)
             {
@@ -531,6 +569,7 @@ impl<'a> TikTokPageRuntime<'a> {
     }
 
     async fn collect_comments(&self, target: usize) -> Result<Vec<TikTokComment>> {
+        self.activate_comments().await?;
         let mut comments = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut stalls = 0usize;
@@ -564,6 +603,42 @@ impl<'a> TikTokPageRuntime<'a> {
         }
         comments.truncate(target);
         Ok(comments)
+    }
+
+    async fn activate_comments(&self) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut last_open_attempt = None;
+        while Instant::now() < deadline {
+            let activation = self.expect_object("commentActivation", None).await?;
+            if activation.get("ready").and_then(Value::as_bool) == Some(true) {
+                return Ok(());
+            }
+            let action = activation
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let open_retry_ready = last_open_attempt
+                .as_ref()
+                .is_none_or(|attempt: &Instant| attempt.elapsed() >= Duration::from_secs(2));
+            if activation.get("found").and_then(Value::as_bool) == Some(true)
+                && (action == "dismiss_guide" || (action == "open_comments" && open_retry_ready))
+            {
+                let x = activation
+                    .get("x")
+                    .and_then(Value::as_f64)
+                    .context("TikTok comment control omitted x coordinate")?;
+                let y = activation
+                    .get("y")
+                    .and_then(Value::as_f64)
+                    .context("TikTok comment control omitted y coordinate")?;
+                self.page.click(x, y).await?;
+                if action == "open_comments" {
+                    last_open_attempt = Some(Instant::now());
+                }
+            }
+            sleep_ms(500).await;
+        }
+        Ok(())
     }
 
     async fn navigate_to(&self, target: &str) -> Result<NavigationExpectation> {
