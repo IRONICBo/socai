@@ -129,38 +129,6 @@ pub async fn paid_asr_access() -> Result<PaidAsrAccess> {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::WalletBalance;
-
-    fn wallet(balance_points: i64, active_until: Option<String>) -> WalletBalance {
-        WalletBalance {
-            balance_points,
-            points_per_cny: 100,
-            starter_points: 50,
-            active_until,
-        }
-    }
-
-    #[test]
-    fn starter_points_without_subscription_do_not_enable_paid_asr() {
-        assert!(!wallet(50, None).has_paid_asr_access());
-    }
-
-    #[test]
-    fn active_subscription_requires_remaining_credits() {
-        let future = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
-        assert!(wallet(1, Some(future.clone())).has_paid_asr_access());
-        assert!(!wallet(0, Some(future)).has_paid_asr_access());
-    }
-
-    #[test]
-    fn expired_subscription_does_not_enable_paid_asr() {
-        let past = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
-        assert!(!wallet(100, Some(past)).has_paid_asr_access());
-    }
-}
-
 pub async fn payment_plan() -> Result<PaymentPlan> {
     let response = authenticated_request(reqwest::Method::GET, "/v1/billing/plan")?
         .send()

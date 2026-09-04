@@ -30,6 +30,8 @@ const VAD_SHA256: &str = "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23a
 const VAD_BYTES: u64 = 643_854;
 const MODEL_TOTAL_BYTES: u64 = ENCODER_BYTES + DECODER_BYTES + TOKENS_BYTES + VAD_BYTES;
 const PROTOCOL_VERSION: u32 = 1;
+const INSTALL_STAGING_MARKER_FILE: &str = ".socai-asr-staging";
+const INSTALL_STAGING_MARKER: &[u8] = b"socai-asr-staging-v1\n";
 
 struct AsrModelStatus {
     installed: bool,
@@ -288,7 +290,7 @@ async fn install_asr_model(deadline: Instant) -> Result<AsrModelStatus> {
     tokio::fs::create_dir_all(&parent).await?;
     let _file_lock =
         acquire_install_lock(parent.join(format!(".{MODEL_ID}.lock")), deadline).await?;
-    cleanup_stale_install_dirs(&parent).await?;
+    cleanup_stale_install_dirs(&parent, &paths.root).await?;
     // Another process may have completed the installation while this process
     // waited for the filesystem lock. Verify that winner before replacing it.
     let status = asr_model_status(deadline).await?;
@@ -298,7 +300,16 @@ async fn install_asr_model(deadline: Instant) -> Result<AsrModelStatus> {
     }
     update_install_progress(true, 0, None);
     let staging = parent.join(format!(".{MODEL_ID}.install-{}", uuid::Uuid::new_v4()));
-    tokio::fs::create_dir_all(&staging).await?;
+    tokio::fs::create_dir(&staging).await?;
+    if let Err(error) = tokio::fs::write(
+        staging.join(INSTALL_STAGING_MARKER_FILE),
+        INSTALL_STAGING_MARKER,
+    )
+    .await
+    {
+        let _ = tokio::fs::remove_dir(&staging).await;
+        return Err(error).context("failed to mark the ASR staging directory");
+    }
     let staged = ModelPaths::from_root(staging.clone());
 
     let install_result = async {
@@ -346,19 +357,38 @@ async fn install_asr_model(deadline: Instant) -> Result<AsrModelStatus> {
                 staged_status.missing_files.join(", ")
             );
         }
-        if paths.root.exists() {
-            tokio::fs::remove_dir_all(&paths.root)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to replace incomplete ASR model at {}",
-                        paths.root.display()
-                    )
-                })?;
+        // `SOCAI_ASR_MODEL_DIR` is user-controlled. Never recursively remove
+        // that directory: a typo could otherwise erase an unrelated tree.
+        // Replace only the four files owned by this model installation. A
+        // crash between moves leaves an invalid (and therefore retryable)
+        // model, while every individual file remains checksum-verified.
+        tokio::fs::create_dir_all(&paths.root).await?;
+        for (source, target) in [
+            (&staged.encoder, &paths.encoder),
+            (&staged.decoder, &paths.decoder),
+            (&staged.tokens, &paths.tokens),
+            (&staged.vad, &paths.vad),
+        ] {
+            match tokio::fs::remove_file(target).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to replace ASR model file {}", target.display())
+                    });
+                }
+            }
+            tokio::fs::rename(source, target).await.with_context(|| {
+                format!("failed to install ASR model file {}", target.display())
+            })?;
         }
-        tokio::fs::rename(&staging, &paths.root)
-            .await
-            .with_context(|| format!("failed to install ASR model at {}", paths.root.display()))?;
+        tokio::fs::remove_file(staging.join(INSTALL_STAGING_MARKER_FILE)).await?;
+        tokio::fs::remove_dir(&staging).await.with_context(|| {
+            format!(
+                "failed to remove completed ASR staging directory {}",
+                staging.display()
+            )
+        })?;
         Ok::<(), anyhow::Error>(())
     }
     .await;
@@ -378,22 +408,30 @@ async fn install_asr_model(deadline: Instant) -> Result<AsrModelStatus> {
     Ok(status)
 }
 
-async fn cleanup_stale_install_dirs(parent: &Path) -> Result<()> {
+async fn cleanup_stale_install_dirs(parent: &Path, protected_root: &Path) -> Result<()> {
     let prefix = format!(".{MODEL_ID}.install-");
     let mut entries = tokio::fs::read_dir(parent).await?;
     while let Some(entry) = entries.next_entry().await? {
         let name = entry.file_name();
-        if !name.to_string_lossy().starts_with(&prefix) || !entry.file_type().await?.is_dir() {
+        let Some(suffix) = name.to_str().and_then(|name| name.strip_prefix(&prefix)) else {
+            continue;
+        };
+        let path = entry.path();
+        if path == protected_root
+            || uuid::Uuid::parse_str(suffix).is_err()
+            || !entry.file_type().await?.is_dir()
+        {
             continue;
         }
-        tokio::fs::remove_dir_all(entry.path())
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to remove stale ASR installation {}",
-                    entry.path().display()
-                )
-            })?;
+        let Ok(marker) = tokio::fs::read(path.join(INSTALL_STAGING_MARKER_FILE)).await else {
+            continue;
+        };
+        if marker != INSTALL_STAGING_MARKER {
+            continue;
+        }
+        tokio::fs::remove_dir_all(&path).await.with_context(|| {
+            format!("failed to remove stale ASR installation {}", path.display())
+        })?;
     }
     Ok(())
 }
@@ -467,8 +505,11 @@ async fn transcribe_local_file_inner(
         );
     }
     let remaining = remaining_before(deadline, "transcribing audio with local Whisper small")?;
-    let worker = slot
-        .as_mut()
+    // Move the worker out of the shared slot while a request is in flight. If
+    // this future is cancelled, dropping the local worker kills the child and
+    // leaves the slot empty instead of preserving an unread stale response.
+    let mut worker = slot
+        .take()
         .context("local ASR worker was not initialized")?;
     let result =
         match tokio::time::timeout(remaining, worker.transcribe(path_text, max_seconds)).await {
@@ -478,10 +519,8 @@ async fn transcribe_local_file_inner(
                 timeout.as_secs()
             )),
         };
-    if result.is_err() {
-        // A transport or protocol error can leave a late response in stdout.
-        // Drop the worker so the next request starts with a clean protocol stream.
-        *slot = None;
+    if result.is_ok() {
+        *slot = Some(worker);
     }
     result
 }

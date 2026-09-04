@@ -42,24 +42,27 @@ impl MediaProcessor {
             }
         };
         if !cloud_ready || self.billing_task_id.is_none() {
-            return transcribe_local_file_with_timeout(
-                &source_path,
-                self.config.max_audio_seconds,
-                Duration::from_secs(self.config.asr_timeout_s.max(60)),
-            )
-            .await;
+            return self.transcribe_local_source(&source_path).await;
         }
         // Real clip duration (the clip is already capped at
         // max_audio_seconds); the server uses it for usage accounting.
         let (aac, duration) = self.extract_audio_aac(&source_path).await?;
         let duration_s = duration.ceil() as i64;
-        let result = crate::cloud::transcribe_audio_file(
+        let result = match crate::cloud::transcribe_audio_file(
             &aac,
             duration_s,
             Duration::from_secs(self.config.asr_timeout_s.max(60)),
             self.billing_task_id.as_deref(),
         )
-        .await?;
+        .await
+        {
+            Ok(result) => result,
+            Err(error) if crate::cloud::cloud_asr_access_rejected(&error) => {
+                tracing::warn!(%error, "cloud ASR access changed before upload; using local ASR");
+                return self.transcribe_local_source(&source_path).await;
+            }
+            Err(error) => return Err(error),
+        };
         self.timing.record(
             "cloud_asr_total",
             Duration::from_millis(result.total_latency_ms as u64),
@@ -71,6 +74,15 @@ impl MediaProcessor {
             );
         }
         Ok(result.transcript.trim().to_string())
+    }
+
+    async fn transcribe_local_source(&self, source_path: &Path) -> Result<String> {
+        transcribe_local_file_with_timeout(
+            source_path,
+            self.config.max_audio_seconds,
+            Duration::from_secs(self.config.asr_timeout_s.max(60)),
+        )
+        .await
     }
 
     async fn local_audio_source(&self, source: &str, referer: &str) -> Result<PathBuf> {
