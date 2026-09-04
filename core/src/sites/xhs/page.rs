@@ -374,7 +374,7 @@ impl<'a> XhsPageRuntime<'a> {
 
         sleep_ms(150).await;
         self.page.press_key("Enter").await?;
-        let state = self
+        let mut state = self
             .wait_for_search_transition(query, wait_seconds.max(SEARCH_TRANSITION_TIMEOUT_S))
             .await?;
         if search_transition_ok(&state, query) {
@@ -386,12 +386,19 @@ impl<'a> XhsPageRuntime<'a> {
             }));
         }
 
-        if let Some(submit) = loc.get("submit") {
+        // Typing opens the homepage suggestion panel and can re-render (or
+        // only then mount) the submit affordance. Do not reuse `loc.submit`,
+        // which was measured while the input was still empty: the stale/null
+        // coordinate was the cause of intermittent searches that visibly had
+        // the requested keyword but stayed on /explore. Re-read the live DOM
+        // after Enter has failed, then click the current control.
+        let current_loc = self.expect_object("searchInput", None).await?;
+        if let Some(submit) = current_loc.get("submit") {
             let x = number(submit, "x");
             let y = number(submit, "y");
             if x > 0.0 && y > 0.0 {
                 self.page.click(x, y).await?;
-                let state = self
+                state = self
                     .wait_for_search_transition(
                         query,
                         wait_seconds.max(SEARCH_TRANSITION_TIMEOUT_S),
@@ -400,7 +407,7 @@ impl<'a> XhsPageRuntime<'a> {
                 if search_transition_ok(&state, query) {
                     return Ok(json!({
                         "ok": true,
-                        "strategy": "click_search_button",
+                        "strategy": "click_refreshed_search_button",
                         "state": state,
                         "url": self.current_url().await?,
                     }));

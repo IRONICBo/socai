@@ -86,6 +86,11 @@ artifacts, and return a compact bundle. They differ only in where they enter:
 Both flows keep opening notes by clicking their cards. Their card/note URLs
 carry the xsec token needed for a later `get_notes` call.
 
+On the homepage, the visible AI-search submit button may not be mounted until
+after text is entered. Homepage feed cards are not proof that a search ran: a
+successful search must transition to a `/search_result*` page with the requested
+keyword. The runtime re-locates the post-typing submit control if Enter is ignored.
+
 While reading any result set, keep track of what each author is: the subject's
 own official account (the gym/brand/venue/organizer itself), semi-official
 voices (its staff or coaches), aggregator/curator accounts, or ordinary users.
