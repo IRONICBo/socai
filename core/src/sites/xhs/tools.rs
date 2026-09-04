@@ -1199,7 +1199,7 @@ async fn scan_card_note(
     // itself would incorrectly skip an upgrade requested later in the same
     // agent run (for example, a plain read followed by transcribe_audio=true).
     // In particular, that could reuse a pre-upgrade entity carrying the old
-    // ffmpeg transcription error instead of retrying through cloud ASR.
+    // transcription error instead of retrying through the current ASR route.
     let processed_in_run =
         !card.note_id.is_empty() && ctx.has_processed_note(&card.note_id, level, requested_media);
     if !card.note_id.is_empty()
@@ -1243,7 +1243,7 @@ async fn scan_card_note(
                 include_media,
                 download_media,
                 download_video_file: download_video_file_inline,
-                // Scans never transcribe inline: the caller runs cloud ASR in a
+                // Scans never transcribe inline: the caller runs ASR in a
                 // background task (spawn_note_transcribe) so it overlaps the
                 // next note's read + download. The dedup check above still uses
                 // the real `transcribe_audio` flag, so a cache hit returns the
@@ -1567,14 +1567,13 @@ async fn join_note_ocr(
     timings
 }
 
-/// Max cloud ASR tasks in flight at once. Transcription is network-bound
-/// (upload + provider poll), so this bounds concurrent load on socai-server
-/// while still letting note N's transcription overlap the read + download of
-/// note N+1.
+/// Max ASR tasks admitted at once. Managed requests are network-bound and local
+/// requests share one persistent worker, so this bounds both queue depth and
+/// server load while still overlapping transcription with the next note read.
 const ASR_PIPELINE_CONCURRENCY: usize = 2;
 
 /// Spawn a background task that transcribes a freshly-read video note's
-/// already-downloaded video file through cloud ASR. `None` when there's
+/// already-downloaded video file through the selected ASR route. `None` when there's
 /// nothing to transcribe (not a fresh successful read, no media processor, no
 /// downloaded video, or the cached entity already carries a transcript).
 fn spawn_note_transcribe(
@@ -1786,7 +1785,7 @@ pub fn note_data_record(
         }
     }
     record.insert("stats".into(), Value::Object(stats));
-    // Video audio transcript (cloud ASR), so the app's note viewer can show
+    // Video audio transcript, so the app's note viewer can show
     // the spoken content alongside the media.
     if let Some(transcript) = entity
         .get("video")
@@ -2359,7 +2358,7 @@ const LEAN_NOTE_FIELDS: &[&str] = &[
     // Per-note OCR summary (joined from each image's ocr_text). Only present
     // when the scan ran with `ocr`; the per-image texts stay in the artifact.
     "ocr_text",
-    // Video audio transcript from cloud ASR. The full video object stays in the
+    // Video audio transcript from the selected ASR route. The full video object stays in the
     // artifact; this keeps the usable text in the compact result.
     "audio_transcript",
 ];
@@ -4412,7 +4411,7 @@ impl Tool for SearchTool {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut cursor = 0usize;
         let mut stalls = 0usize;
-        // OCR and cloud ASR run in the background so they overlap the next
+        // OCR and ASR run in the background so they overlap the next
         // note's read + download; tasks are joined after the browse loop.
         let ocr_sem = Arc::new(tokio::sync::Semaphore::new(OCR_PIPELINE_CONCURRENCY));
         let mut pending_ocr: Vec<(usize, tokio::task::JoinHandle<NoteOcrResult>)> = Vec::new();
@@ -5088,7 +5087,7 @@ impl Tool for AuthorScanTool {
         let mut notes: Vec<Value> = Vec::new();
         let mut stop_reason = String::new();
         if !preview {
-            // OCR and cloud ASR run in the background so they overlap the next
+            // OCR and ASR run in the background so they overlap the next
             // note's read + download; tasks are joined after the loop.
             let ocr_sem = Arc::new(tokio::sync::Semaphore::new(OCR_PIPELINE_CONCURRENCY));
             let mut pending_ocr: Vec<(usize, tokio::task::JoinHandle<NoteOcrResult>)> = Vec::new();

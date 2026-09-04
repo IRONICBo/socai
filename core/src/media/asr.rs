@@ -467,8 +467,11 @@ async fn transcribe_local_file_inner(
         );
     }
     let remaining = remaining_before(deadline, "transcribing audio with local Whisper small")?;
-    let worker = slot
-        .as_mut()
+    // Move the worker out of the shared slot while a request is in flight. If
+    // this future is cancelled, dropping the local worker kills the child and
+    // leaves the slot empty instead of preserving an unread stale response.
+    let mut worker = slot
+        .take()
         .context("local ASR worker was not initialized")?;
     let result =
         match tokio::time::timeout(remaining, worker.transcribe(path_text, max_seconds)).await {
@@ -478,10 +481,8 @@ async fn transcribe_local_file_inner(
                 timeout.as_secs()
             )),
         };
-    if result.is_err() {
-        // A transport or protocol error can leave a late response in stdout.
-        // Drop the worker so the next request starts with a clean protocol stream.
-        *slot = None;
+    if result.is_ok() {
+        *slot = Some(worker);
     }
     result
 }

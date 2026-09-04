@@ -14,6 +14,30 @@ const MAX_AUDIO_UPLOAD_BYTES: u64 = 128 * 1024 * 1024;
 /// Consecutive poll failures tolerated before giving up on a submitted task.
 const MAX_POLL_FAILURES: u32 = 3;
 
+#[derive(Debug)]
+struct CloudAsrAccessRejected(reqwest::StatusCode);
+
+impl std::fmt::Display for CloudAsrAccessRejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "cloud ASR access was rejected before upload ({})",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for CloudAsrAccessRejected {}
+
+/// True only when the server rejected authorization before any audio upload or
+/// provider submission. Callers may safely retry these requests with local ASR
+/// without risking a duplicate cloud transcription or charge.
+pub fn cloud_asr_access_rejected(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<CloudAsrAccessRejected>().is_some())
+}
+
 #[derive(Debug, Deserialize)]
 struct UploadUrlResponse {
     task_id: String,
@@ -68,7 +92,7 @@ pub async fn transcribe_audio_file(
     }
     let client = http_client()?;
     let started = Instant::now();
-    let upload: UploadUrlResponse = bearer(
+    let upload_response = bearer(
         client
             .post(format!("{base_url}/v1/asr/upload-url"))
             .json(&json!({
@@ -81,10 +105,11 @@ pub async fn transcribe_audio_file(
         &creds.device_token,
     )
     .send()
-    .await?
-    .error_for_status()?
-    .json()
     .await?;
+    if matches!(upload_response.status().as_u16(), 401 | 402 | 403) {
+        return Err(CloudAsrAccessRejected(upload_response.status()).into());
+    }
+    let upload: UploadUrlResponse = upload_response.error_for_status()?.json().await?;
 
     let file = tokio::fs::File::open(path)
         .await
