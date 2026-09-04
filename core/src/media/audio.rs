@@ -31,11 +31,17 @@ impl MediaProcessor {
             ));
         }
         let source_path = self.local_audio_source(source, referer).await?;
-        let managed_paid_session = self
-            .llm_provider
-            .as_ref()
-            .is_some_and(|provider| provider.provider() == "socai");
-        if !managed_paid_session {
+        // Cloud ASR is a paid account capability, independent of the selected
+        // LLM provider. If the live wallet cannot be checked, stay functional
+        // and private by falling back to the bundled local model.
+        let cloud_ready = match crate::cloud::paid_asr_access().await {
+            Ok(access) => access.ready,
+            Err(error) => {
+                tracing::warn!(%error, "cloud ASR access check failed; using local ASR");
+                false
+            }
+        };
+        if !cloud_ready || self.billing_task_id.is_none() {
             return transcribe_local_file_with_timeout(
                 &source_path,
                 self.config.max_audio_seconds,

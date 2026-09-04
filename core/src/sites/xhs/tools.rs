@@ -80,7 +80,9 @@ pub fn xhs_tools_with_llm_provider(
     llm_provider: Option<Arc<dyn LlmProvider>>,
 ) -> Vec<Arc<dyn Tool>> {
     let history = Arc::new(XhsHistoryStore::open_default());
-    let asr_enabled = crate::cloud::hosted_llm_selected();
+    // Transcription is available for every account: paid sessions route to
+    // managed ASR and all other sessions route to local Whisper small.
+    let asr_enabled = true;
     vec![
         Arc::new(GetNotesTool {
             page: page.clone(),
@@ -140,7 +142,7 @@ pub fn xhs_macro_tools_with_llm_provider(
     llm_provider: Option<Arc<dyn LlmProvider>>,
 ) -> Vec<Arc<dyn Tool>> {
     let history = Arc::new(XhsHistoryStore::open_default());
-    let asr_enabled = crate::cloud::hosted_llm_selected();
+    let asr_enabled = true;
     // The app/TUI agent interface always downloads note media so the offline
     // files are on hand for deeper analysis, and always OCRs every image; the
     // CLI keeps its --download-media / --ocr opt-ins via the full tool set above.
@@ -253,7 +255,7 @@ pub static XHS_SITE: SiteSpec = SiteSpec {
                     key: "transcribe_audio",
                     long: Some("transcribe-audio"),
                     value_name: "TRANSCRIBE_AUDIO",
-                    help: "For video notes, transcribe audio while signed in with socai agent selected.",
+                    help: "For video notes, transcribe audio with managed ASR for paid sessions or local Whisper small otherwise.",
                     required: false,
                     kind: ArgKind::Flag,
                 },
@@ -330,7 +332,7 @@ pub static XHS_SITE: SiteSpec = SiteSpec {
                     long: Some("transcribe-audio"),
                     value_name: "TRANSCRIBE_AUDIO",
                     help: "For opened video notes, download the video file and transcribe audio \
-                           while signed in with socai agent selected. Ignored with --preview.",
+                           with managed ASR for paid sessions or local Whisper small otherwise. Ignored with --preview.",
                     required: false,
                     kind: ArgKind::Flag,
                 },
@@ -406,7 +408,7 @@ pub static XHS_SITE: SiteSpec = SiteSpec {
                     long: Some("transcribe-audio"),
                     value_name: "TRANSCRIBE_AUDIO",
                     help: "For opened video notes, download the video file and transcribe audio \
-                           while signed in with socai agent selected. Ignored with --preview.",
+                           with managed ASR for paid sessions or local Whisper small otherwise. Ignored with --preview.",
                     required: false,
                     kind: ArgKind::Flag,
                 },
@@ -3165,7 +3167,7 @@ impl Tool for GetNotesTool {
                 },
                 "transcribe_audio": {
                     "type": "boolean",
-                    "description": "For video notes, download the video and transcribe audio while signed in with socai agent selected.",
+                    "description": "For video notes, download the video and transcribe audio with managed ASR for paid sessions or local Whisper small otherwise.",
                     "default": false
                 }
             },
@@ -3404,8 +3406,7 @@ pub struct ReadNoteTool {
     page: Arc<PageSession>,
     llm_provider: Option<Arc<dyn LlmProvider>>,
     history: Arc<XhsHistoryStore>,
-    /// Signed in with socai agent selected; when false, managed-ASR arguments
-    /// are hidden from the schema and skipped at runtime.
+    /// Whether the current runtime exposes audio transcription arguments.
     asr_enabled: bool,
 }
 
@@ -4123,7 +4124,7 @@ impl Tool for SearchTool {
                 },
                 "transcribe_audio": {
                     "type": "boolean",
-                    "description": "For opened video notes, download the video file and transcribe audio while signed in with socai agent selected. Ignored in preview mode.",
+                    "description": "For opened video notes, download the video file and transcribe audio with managed ASR for paid sessions or local Whisper small otherwise. Ignored in preview mode.",
                     "default": false
                 },
                 "preview": {
@@ -4958,7 +4959,7 @@ impl Tool for AuthorScanTool {
                 },
                 "transcribe_audio": {
                     "type": "boolean",
-                    "description": "For opened video notes, download the video file and transcribe audio while signed in with socai agent selected. Ignored in preview mode.",
+                    "description": "For opened video notes, download the video file and transcribe audio with managed ASR for paid sessions or local Whisper small otherwise. Ignored in preview mode.",
                     "default": false
                 }
             },
