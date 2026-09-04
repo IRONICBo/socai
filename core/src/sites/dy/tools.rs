@@ -35,7 +35,8 @@ pub fn dy_tools_with_llm_provider(
             llm_provider,
         }),
         Arc::new(AuthorScanTool { page: page.clone() }),
-        Arc::new(PageStateTool { page }),
+        Arc::new(PageStateTool { page: page.clone() }),
+        Arc::new(WaitForLoginTool { page }),
     ]
 }
 
@@ -43,9 +44,6 @@ pub async fn dy_agent_tools(
     page: Arc<PageSession>,
     llm_provider: Arc<dyn LlmProvider>,
 ) -> anyhow::Result<Vec<Arc<dyn Tool>>> {
-    let _ = DouyinPageRuntime::new(&page)
-        .ensure_douyin(true, 330.0)
-        .await;
     Ok(dy_tools_with_llm_provider(page, Some(llm_provider)))
 }
 
@@ -585,6 +583,67 @@ impl Tool for PageStateTool {
         runtime.ensure_douyin(true, wait_seconds).await?;
         let state = runtime.wait_until_interactive(wait_seconds).await?;
         Ok(json_result(&state))
+    }
+}
+
+pub struct WaitForLoginTool {
+    page: Arc<PageSession>,
+}
+
+const WAIT_FOR_LOGIN_SECS: u64 = 600;
+
+#[async_trait]
+impl Tool for WaitForLoginTool {
+    fn name(&self) -> &str {
+        "wait_for_login"
+    }
+
+    fn description(&self) -> &str {
+        "After a Douyin tool reports login_required, keep the current Douyin tab \
+         open and poll until the user signs in. Returns logged_in:false after the \
+         fixed ten-minute timeout; do not retry the wait after a timeout."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({"type": "object", "properties": {}})
+    }
+
+    async fn call(&self, _input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        if self.page.is_remote_browser() {
+            return Ok(json_result(&json!({
+                "logged_in": false,
+                "remote_browser": true,
+                "message": "The hosted Douyin session cannot be signed in by the local user.",
+            })));
+        }
+
+        let runtime = DouyinPageRuntime::new(&self.page);
+        runtime.ensure_douyin(true, 30.0).await?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(WAIT_FOR_LOGIN_SECS);
+        loop {
+            let state = runtime.detect_state().await.unwrap_or_else(|error| {
+                json!({
+                    "ok": false,
+                    "reason": "login_state_unavailable",
+                    "error": error.to_string(),
+                })
+            });
+            if state.get("signed_in").and_then(Value::as_bool) == Some(true) {
+                return Ok(json_result(&json!({
+                    "logged_in": true,
+                    "message": "Douyin login detected. Re-run the original tool and continue.",
+                })));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(json_result(&json!({
+                    "logged_in": false,
+                    "timed_out": true,
+                    "reason": "login_timeout",
+                    "message": "Douyin login was not detected within ten minutes. Fail the task.",
+                })));
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
     }
 }
 

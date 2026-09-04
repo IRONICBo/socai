@@ -71,6 +71,9 @@
 
   function pageState() {
     const bodyText = text(document.body);
+    const signedIn = !!document.querySelector(
+      'a[href*="/user/self"] img, [data-e2e="live-avatar"] img'
+    );
     const inputs = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"], [role="searchbox"]'))
       .filter(visible)
       .slice(0, 8)
@@ -96,6 +99,7 @@
       title: document.title || '',
       ready_state: document.readyState,
       body_text_len: bodyText.length,
+      signed_in: signedIn,
       blank_or_throttled: blankOrThrottled,
       login_required: loginBlocked(false),
       challenge_required: challengeRequired(),

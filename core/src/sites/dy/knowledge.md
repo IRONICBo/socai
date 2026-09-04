@@ -8,6 +8,12 @@
 - Use `page_state` when a search, video, or author call reports an unexpected
   page. It exposes login, blank-page, and route state without copying page
   content into an error message.
+- The desktop starts from a blank conversation tab and opens Douyin only after
+  the user request selects a Douyin tool. When a tool reports
+  `login_required`, tell the user to sign in in that tab and call
+  `wait_for_login` once. It polls the same tab for up to ten minutes. After
+  `logged_in:true`, retry the original tool and continue. After
+  `timed_out:true`, fail the task instead of starting another wait.
 - `search` starts from the homepage/top search box, enters the keyword,
   submits with Enter, then extracts cards from the search-result waterfall.
   Use `--num` to scroll for more cards; default is 10.
