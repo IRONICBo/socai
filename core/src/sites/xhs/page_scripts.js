@@ -177,11 +177,11 @@ const SocaiXhsPageScripts = (() => {
   }
 
   // Selectors for the search-submit affordance, tried in priority order.
-  // The 2026-05 chat composer has explicit class names; legacy UIs used a
-  // <form> with type=submit or an .icon-search SVG sibling. We don't try
-  // to score arbitrary clickable elements anymore — if none of these
-  // match, Rust falls back to pressing Enter, which works in practice.
+  // The current single-line composer mounts `.single-line-search-btn` only
+  // after text is entered. Older chat-composer and legacy controls stay as
+  // fallbacks. We don't try to score arbitrary clickable elements anymore.
   const SEARCH_SUBMIT_SELECTORS = [
+    '.single-line-search-btn',
     '.bottom-box-right-submit-button',
     '.submit-button-wrapper',
     'button[type="submit"]',
@@ -194,7 +194,7 @@ const SocaiXhsPageScripts = (() => {
     const input = findSearchInput();
     if (!input) return { ok: false, error: 'search_input_not_found' };
     const root = input.closest(
-      'form, header, .search-input, .search-container, .search-bar, .search-box, .wendian-wrapper'
+      'form, header, .textarea-container, .search-input, .search-container, .search-bar, .search-box, .wendian-wrapper'
     ) || document;
 
     let submit = null;
