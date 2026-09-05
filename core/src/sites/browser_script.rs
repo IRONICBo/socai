@@ -3,16 +3,17 @@
 //! Site tools remain the preferred path. When a browser-backed tool stops
 //! matching the live page, `browser_script` lets the agent inspect and repair
 //! that exact tab with arbitrary JavaScript. A verified script
-//! can be saved under `~/.socai/tool-overrides/<site>/<tool>/` and transparently
-//! replaces the built-in tool on later calls. JavaScript runs in Chrome, never
-//! in a host shell, so it has the current page's authority but no native file
-//! system or process APIs.
+//! can be saved under `~/.socai/tool-overrides/<site>/<tool>/` and reused on
+//! later calls. An override validated by an older socai build is retained as a
+//! fallback, but the upgraded built-in tool gets one canary call first. JavaScript
+//! runs in Chrome, never in a host shell, so it has the current page's authority
+//! but no native file system or process APIs.
 
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -36,6 +37,17 @@ const MAX_SCRIPT_BYTES: usize = 512 * 1024;
 const MAX_RESULT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_BRIDGE_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_SCRIPT_ERROR_CHARS: usize = 4096;
+const OVERRIDE_MANIFEST_VERSION: u32 = 3;
+const LEGACY_OVERRIDE_MANIFEST_VERSION: u32 = 2;
+const LEGACY_OVERRIDE_CONTRACT_VERSION: u32 = 1;
+
+static OVERRIDE_LIFECYCLE_LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+
+fn override_lifecycle_lock() -> Arc<tokio::sync::Mutex<()>> {
+    OVERRIDE_LIFECYCLE_LOCK
+        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
 
 const BROWSER_SCRIPT_BRIDGE_JS: &str = r#"
 (() => {
@@ -140,17 +152,42 @@ struct ActiveOverride {
     created_at: String,
     source_url: String,
     timeout_ms: u64,
+    #[serde(default)]
+    validated_with_version: String,
+    #[serde(default = "default_override_contract_version")]
+    tool_contract_version: u32,
+    #[serde(default)]
+    tool_impl_revision: u32,
+    #[serde(default)]
+    last_validated_at: String,
+    #[serde(default)]
+    status_changed_at: String,
+    #[serde(default)]
+    status: OverrideStatus,
+    #[serde(default)]
+    status_reason: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OverrideStatus {
+    #[default]
+    Active,
+    Stale,
+    Quarantined,
 }
 
 #[derive(Clone)]
 struct LocalToolOverrideRegistry {
     root: PathBuf,
+    lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl LocalToolOverrideRegistry {
     fn open_default() -> Self {
         Self {
             root: socai_home_dir().join("tool-overrides"),
+            lifecycle_lock: override_lifecycle_lock(),
         }
     }
 
@@ -174,21 +211,38 @@ impl LocalToolOverrideRegistry {
         &self,
         site: &str,
         tool: &str,
-    ) -> Result<Option<(ActiveOverride, PathBuf, String)>> {
+    ) -> Result<Option<(ActiveOverride, PathBuf, PathBuf, String)>> {
         let dir = self.tool_dir(site, tool)?;
-        let manifest_path = match newest_active_manifest(&dir)? {
+        let manifest_path = match newest_override_manifest(&dir)? {
             Some(path) => path,
             None => return Ok(None),
         };
         let text = std::fs::read_to_string(&manifest_path)
             .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-        let manifest: ActiveOverride = serde_json::from_str(&text)
+        let mut manifest: ActiveOverride = serde_json::from_str(&text)
             .with_context(|| format!("invalid local override {}", manifest_path.display()))?;
-        if manifest.version != 2 || manifest.site != site || manifest.tool != tool {
+        if !matches!(
+            manifest.version,
+            LEGACY_OVERRIDE_MANIFEST_VERSION | OVERRIDE_MANIFEST_VERSION
+        ) || manifest.site != site
+            || manifest.tool != tool
+        {
             anyhow::bail!(
                 "local override metadata does not match {site}.{tool}: {}",
                 manifest_path.display()
             );
+        }
+        if manifest.validated_with_version.is_empty() {
+            manifest.validated_with_version = manifest.source_version.clone();
+        }
+        if manifest.last_validated_at.is_empty() {
+            manifest.last_validated_at = manifest.created_at.clone();
+        }
+        if manifest.status_changed_at.is_empty() {
+            manifest.status_changed_at = manifest.created_at.clone();
+        }
+        if manifest.status != OverrideStatus::Active {
+            return Ok(None);
         }
         validate_script_path(&manifest.script)?;
         let script_path = dir.join(&manifest.script);
@@ -209,7 +263,7 @@ impl LocalToolOverrideRegistry {
         }
         let script = String::from_utf8(script)
             .with_context(|| format!("local override is not UTF-8: {}", script_path.display()))?;
-        Ok(Some((manifest, script_path, script)))
+        Ok(Some((manifest, manifest_path, script_path, script)))
     }
 
     fn write_candidate(&self, site: &str, tool: &str, script: &str) -> Result<PathBuf> {
@@ -245,26 +299,82 @@ impl LocalToolOverrideRegistry {
         validate_script_path(relative_script)?;
         let script_bytes = std::fs::read(candidate_path)
             .with_context(|| format!("failed to read {}", candidate_path.display()))?;
+        let now = Utc::now().to_rfc3339();
         let manifest = ActiveOverride {
-            version: 2,
+            // Keep activation records readable by the previous binary. New
+            // lifecycle-only fields are additive and ignored by serde there;
+            // v3 state transitions use a separate `state-*` namespace.
+            version: LEGACY_OVERRIDE_MANIFEST_VERSION,
             site: site.to_string(),
             tool: tool.to_string(),
             script: relative_script.to_string(),
             sha256: sha256_hex(&script_bytes),
             source_version: env!("CARGO_PKG_VERSION").to_string(),
-            created_at: Utc::now().to_rfc3339(),
+            created_at: now.clone(),
             source_url: sanitize_source_url(source_url),
             timeout_ms,
+            validated_with_version: env!("CARGO_PKG_VERSION").to_string(),
+            tool_contract_version: override_contract_version(site, tool),
+            tool_impl_revision: builtin_tool_revision(site, tool),
+            last_validated_at: now.clone(),
+            status_changed_at: now,
+            status: OverrideStatus::Active,
+            status_reason: "newly_activated".to_string(),
         };
-        // Each activation gets an immutable manifest. Readers select the
-        // lexicographically newest complete file, so activation is one atomic
-        // rename and never exposes a manifest/script mismatch.
-        let timestamp = Utc::now().format("%Y%m%d-%H%M%S%.9f");
-        let suffix = Uuid::new_v4().simple().to_string();
-        let manifest_path = dir.join(format!("active-{timestamp}-{}.json", &suffix[..8]));
-        write_json_atomic(&manifest_path, &manifest)?;
+        self.write_manifest_record(&manifest, "active")?;
         Ok((candidate_path.to_path_buf(), manifest))
     }
+
+    fn transition(
+        &self,
+        manifest: &ActiveOverride,
+        expected_manifest_path: &Path,
+        status: OverrideStatus,
+        reason: &str,
+        revalidate: bool,
+    ) -> Result<ActiveOverride> {
+        let dir = self.tool_dir(&manifest.site, &manifest.tool)?;
+        let current = newest_override_manifest(&dir)?
+            .ok_or_else(|| anyhow::anyhow!("local override disappeared before state transition"))?;
+        if current != expected_manifest_path {
+            anyhow::bail!(
+                "local override changed before state transition: expected {}, found {}",
+                expected_manifest_path.display(),
+                current.display()
+            );
+        }
+        let mut next = manifest.clone();
+        next.version = OVERRIDE_MANIFEST_VERSION;
+        next.status = status;
+        next.status_reason = reason.to_string();
+        next.status_changed_at = Utc::now().to_rfc3339();
+        if revalidate {
+            next.validated_with_version = env!("CARGO_PKG_VERSION").to_string();
+            next.tool_contract_version = override_contract_version(&next.site, &next.tool);
+            next.tool_impl_revision = builtin_tool_revision(&next.site, &next.tool);
+            next.last_validated_at = Utc::now().to_rfc3339();
+        }
+        self.write_manifest_record(&next, "state")?;
+        Ok(next)
+    }
+
+    fn write_manifest_record(&self, manifest: &ActiveOverride, prefix: &str) -> Result<PathBuf> {
+        let dir = self.ensure_tool_dir(&manifest.site, &manifest.tool)?;
+        debug_assert!(matches!(prefix, "active" | "state"));
+        // Each activation or state transition gets an immutable record. New
+        // readers select the lexicographically newest complete active/state
+        // file, so publication is one atomic rename and never exposes a
+        // manifest/script mismatch.
+        let timestamp = Utc::now().format("%Y%m%d-%H%M%S%.9f");
+        let suffix = Uuid::new_v4().simple().to_string();
+        let manifest_path = dir.join(format!("{prefix}-{timestamp}-{}.json", &suffix[..8]));
+        write_json_atomic(&manifest_path, manifest)?;
+        Ok(manifest_path)
+    }
+}
+
+const fn default_override_contract_version() -> u32 {
+    LEGACY_OVERRIDE_CONTRACT_VERSION
 }
 
 #[derive(Clone)]
@@ -618,6 +728,78 @@ return {{ ok: true, tag: element.tagName }};
             .await
             .unwrap_or_else(|error| json!({ "error": format!("{error:#}") }))
     }
+
+    async fn override_blocker(&self) -> Option<String> {
+        match self.site.as_str() {
+            "xhs" => {
+                use crate::sites::xhs::page::XhsPageRuntime;
+
+                match XhsPageRuntime::new(&self.page).is_logged_in().await {
+                    Ok(true) => {}
+                    Ok(false) => return Some("login_state_unconfirmed".to_string()),
+                    Err(error) => return Some(format!("page_access_failed: {error:#}")),
+                }
+                match crate::sites::xhs::page_diagnostics::browser_override_blocker(&self.page)
+                    .await
+                {
+                    Some(blocker) => Some(blocker),
+                    None => self.page_security_blocker().await,
+                }
+            }
+            "dy" => {
+                let state = match crate::sites::dy::DouyinPageRuntime::new(&self.page)
+                    .detect_state()
+                    .await
+                {
+                    Ok(state) => state,
+                    Err(error) => return Some(format!("page_access_failed: {error:#}")),
+                };
+                if state.get("login_required").and_then(Value::as_bool) == Some(true) {
+                    Some("login_required".to_string())
+                } else if state.get("blank_or_throttled").and_then(Value::as_bool) == Some(true) {
+                    Some("blank_or_throttled".to_string())
+                } else {
+                    self.page_security_blocker().await
+                }
+            }
+            _ => Some("unsupported_override_site".to_string()),
+        }
+    }
+
+    async fn page_security_blocker(&self) -> Option<String> {
+        let state = self
+            .page
+            .evaluate_json(
+                r#"
+const body = (document.body?.innerText || '').slice(0, 50000);
+const visible = (element) => {
+  if (!element) return false;
+  const style = getComputedStyle(element);
+  const rect = element.getBoundingClientRect();
+  return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+};
+const captchaNode = Array.from(document.querySelectorAll(
+  'iframe[src*="captcha" i], iframe[title*="captcha" i], [class*="captcha" i], [id*="captcha" i]'
+)).find(visible);
+return {
+  captcha_required: Boolean(captchaNode) || /请完成.{0,12}验证|拖动.{0,12}滑块|点击.{0,12}验证|verify you are human|\bcaptcha\b/i.test(body),
+  rate_limited: /访问过于频繁|操作过于频繁|操作频繁|请求频繁|稍后再试|too many requests|rate[ -]?limit|frequent requests/i.test(body),
+  security_verification: /安全验证|风险验证|异常访问|unusual traffic|security verification/i.test(body),
+};
+"#,
+            )
+            .await
+            .ok()?;
+        if state.get("captcha_required").and_then(Value::as_bool) == Some(true) {
+            Some("captcha_required".to_string())
+        } else if state.get("rate_limited").and_then(Value::as_bool) == Some(true) {
+            Some("rate_limited".to_string())
+        } else if state.get("security_verification").and_then(Value::as_bool) == Some(true) {
+            Some("security_verification".to_string())
+        } else {
+            None
+        }
+    }
 }
 
 pub fn with_browser_script(
@@ -658,7 +840,7 @@ impl BrowserScriptTool {
         let names = allowed_tools.iter().cloned().collect::<Vec<_>>().join(", ");
         let contract = override_contract_hint(&runtime.site);
         let description = format!(
-            "Execute arbitrary JavaScript that controls the current {} browser tab. The script is an async function body with `input` and `socai` available and must return JSON-serializable data. Use `await socai.evaluate(pageScript, input)` for arbitrary DOM JavaScript in the live page's isolated world; pageScript may be a JavaScript function such as `() => ({{ title: document.title }})` or a function-body string. Function closures and page-owned JavaScript globals are not shared, but the live DOM is available. The same forms work with `waitFor(pageScript, options)`. Other helpers are `pageInfo()`, `click(selector)`, `type(selector, text)`, `press(key)`, `navigate(url)`, `scroll(deltaY)`, and `wait(ms)`. The control program survives target-page navigation, and click/type/press use trusted CDP input. Use small probes to diagnose a failed browser-backed tool. Optional `save_as.tool` writes and activates a verified local override for one of: {}. {} JavaScript has the logged-in page's authority but no host shell or file-system APIs. Do not use it to bypass login, captcha, security verification, rate limits, permissions, or a confirmed valid empty result.",
+            "Execute arbitrary JavaScript that controls the current {} browser tab. The script is an async function body with `input` and `socai` available and must return JSON-serializable data. Use `await socai.evaluate(pageScript, input)` for arbitrary DOM JavaScript in the live page's isolated world; pageScript may be a JavaScript function such as `() => ({{ title: document.title }})` or a function-body string. Function closures and page-owned JavaScript globals are not shared, but the live DOM is available. The same forms work with `waitFor(pageScript, options)`. Other helpers are `pageInfo()`, `click(selector)`, `type(selector, text)`, `press(key)`, `navigate(url)`, `scroll(deltaY)`, and `wait(ms)`. The control program survives target-page navigation, and click/type/press use trusted CDP input. Use small probes to diagnose a failed browser-backed tool. Optional `save_as.tool` writes and activates a verified local override for one of: {}. {} On a socai upgrade, the built-in tool receives one canary call before an older override is reused; a working built-in retires the override, while a still-failing built-in lets a contract-valid override be re-certified. JavaScript has the logged-in page's authority but no host shell or file-system APIs. Do not use it to bypass login, captcha, security verification, rate limits, permissions, or a confirmed valid empty result.",
             runtime.site, names, contract
         );
         Self {
@@ -719,6 +901,7 @@ impl Tool for BrowserScriptTool {
     }
 
     async fn call(&self, input: Value, _ctx: &ToolContext) -> Result<ToolResult> {
+        let _lifecycle_guard = self.runtime.registry.lifecycle_lock.lock().await;
         let script = input
             .get("script")
             .and_then(Value::as_str)
@@ -739,6 +922,18 @@ impl Tool for BrowserScriptTool {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty());
+
+        if save_tool.is_some() {
+            if let Some(blocker) = self.runtime.override_blocker().await {
+                return Ok(json_result(&json!({
+                    "ok": false,
+                    "reason": "override_activation_blocked",
+                    "error": "a local override cannot be validated or activated on the current blocked page",
+                    "blocker": blocker,
+                    "page": self.runtime.page_info().await,
+                })));
+            }
+        }
 
         let candidate_path = if let Some(tool) = save_tool {
             if !self.allowed_tools.contains(tool) {
@@ -802,6 +997,20 @@ impl Tool for BrowserScriptTool {
             }
         };
 
+        if save_tool.is_some() {
+            if let Some(blocker) = self.runtime.override_blocker().await {
+                return Ok(json_result(&json!({
+                    "ok": false,
+                    "reason": "override_activation_blocked",
+                    "error": "the script reached a blocked page, so its result cannot be validated or activated",
+                    "blocker": blocker,
+                    "result": value,
+                    "candidate_path": candidate_path,
+                    "page": self.runtime.page_info().await,
+                })));
+            }
+        }
+
         if let Some(tool) = save_tool {
             if let Err(error) =
                 validate_override_result(&self.runtime.site, tool, &script_input, &value, true)
@@ -836,7 +1045,13 @@ impl Tool for BrowserScriptTool {
                     "tool": manifest.tool,
                     "path": path,
                     "source_version": manifest.source_version,
+                    "validated_with_version": manifest.validated_with_version,
+                    "tool_contract_version": manifest.tool_contract_version,
+                    "tool_impl_revision": manifest.tool_impl_revision,
                     "created_at": manifest.created_at,
+                    "last_validated_at": manifest.last_validated_at,
+                    "status_changed_at": manifest.status_changed_at,
+                    "status": manifest.status,
                     "active": true,
                 })),
                 Err(error) => {
@@ -869,6 +1084,298 @@ struct LocalOverrideTool {
     runtime: BrowserScriptRuntime,
 }
 
+struct OverrideExecutionFailure {
+    reason: &'static str,
+    error: String,
+    blocker: Option<String>,
+}
+
+impl LocalOverrideTool {
+    async fn execute_override(
+        &self,
+        input: &Value,
+        manifest: &ActiveOverride,
+        script: &str,
+    ) -> std::result::Result<Value, OverrideExecutionFailure> {
+        let value = self
+            .runtime
+            .execute(script, input, manifest.timeout_ms)
+            .await
+            .map_err(|error| OverrideExecutionFailure {
+                reason: "local_override_failed",
+                error: format!("{error:#}"),
+                blocker: None,
+            })?;
+        if let Some(blocker) = self.runtime.override_blocker().await {
+            return Err(OverrideExecutionFailure {
+                reason: "local_override_page_blocked",
+                error: format!("local override reached a blocked page: {blocker}"),
+                blocker: Some(blocker),
+            });
+        }
+        validate_override_result(&self.runtime.site, self.inner.name(), input, &value, false)
+            .map_err(|error| OverrideExecutionFailure {
+                reason: "local_override_result_failed",
+                error: format!("{error:#}"),
+                blocker: None,
+            })?;
+        Ok(value)
+    }
+
+    fn transition_override(
+        &self,
+        manifest: &ActiveOverride,
+        manifest_path: &Path,
+        status: OverrideStatus,
+        reason: &str,
+        revalidate: bool,
+    ) -> ActiveOverride {
+        match self
+            .runtime
+            .registry
+            .transition(manifest, manifest_path, status, reason, revalidate)
+        {
+            Ok(next) => next,
+            Err(error) => {
+                tracing::warn!(
+                    site = %self.runtime.site,
+                    tool = %self.inner.name(),
+                    %error,
+                    "failed to persist local override state transition"
+                );
+                manifest.clone()
+            }
+        }
+    }
+
+    async fn call_builtin(&self, input: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        match self.inner.call(input.clone(), ctx).await {
+            Ok(result) => {
+                Ok(
+                    annotate_repairable_result(&self.runtime, self.inner.name(), &input, result)
+                        .await,
+                )
+            }
+            Err(error) => {
+                let rendered = format!("{error:#}");
+                if is_repairable_browser_error(&rendered) {
+                    Ok(repair_failure_result(
+                        &self.runtime,
+                        self.inner.name(),
+                        &input,
+                        "tool_execution_failed",
+                        &rendered,
+                        None,
+                    )
+                    .await)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    async fn call_builtin_after_override_failure(
+        &self,
+        input: Value,
+        ctx: &ToolContext,
+        manifest: Option<&ActiveOverride>,
+        manifest_path: Option<&Path>,
+        path: Option<&Path>,
+        failure: OverrideExecutionFailure,
+    ) -> Result<ToolResult> {
+        if let Some(blocker) = failure.blocker.as_deref() {
+            return Ok(override_blocked_result(
+                &self.runtime,
+                self.inner.name(),
+                "local_override_execution",
+                blocker,
+            )
+            .await);
+        }
+        match self.inner.call(input.clone(), ctx).await {
+            Ok(result)
+                if tool_result_succeeded(
+                    &self.runtime.site,
+                    self.inner.name(),
+                    &input,
+                    &result,
+                ) =>
+            {
+                if let Some(blocker) = self.runtime.override_blocker().await {
+                    return Ok(override_blocked_result(
+                        &self.runtime,
+                        self.inner.name(),
+                        "built_in_fallback",
+                        &blocker,
+                    )
+                    .await);
+                }
+                if let (Some(manifest), Some(manifest_path)) = (manifest, manifest_path) {
+                    self.transition_override(
+                        manifest,
+                        manifest_path,
+                        OverrideStatus::Stale,
+                        "override_failed_builtin_succeeded",
+                        false,
+                    );
+                }
+                Ok(result)
+            }
+            Ok(result) if tool_result_is_repairable_failure(&result) => {
+                let error = format!(
+                    "{}; built-in fallback also failed: {}",
+                    failure.error,
+                    tool_result_failure_summary(&result)
+                );
+                Ok(repair_failure_result(
+                    &self.runtime,
+                    self.inner.name(),
+                    &input,
+                    failure.reason,
+                    &error,
+                    path,
+                )
+                .await)
+            }
+            Ok(result) => Ok(result),
+            Err(error) => {
+                let rendered = format!("{error:#}");
+                if is_repairable_browser_error(&rendered) {
+                    let error = format!(
+                        "{}; built-in fallback also failed: {rendered}",
+                        failure.error
+                    );
+                    Ok(repair_failure_result(
+                        &self.runtime,
+                        self.inner.name(),
+                        &input,
+                        failure.reason,
+                        &error,
+                        path,
+                    )
+                    .await)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    async fn revalidate_override(
+        &self,
+        input: Value,
+        ctx: &ToolContext,
+        manifest: ActiveOverride,
+        manifest_path: PathBuf,
+        script_path: PathBuf,
+        script: String,
+    ) -> Result<ToolResult> {
+        if let Some(blocker) = self.runtime.override_blocker().await {
+            tracing::warn!(
+                site = %self.runtime.site,
+                tool = %self.inner.name(),
+                %blocker,
+                "older local override skipped because the live page is blocked"
+            );
+            return self.call_builtin(input, ctx).await;
+        }
+
+        let builtin_failure = match self.inner.call(input.clone(), ctx).await {
+            Ok(result)
+                if tool_result_succeeded(
+                    &self.runtime.site,
+                    self.inner.name(),
+                    &input,
+                    &result,
+                ) =>
+            {
+                if let Some(blocker) = self.runtime.override_blocker().await {
+                    return Ok(override_blocked_result(
+                        &self.runtime,
+                        self.inner.name(),
+                        "built_in_version_canary",
+                        &blocker,
+                    )
+                    .await);
+                }
+                self.transition_override(
+                    &manifest,
+                    &manifest_path,
+                    OverrideStatus::Stale,
+                    "builtin_succeeded_after_version_change",
+                    false,
+                );
+                return Ok(result);
+            }
+            Ok(result) if tool_result_is_repairable_failure(&result) => {
+                tool_result_failure_summary(&result)
+            }
+            Ok(result) => return Ok(result),
+            Err(error) => {
+                let rendered = format!("{error:#}");
+                if !is_repairable_browser_error(&rendered) {
+                    return Err(error);
+                }
+                rendered
+            }
+        };
+
+        if let Some(blocker) = self.runtime.override_blocker().await {
+            return Ok(override_blocked_result(
+                &self.runtime,
+                self.inner.name(),
+                "built_in_version_canary",
+                &blocker,
+            )
+            .await);
+        }
+
+        match self.execute_override(&input, &manifest, &script).await {
+            Ok(value) => {
+                let manifest = self.transition_override(
+                    &manifest,
+                    &manifest_path,
+                    OverrideStatus::Active,
+                    "override_revalidated_after_builtin_failure",
+                    true,
+                );
+                Ok(local_override_result(
+                    ctx,
+                    value,
+                    &manifest,
+                    &script_path,
+                    Some(&builtin_failure),
+                ))
+            }
+            Err(failure) => {
+                if let Some(blocker) = failure.blocker.as_deref() {
+                    return Ok(override_blocked_result(
+                        &self.runtime,
+                        self.inner.name(),
+                        "local_override_revalidation",
+                        blocker,
+                    )
+                    .await);
+                }
+                let error = format!(
+                    "built-in canary failed: {builtin_failure}; previous override also failed: {}",
+                    failure.error
+                );
+                Ok(repair_failure_result(
+                    &self.runtime,
+                    self.inner.name(),
+                    &input,
+                    failure.reason,
+                    &error,
+                    Some(script_path.as_path()),
+                )
+                .await)
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Tool for LocalOverrideTool {
     fn name(&self) -> &str {
@@ -896,88 +1403,135 @@ impl Tool for LocalOverrideTool {
     }
 
     async fn call(&self, input: Value, ctx: &ToolContext) -> Result<ToolResult> {
-        let active = match self
+        let _lifecycle_guard = self.runtime.registry.lifecycle_lock.lock().await;
+        let local_override = match self
             .runtime
             .registry
             .active_script(&self.runtime.site, self.inner.name())
         {
             Ok(value) => value,
             Err(error) => {
-                return Ok(repair_failure_result(
-                    &self.runtime,
-                    self.inner.name(),
-                    &input,
-                    "local_override_load_failed",
-                    &format!("{error:#}"),
-                    None,
-                )
-                .await)
+                return self
+                    .call_builtin_after_override_failure(
+                        input,
+                        ctx,
+                        None,
+                        None,
+                        None,
+                        OverrideExecutionFailure {
+                            reason: "local_override_load_failed",
+                            error: format!("{error:#}"),
+                            blocker: None,
+                        },
+                    )
+                    .await
             }
         };
-        if let Some((manifest, path, script)) = active {
-            let value = match self
-                .runtime
-                .execute(&script, &input, manifest.timeout_ms)
-                .await
-            {
-                Ok(value) => value,
-                Err(error) => {
-                    return Ok(repair_failure_result(
-                        &self.runtime,
-                        self.inner.name(),
-                        &input,
-                        "local_override_failed",
-                        &format!("{error:#}"),
-                        Some(path.as_path()),
-                    )
-                    .await)
-                }
-            };
-            if let Err(error) = validate_override_result(
-                &self.runtime.site,
-                self.inner.name(),
-                &input,
-                &value,
+        let Some((manifest, manifest_path, script_path, script)) = local_override else {
+            return self.call_builtin(input, ctx).await;
+        };
+
+        let current_contract = override_contract_version(&self.runtime.site, self.inner.name());
+        if manifest.tool_contract_version != current_contract {
+            let reason = format!(
+                "tool_contract_changed_from_{}_to_{}",
+                manifest.tool_contract_version, current_contract
+            );
+            self.transition_override(
+                &manifest,
+                &manifest_path,
+                OverrideStatus::Quarantined,
+                &reason,
                 false,
-            ) {
-                return Ok(repair_failure_result(
-                    &self.runtime,
-                    self.inner.name(),
-                    &input,
-                    "local_override_result_failed",
-                    &format!("{error:#}"),
-                    Some(path.as_path()),
-                )
-                .await);
-            }
-            return Ok(local_override_result(ctx, value, &manifest, &path));
+            );
+            return self.call_builtin(input, ctx).await;
         }
 
-        match self.inner.call(input.clone(), ctx).await {
-            Ok(result) => {
-                Ok(
-                    annotate_repairable_result(&self.runtime, self.inner.name(), &input, result)
-                        .await,
+        let current_revision = builtin_tool_revision(&self.runtime.site, self.inner.name());
+        if manifest.validated_with_version != env!("CARGO_PKG_VERSION")
+            || manifest.tool_impl_revision != current_revision
+        {
+            return self
+                .revalidate_override(input, ctx, manifest, manifest_path, script_path, script)
+                .await;
+        }
+
+        if let Some(blocker) = self.runtime.override_blocker().await {
+            tracing::warn!(
+                site = %self.runtime.site,
+                tool = %self.inner.name(),
+                %blocker,
+                "local override skipped because the live page is blocked"
+            );
+            return self.call_builtin(input, ctx).await;
+        }
+
+        match self.execute_override(&input, &manifest, &script).await {
+            Ok(value) => Ok(local_override_result(
+                ctx,
+                value,
+                &manifest,
+                &script_path,
+                None,
+            )),
+            Err(failure) => {
+                self.call_builtin_after_override_failure(
+                    input,
+                    ctx,
+                    Some(&manifest),
+                    Some(manifest_path.as_path()),
+                    Some(script_path.as_path()),
+                    failure,
                 )
-            }
-            Err(error) => {
-                let rendered = format!("{error:#}");
-                if is_repairable_browser_error(&rendered) {
-                    Ok(repair_failure_result(
-                        &self.runtime,
-                        self.inner.name(),
-                        &input,
-                        "tool_execution_failed",
-                        &rendered,
-                        None,
-                    )
-                    .await)
-                } else {
-                    Err(error)
-                }
+                .await
             }
         }
     }
+}
+
+fn tool_result_value(result: &ToolResult) -> Option<Value> {
+    let ToolResultBlock::Text { text } = result.blocks.first()? else {
+        return None;
+    };
+    serde_json::from_str(text).ok()
+}
+
+fn tool_result_succeeded(site: &str, tool: &str, input: &Value, result: &ToolResult) -> bool {
+    let Some(mut value) = tool_result_value(result) else {
+        return false;
+    };
+
+    // The XHS preview intentionally removes its redundant `ok:true` before
+    // returning the lean payload. Restore it only for contract validation;
+    // every other built-in must explicitly report success.
+    if site == "xhs"
+        && tool == "search"
+        && input.get("preview").and_then(Value::as_bool) == Some(true)
+        && value.get("ok").is_none()
+    {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("ok".to_string(), Value::Bool(true));
+        }
+    }
+
+    validate_override_result(site, tool, input, &value, false).is_ok()
+}
+
+fn tool_result_is_repairable_failure(result: &ToolResult) -> bool {
+    let Some(value) = tool_result_value(result) else {
+        return false;
+    };
+    value.get("ok").and_then(Value::as_bool) == Some(false)
+        && !contains_non_repairable_failure(&value)
+        && is_structured_repairable_failure(&value)
+}
+
+fn tool_result_failure_summary(result: &ToolResult) -> String {
+    tool_result_value(result)
+        .as_ref()
+        .map(failure_reason)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| result.flat_text().chars().take(1024).collect())
 }
 
 async fn annotate_repairable_result(
@@ -1038,6 +1592,25 @@ async fn repair_failure_result(
     }))
 }
 
+async fn override_blocked_result(
+    runtime: &BrowserScriptRuntime,
+    tool: &str,
+    phase: &str,
+    blocker: &str,
+) -> ToolResult {
+    json_result(&json!({
+        "ok": false,
+        "reason": blocker,
+        "error": "local override processing stopped because the live page requires user or server recovery",
+        "failure": {
+            "kind": "browser_page_blocked",
+            "phase": phase,
+            "tool": tool,
+            "observed": runtime.page_info().await,
+        },
+    }))
+}
+
 fn recovery_directive(
     site: &str,
     tool: &str,
@@ -1072,6 +1645,25 @@ fn supports_local_override(site: &str, tool: &str) -> bool {
         "xhs" => matches!(tool, "search" | "get_notes" | "author_scan"),
         "dy" => tool == "search",
         _ => false,
+    }
+}
+
+fn override_contract_version(site: &str, tool: &str) -> u32 {
+    match (site, tool) {
+        ("xhs", "search" | "get_notes" | "author_scan") | ("dy", "search") => 1,
+        _ => 0,
+    }
+}
+
+fn builtin_tool_revision(site: &str, tool: &str) -> u32 {
+    match (site, tool) {
+        // Increment the matching revision when a built-in implementation
+        // changes without changing the override input/output contract. That
+        // forces one native canary even in a locally rebuilt package carrying
+        // the same Cargo version.
+        ("xhs", "search") => 2,
+        ("xhs", "get_notes" | "author_scan") | ("dy", "search") => 1,
+        _ => 0,
     }
 }
 
@@ -1354,6 +1946,7 @@ fn local_override_result(
     mut value: Value,
     manifest: &ActiveOverride,
     path: &Path,
+    builtin_attempt_failure: Option<&str>,
 ) -> ToolResult {
     let note_ids = value
         .get("notes")
@@ -1392,10 +1985,31 @@ fn local_override_result(
                 "site": manifest.site,
                 "tool": manifest.tool,
                 "path": path,
+                "source_version": manifest.source_version,
+                "validated_with_version": manifest.validated_with_version,
+                "tool_contract_version": manifest.tool_contract_version,
+                "tool_impl_revision": manifest.tool_impl_revision,
                 "created_at": manifest.created_at,
+                "last_validated_at": manifest.last_validated_at,
+                "status_changed_at": manifest.status_changed_at,
+                "status": manifest.status,
+                "status_reason": manifest.status_reason,
                 "artifact_path": artifact_path,
-                "host_enrichment": "not_run",
-                "note": "The browser override preserves JSON evidence and a run artifact, but built-in media download, OCR, ASR, and cross-run history hooks are not available.",
+                "builtin_attempt": builtin_attempt_failure.map(|failure| json!({
+                    "status": "repairable_failure",
+                    "summary": failure,
+                    "side_effects": "The failed built-in attempt may already have changed the tab, written partial artifacts/history, or started requested host enrichment.",
+                })),
+                "host_enrichment": if builtin_attempt_failure.is_some() {
+                    "built_in_attempt_may_have_partially_run"
+                } else {
+                    "not_run"
+                },
+                "note": if builtin_attempt_failure.is_some() {
+                    "The override result is authoritative for this call, but a preceding failed built-in revalidation attempt may have produced partial local side effects."
+                } else {
+                    "The browser override preserves JSON evidence and a run artifact, but built-in media download, OCR, ASR, and cross-run history hooks are not available."
+                },
             }),
         );
     }
@@ -1667,7 +2281,7 @@ fn validate_script_path(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn newest_active_manifest(dir: &Path) -> Result<Option<PathBuf>> {
+fn newest_override_manifest(dir: &Path) -> Result<Option<PathBuf>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1683,19 +2297,29 @@ fn newest_active_manifest(dir: &Path) -> Result<Option<PathBuf>> {
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("active-") || !name.ends_with(".json") {
+        let Some(order_key) = override_manifest_order_key(&name) else {
             continue;
-        }
+        };
         let path = entry.path();
-        if newest
+        let replace = newest
             .as_ref()
             .and_then(|current| current.file_name())
-            .is_none_or(|current| name.as_ref() > current.to_string_lossy().as_ref())
-        {
+            .is_none_or(|current| {
+                let current = current.to_string_lossy();
+                override_manifest_order_key(&current).is_none_or(|current| order_key > current)
+            });
+        if replace {
             newest = Some(path);
         }
     }
     Ok(newest)
+}
+
+fn override_manifest_order_key(name: &str) -> Option<&str> {
+    let key = name
+        .strip_prefix("active-")
+        .or_else(|| name.strip_prefix("state-"))?;
+    key.ends_with(".json").then_some(key)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
