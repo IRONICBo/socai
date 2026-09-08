@@ -337,9 +337,11 @@ impl Tool for GetVideosTool {
     }
 
     fn description(&self) -> &str {
-        "Read one or more Douyin videos by id or URL. Returns a normalized video entity, \
-         creator identity, engagement fields, playable media metadata, and top comments. \
-         Set download_media to save video files or transcribe_audio to use the paid socai ASR service."
+        "Read one or more Douyin works by video id or URL. Returns one entry per input under \
+         `videos[]`; successful entries place platform-aligned normalized work data under `entity`, including \
+         `video_id`, `description`, `hashtags`, creator `author_id` (sec_uid), `created_at`, \
+         engagement fields, `video`, and `top_comments`. Set download_media to save video files \
+         or transcribe_audio to use the paid socai ASR service."
     }
 
     fn input_schema(&self) -> Value {
@@ -468,8 +470,10 @@ impl Tool for AuthorScanTool {
     }
 
     fn description(&self) -> &str {
-        "Open a Douyin author profile by id or URL and return normalized author fields plus \
-         visible video cards. Use the cards with get_videos when full details are needed."
+        "Open a Douyin creator profile by sec_uid or URL. On success, `profile` contains \
+         `display_name`, `handle` (抖音号), `author_id` (sec_uid), `bio`, `verified`, `followers`, \
+         `following`, `likes` (获赞), `video_count` (作品数), and `video_cards`. Pass a card's \
+         `video_id` or `url` string to get_videos for full work details."
     }
 
     fn input_schema(&self) -> Value {
@@ -509,10 +513,11 @@ impl Tool for SearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search Douyin for videos matching `query` and return visible result \
-         cards (video id, URL, title, author, cover, and any engagement text \
-         the page exposes). Defaults to 10 cards and may wait several minutes \
-         if Douyin web is throttled."
+        "Search Douyin works matching `query`. Returns top-level `ok`, `query`, `count`, and \
+         `cards` (`url` is also present after search submission); each card uses Douyin fields \
+         such as `video_id`, `url`, `title`, `author`, `author_id`, `cover_url`, \
+         `duration_seconds`, and visible engagement text. Defaults to 10 cards and may wait \
+         several minutes if Douyin web is throttled."
     }
 
     fn input_schema(&self) -> Value {
