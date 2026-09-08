@@ -336,7 +336,9 @@ impl Tool for SearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search TikTok for public videos matching query and return normalized video cards."
+        "Search TikTok posts matching `query`. Returns top-level `ok`, `query`, `url`, `count`, \
+         and `cards`; each card uses TikTok fields such as `video_id`, `url`, `title`, `author`, \
+         `author_id`, `cover_url`, `duration_seconds`, and visible engagement text."
     }
 
     fn input_schema(&self) -> Value {
@@ -374,9 +376,11 @@ impl Tool for GetVideosTool {
     }
 
     fn description(&self) -> &str {
-        "Read one or more TikTok videos by id or URL. Returns normalized video, creator, \
-         engagement, media, and top-comment fields. Media can be downloaded and sent to \
-         the paid socai ASR service when requested."
+        "Read one or more TikTok posts by video id or URL. Returns one entry per input under \
+         `videos[]`; successful entries place platform-native post data under `entity`, including \
+         `video_id`, `description`, `hashtags`, creator `author_id`/`author_internal_id`, \
+         `created_at`, engagement fields, `video`, and `top_comments`. Media can be downloaded \
+         and sent to the paid socai ASR service when requested."
     }
 
     fn input_schema(&self) -> Value {
@@ -500,8 +504,9 @@ impl Tool for AuthorScanTool {
     }
 
     fn description(&self) -> &str {
-        "Read a TikTok public author profile and collect normalized visible video cards. \
-         Use the cards with get_videos when full details are needed."
+        "Read a TikTok creator profile by @handle or URL. On success, `profile` contains \
+         `display_name`, `handle`, `author_internal_id`, `bio`, `verified`, follower/following/like \
+         and video counts, plus `video_cards`. Use those cards with get_videos for full details."
     }
 
     fn input_schema(&self) -> Value {
