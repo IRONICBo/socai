@@ -142,9 +142,12 @@ impl Conversation {
             } else {
                 report
             };
-            messages.push(Message::assistant_blocks(vec![Block::Text {
-                text: report,
-            }]));
+            let mut blocks = Vec::new();
+            if let Some(reasoning) = final_reasoning_content(Path::new(&run.run_dir)) {
+                blocks.push(Block::ReasoningContent { text: reasoning });
+            }
+            blocks.push(Block::Text { text: report });
+            messages.push(Message::assistant_blocks(blocks));
         }
         messages
     }
@@ -196,6 +199,25 @@ impl Conversation {
             }
         }
     }
+}
+
+fn final_reasoning_content(run_dir: &Path) -> Option<String> {
+    let llm_dir = run_dir.join("llm");
+    let mut responses = std::fs::read_dir(llm_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".response.json"))
+        })
+        .collect::<Vec<_>>();
+    responses.sort();
+    let response = responses.pop()?;
+    let response = std::fs::read_to_string(response).ok()?;
+    let response = serde_json::from_str::<LLMResponse>(&response).ok()?;
+    (!response.reasoning_content.trim().is_empty()).then_some(response.reasoning_content)
 }
 
 /// Reconstruct the normalized transcript that the agent had already seen

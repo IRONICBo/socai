@@ -595,15 +595,35 @@ pub async fn run_agent_with_events(
                 );
                 usage += &response.usage;
                 let (visible_texts, _) = split_thinking(&response.text_blocks);
-                for text in &visible_texts {
+                let visible_text = visible_texts.join("\n\n");
+                if let Some(message) = forced_summary_failure(
+                    task,
+                    &response,
+                    &visible_text,
+                    run_state.as_ref(),
+                    tools.iter().any(|tool| tool.name() == "publish_artifact"),
+                ) {
+                    warn!(step = step + 1, "forced summary did not finish the task");
+                    final_text = message.clone();
                     emit(
                         &events,
-                        AgentEvent::AssistantText {
+                        AgentEvent::ApiError {
                             step: step + 1,
-                            text: text.clone(),
+                            message: message.clone(),
                         },
                     );
-                    final_text = text.clone();
+                    terminal_error = Some(message);
+                } else {
+                    for text in &visible_texts {
+                        emit(
+                            &events,
+                            AgentEvent::AssistantText {
+                                step: step + 1,
+                                text: text.clone(),
+                            },
+                        );
+                        final_text = text.clone();
+                    }
                 }
             }
             Err(e) => {
@@ -902,6 +922,316 @@ fn split_thinking(text_blocks: &[String]) -> (Vec<String>, Vec<String>) {
     (visible, thinking)
 }
 
+fn forced_summary_failure(
+    task: &str,
+    response: &LLMResponse,
+    visible_text: &str,
+    run_state: &RunState,
+    publish_required: bool,
+) -> Option<String> {
+    let tried_unavailable_tool =
+        !response.tool_calls.is_empty() || contains_pseudo_tool_call(visible_text);
+    let published = run_state
+        .artifact_records()
+        .into_iter()
+        .filter(|artifact| {
+            artifact.source_tool == "publish_artifact"
+                && artifact.metadata.get("category").and_then(Value::as_str) == Some("deliverable")
+        })
+        .collect::<Vec<_>>();
+    let mut required_kinds = requested_artifact_kinds(task);
+    for kind in claimed_artifact_kinds(visible_text) {
+        if !required_kinds.contains(&kind) {
+            required_kinds.push(kind);
+        }
+    }
+    required_kinds.sort_by_key(|kind| *kind == "generic");
+    let mut matched_artifacts = vec![false; published.len()];
+    let missing_required_deliverable = publish_required
+        && required_kinds.iter().any(|kind| {
+            if *kind == "generic" {
+                return published.is_empty();
+            }
+            let matching_index = published.iter().enumerate().position(|(index, artifact)| {
+                !matched_artifacts[index] && artifact_matches_kind(&artifact.path, kind)
+            });
+            if let Some(index) = matching_index {
+                matched_artifacts[index] = true;
+                false
+            } else {
+                true
+            }
+        });
+    if !tried_unavailable_tool && !missing_required_deliverable {
+        return None;
+    }
+
+    let chinese = task
+        .chars()
+        .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch));
+    Some(if chinese {
+        if missing_required_deliverable {
+            "任务在达到最大执行步数时仍未完成，且没有经过验证并成功发布的交付文件。已有过程记录已保留，请重试或缩小任务范围。".to_string()
+        } else {
+            "任务在达到最大执行步数后仍试图调用工具，但该操作没有实际执行。已有过程记录已保留，请重试。".to_string()
+        }
+    } else if missing_required_deliverable {
+        "The task reached its execution limit without a verified, published deliverable. Progress was preserved; retry or narrow the task scope.".to_string()
+    } else {
+        "The task reached its execution limit while still attempting a tool call, so that operation was not executed. Progress was preserved; please retry.".to_string()
+    })
+}
+
+fn contains_pseudo_tool_call(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "<tool_calls",
+        "<function_calls",
+        "<invoke",
+        "<function name=",
+        "&lt;tool_calls",
+        "&lt;function_calls",
+        "&lt;invoke",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn requested_artifact_kinds(task: &str) -> Vec<&'static str> {
+    let lower = task.to_ascii_lowercase();
+    let creation_markers = [
+        "create",
+        "generate",
+        "export",
+        "produce",
+        "write",
+        "save",
+        "build",
+        "make",
+        "downloadable",
+        "生成",
+        "创建",
+        "制作",
+        "导出",
+        "保存",
+        "写入",
+        "做成",
+        "整理成",
+        "放到",
+    ];
+    let source_markers = [
+        " from ",
+        " using ",
+        " based on ",
+        " source ",
+        " input ",
+        " after ",
+        " for ",
+        " of ",
+        " about ",
+        "根据",
+        "基于",
+        "关于",
+        "输入",
+        "从",
+    ];
+    let mut kinds = Vec::new();
+    for creation_marker in &creation_markers {
+        for (offset, _) in lower.match_indices(*creation_marker) {
+            let target_start = offset + creation_marker.len();
+            let remaining = &lower[target_start..];
+            let target_end = source_markers
+                .iter()
+                .chain(creation_markers.iter())
+                .filter_map(|marker| remaining.find(marker))
+                .min()
+                .unwrap_or(remaining.len());
+            let target = &remaining[..target_end];
+            let target_kinds = artifact_kinds(target);
+            let has_typed_artifact = !target_kinds.is_empty();
+            for kind in target_kinds {
+                kinds.push(kind);
+            }
+            if !has_typed_artifact
+                && ["file", "document", "文件", "文档"]
+                    .iter()
+                    .any(|marker| target.contains(marker))
+                && !kinds.contains(&"generic")
+            {
+                kinds.push("generic");
+            }
+        }
+    }
+    kinds
+}
+
+fn claimed_artifact_kinds(text: &str) -> Vec<&'static str> {
+    let lower = text.to_ascii_lowercase();
+    let completion_markers = [
+        "generated",
+        "created",
+        "exported",
+        "saved",
+        "published",
+        "ready for download",
+        "已生成",
+        "已创建",
+        "已导出",
+        "已保存",
+        "已发布",
+        "可下载",
+    ];
+    let claim_boundaries = [
+        " source ",
+        " input ",
+        " based on ",
+        " from ",
+        ". ",
+        "; ",
+        "\n",
+        "来源",
+        "输入",
+        "基于",
+        "根据",
+        "。",
+        "；",
+    ];
+    let mut kinds = Vec::new();
+    for completion_marker in &completion_markers {
+        for (offset, _) in lower.match_indices(*completion_marker) {
+            let target_start = offset + completion_marker.len();
+            let remaining = &lower[target_start..];
+            let target_end = claim_boundaries
+                .iter()
+                .chain(completion_markers.iter())
+                .filter_map(|marker| remaining.find(marker))
+                .min()
+                .unwrap_or(remaining.len());
+            let target = &remaining[..target_end];
+            for kind in artifact_kinds(target) {
+                if !kinds.contains(&kind) {
+                    kinds.push(kind);
+                }
+            }
+            if kinds.is_empty()
+                && ["file", "document", "文件", "文档", "下载"]
+                    .iter()
+                    .any(|marker| target.contains(marker))
+            {
+                kinds.push("generic");
+            }
+        }
+    }
+    kinds
+}
+
+fn artifact_kinds(text: &str) -> Vec<&'static str> {
+    let groups: [(&str, &[&str]); 8] = [
+        (
+            "excel",
+            &[
+                ".xlsx",
+                ".xlsm",
+                "excel",
+                "excel file",
+                "excel report",
+                "excel workbook",
+                "excel spreadsheet",
+                "excel 文件",
+                "excel 报告",
+                "excel 表格",
+                "电子表格",
+            ],
+        ),
+        ("csv", &[".csv", "csv", "csv 文件", "csv file", "csv 格式"]),
+        (
+            "spreadsheet",
+            &[
+                "spreadsheet",
+                "spreadsheet file",
+                "spreadsheet document",
+                "表格文件",
+            ],
+        ),
+        (
+            "word",
+            &[
+                ".docx",
+                ".docm",
+                "word document",
+                "word file",
+                "word 文档",
+                "word 文件",
+            ],
+        ),
+        (
+            "powerpoint",
+            &[
+                ".pptx",
+                ".pptm",
+                "powerpoint",
+                "ppt",
+                "powerpoint presentation",
+                "powerpoint file",
+                "ppt 文件",
+                "ppt 文档",
+                "幻灯片文件",
+            ],
+        ),
+        (
+            "pdf",
+            &[
+                ".pdf",
+                "pdf",
+                "pdf 文件",
+                "pdf file",
+                "pdf 文档",
+                "pdf document",
+                "pdf 报告",
+                "pdf report",
+            ],
+        ),
+        ("archive", &[".zip", "zip", "zip 文件", "zip file"]),
+        (
+            "subtitle",
+            &[".srt", ".vtt", "srt", "vtt", "字幕文件", "subtitle file"],
+        ),
+    ];
+    let mut kinds = Vec::new();
+    for (kind, markers) in groups {
+        let occurrences = markers
+            .iter()
+            .map(|marker| text.match_indices(marker).count())
+            .max()
+            .unwrap_or_default();
+        kinds.extend(std::iter::repeat_n(kind, occurrences));
+    }
+    if kinds.contains(&"excel") {
+        kinds.retain(|kind| *kind != "spreadsheet");
+    }
+    kinds
+}
+
+fn artifact_matches_kind(path: &str, kind: &str) -> bool {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match kind {
+        "excel" => matches!(extension.as_str(), "xlsx" | "xlsm"),
+        "csv" => extension == "csv",
+        "spreadsheet" => matches!(extension.as_str(), "xlsx" | "xlsm" | "csv"),
+        "word" => matches!(extension.as_str(), "docx" | "docm"),
+        "powerpoint" => matches!(extension.as_str(), "pptx" | "pptm"),
+        "pdf" => extension == "pdf",
+        "archive" => extension == "zip",
+        "subtitle" => matches!(extension.as_str(), "srt" | "vtt"),
+        "generic" => true,
+        _ => false,
+    }
+}
+
 /// Build the assistant message blocks for history. Truncates visible text to
 /// `ASSISTANT_TEXT_MAX_CHARS` to keep history bounded over many steps. Drops
 /// `[Thinking]`-prefixed text since that's already surfaced as a Reasoning
@@ -922,12 +1252,12 @@ fn build_assistant_blocks(response: &LLMResponse, visible_texts: &[String]) -> V
             signature: tb.signature.clone(),
         });
     }
-    // Preserve reasoning_content alongside tool_calls so providers that
-    // require it round-tripped (Kimi/Qwen) get it on the next step.
+    // Preserve every reasoning_content response, including text-only turns.
+    // DeepSeek thinking mode requires all prior reasoning to be replayed when
+    // a later request carries tools, not only turns that called a tool.
     if response.thinking_blocks.is_empty()
         && response.reasoning_items.is_empty()
         && !response.reasoning_content.trim().is_empty()
-        && !response.tool_calls.is_empty()
     {
         blocks.push(Block::ReasoningContent {
             text: response.reasoning_content.clone(),

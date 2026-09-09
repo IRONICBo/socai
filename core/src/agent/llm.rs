@@ -189,7 +189,6 @@ impl LLMResponse {
         if self.thinking_blocks.is_empty()
             && self.reasoning_items.is_empty()
             && !self.reasoning_content.trim().is_empty()
-            && !self.tool_calls.is_empty()
         {
             blocks.push(Block::ReasoningContent {
                 text: self.reasoning_content.clone(),

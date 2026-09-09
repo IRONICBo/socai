@@ -184,6 +184,7 @@ impl OpenAICompatBackend {
                 messages,
                 self.preserve_reasoning_content(),
                 self.provider == Provider::DeepSeek,
+                self.provider == Provider::DeepSeek,
             ),
             max_tokens,
             tools: chat_tools,
@@ -246,8 +247,16 @@ fn validate_deepseek_tool_context(messages: &[Message]) -> anyhow::Result<()> {
                         "DeepSeek API error | status=400 | code=invalid_tool_context | message=assistant turn started before every prior tool call had a matching result"
                     );
                 }
+                let has_reasoning = message.content.as_blocks().iter().any(|block| {
+                    matches!(block, Block::ReasoningContent { text } if !text.trim().is_empty())
+                });
                 for block in message.content.as_blocks() {
                     if let Block::ToolUse { id, .. } = block {
+                        if !has_reasoning {
+                            anyhow::bail!(
+                                "DeepSeek API error | status=400 | code=invalid_reasoning_context | message=assistant tool call is missing its reasoning_content"
+                            );
+                        }
                         if id.trim().is_empty() || !pending.insert(id) {
                             anyhow::bail!(
                                 "DeepSeek API error | status=400 | code=invalid_tool_context | message=assistant history contains an empty or duplicate tool call id"
@@ -399,6 +408,30 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output
         assert_eq!(payload["tool_choice"], "auto");
         assert!(payload["messages"][2]["content"].is_null());
 
+        let text_only_reasoning = [Message::assistant_blocks(vec![
+            Block::ReasoningContent {
+                text: "final answer reasoning".into(),
+            },
+            Block::Text {
+                text: "prior answer".into(),
+            },
+        ])];
+        let payload = serde_json::to_value(deepseek.build_chat_request(
+            "system",
+            &text_only_reasoning,
+            &[ToolSchema {
+                name: "lookup".into(),
+                description: "lookup a value".into(),
+                input_schema: json!({"type": "object"}),
+            }],
+            1024,
+        ))
+        .expect("request should serialize");
+        assert_eq!(
+            payload["messages"][1]["reasoning_content"],
+            "final answer reasoning"
+        );
+
         let invalid = [Message {
             role: MessageRole::User,
             content: MessageContent::Blocks(vec![Block::ToolResult {
@@ -454,6 +487,7 @@ fn build_chat_messages(
     messages: &[Message],
     preserve_reasoning: bool,
     require_assistant_content: bool,
+    preserve_all_reasoning: bool,
 ) -> Vec<Value> {
     let mut out = vec![json!({"role": "system", "content": system})];
 
@@ -499,11 +533,10 @@ fn build_chat_messages(
                 if !tool_calls.is_empty() {
                     assistant_msg.insert("tool_calls".into(), Value::Array(tool_calls.clone()));
                 }
-                if preserve_reasoning && !tool_calls.is_empty() {
-                    assistant_msg.insert(
-                        "reasoning_content".into(),
-                        json!(reasoning.unwrap_or_default()),
-                    );
+                if preserve_reasoning && (preserve_all_reasoning || !tool_calls.is_empty()) {
+                    if let Some(reasoning) = reasoning.filter(|text| !text.trim().is_empty()) {
+                        assistant_msg.insert("reasoning_content".into(), json!(reasoning));
+                    }
                 }
                 out.push(Value::Object(assistant_msg));
             }
