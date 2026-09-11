@@ -1,6 +1,7 @@
 //! Default system prompt for the agent loop.
 
 use crate::agent::file_bash_tools::shell_runtime_prompt;
+use crate::agent::skills::skills_system_prompt;
 
 pub const BASE_SYSTEM_PROMPT: &str =
     "You are a computer-use agent. Use the provided tools when they help complete\n\
@@ -22,6 +23,9 @@ pub fn build_system_prompt(tool_names: &[&str], extra_instructions: &str) -> Str
     ));
     if tool_names.contains(&"shell") {
         parts.push(shell_runtime_prompt());
+    }
+    if tool_names.contains(&"read_skill") {
+        parts.push(skills_system_prompt());
     }
     if !tool_names.is_empty() {
         let listing = tool_names

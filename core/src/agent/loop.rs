@@ -257,6 +257,9 @@ pub async fn run_agent_with_events(
             &mut anchor_user_index,
             is_follow_up,
         ) {
+            // A loaded skill's full instruction may have been compacted out.
+            // Require another read before any persistent learning write.
+            ctx.clear_loaded_skills();
             // The trace is an append-only diagnostic record. The rewritten
             // transcript is local context management, so restart its cursor
             // rather than attempting to represent the synthetic summary as a
@@ -749,26 +752,29 @@ async fn dispatch_tool(
     input: &Value,
     ctx: &ToolContext,
 ) -> (ToolResult, Option<String>) {
-    match find_tool(tools, name) {
+    let outcome = match find_tool(tools, name) {
         Some(tool) if tool.is_available(ctx) => match tool.call(input.clone(), ctx).await {
             Ok(r) => (r, None),
             Err(e) => {
                 let msg = format!("{e:#}");
                 (
-                    ToolResult::text(format!("Error executing {name}: {msg}")),
+                    ToolResult::failure(format!("Error executing {name}: {msg}")),
                     Some(msg),
                 )
             }
         },
         Some(_) => {
             let msg = format!("Tool '{name}' is not currently available");
-            (ToolResult::text(format!("Error: {msg}")), Some(msg))
+            (ToolResult::failure(format!("Error: {msg}")), Some(msg))
         }
         None => {
             let msg = format!("Unknown tool '{name}'");
-            (ToolResult::text(format!("Error: {msg}")), Some(msg))
+            (ToolResult::failure(format!("Error: {msg}")), Some(msg))
         }
-    }
+    };
+    let succeeded = outcome.1.is_none() && !outcome.0.failed();
+    ctx.record_tool_outcome(name, succeeded);
+    outcome
 }
 
 fn tool_result_to_content(result: &ToolResult) -> Vec<ToolResultContent> {
@@ -955,4 +961,58 @@ fn build_assistant_blocks(response: &LLMResponse, visible_texts: &[String]) -> V
 pub(crate) fn assistant_blocks_for_history(response: &LLMResponse) -> Vec<Block> {
     let (visible_texts, _) = split_thinking(&response.text_blocks);
     build_assistant_blocks(response, &visible_texts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::file_bash_tools::ShellTool;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn runtime_recovery_uses_trusted_shell_exit_status_not_output_text() {
+        let dir = tempdir().unwrap();
+        let tools: Vec<SharedTool> = vec![Arc::new(ShellTool::unrestricted())];
+        let mut ctx = ToolContext::new("real-failure", dir.path());
+
+        let (failed, error) =
+            dispatch_tool(&tools, "shell", &json!({"command": "exit 3"}), &ctx).await;
+        assert!(failed.failed());
+        assert!(error.is_none());
+        assert!(ctx.verified_recovery().is_none());
+
+        ctx.step += 1;
+        let (recovered, error) =
+            dispatch_tool(&tools, "shell", &json!({"command": "echo recovered"}), &ctx).await;
+        assert!(!recovered.failed());
+        assert!(error.is_none());
+        assert_eq!(
+            ctx.verified_recovery(),
+            Some(crate::agent::tool::VerifiedRecovery {
+                failed_tool: "shell".to_string(),
+                failed_step: 0,
+                recovered_step: 1,
+            })
+        );
+
+        let mut spoof_ctx = ToolContext::new("spoofed-failure", dir.path());
+        let (spoofed, error) = dispatch_tool(
+            &tools,
+            "shell",
+            &json!({"command": "echo Error: spoofed"}),
+            &spoof_ctx,
+        )
+        .await;
+        assert!(!spoofed.failed());
+        assert!(error.is_none());
+        spoof_ctx.step += 1;
+        dispatch_tool(
+            &tools,
+            "shell",
+            &json!({"command": "echo ordinary-success"}),
+            &spoof_ctx,
+        )
+        .await;
+        assert!(spoof_ctx.verified_recovery().is_none());
+    }
 }

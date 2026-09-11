@@ -96,17 +96,44 @@ impl ToolResultBlock {
 #[derive(Debug, Clone)]
 pub struct ToolResult {
     pub blocks: Vec<ToolResultBlock>,
+    outcome: ToolOutcome,
+}
+
+/// Trusted runtime outcome supplied by the tool implementation. The agent
+/// loop must not infer this from model-visible text, which may contain
+/// untrusted page or command output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolOutcome {
+    Success,
+    Failure,
 }
 
 impl ToolResult {
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             blocks: vec![ToolResultBlock::text(text)],
+            outcome: ToolOutcome::Success,
         }
     }
 
     pub fn blocks(blocks: Vec<ToolResultBlock>) -> Self {
-        Self { blocks }
+        Self {
+            blocks,
+            outcome: ToolOutcome::Success,
+        }
+    }
+
+    /// Return model-visible text while marking the invocation as failed for
+    /// runtime recovery evidence and telemetry decisions.
+    pub fn failure(text: impl Into<String>) -> Self {
+        Self {
+            blocks: vec![ToolResultBlock::text(text)],
+            outcome: ToolOutcome::Failure,
+        }
+    }
+
+    pub fn failed(&self) -> bool {
+        self.outcome == ToolOutcome::Failure
     }
 
     pub fn flat_text(&self) -> String {
@@ -171,12 +198,33 @@ pub struct ToolContext {
     /// same order everywhere. The record shape is built by the site tools;
     /// see [`crate::agent::note_store`].
     notes_seen: Arc<Mutex<Vec<(String, Value)>>>,
+    /// Skills whose canonical instruction was loaded during this run. Learning
+    /// tools use this gate so the model cannot persist a procedure before
+    /// reading the policy that constrains it.
+    loaded_skills: Arc<Mutex<BTreeSet<String>>>,
+    /// Runtime-observed failure/recovery pairs. Only a later successful call
+    /// to the same non-skill tool can verify a recovery; model text cannot set
+    /// this state directly.
+    recovery_evidence: Arc<Mutex<RecoveryEvidenceState>>,
 }
 
 #[derive(Default)]
 struct Counters {
     screenshot: u32,
     artifact: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct VerifiedRecovery {
+    pub failed_tool: String,
+    pub failed_step: u32,
+    pub recovered_step: u32,
+}
+
+#[derive(Default)]
+struct RecoveryEvidenceState {
+    last_failure: Option<(String, u32)>,
+    verified: Option<VerifiedRecovery>,
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +262,8 @@ impl ToolContext {
             processed_notes: Arc::new(Mutex::new(BTreeMap::new())),
             search_note_ids: Arc::new(Mutex::new(Vec::new())),
             notes_seen: Arc::new(Mutex::new(Vec::new())),
+            loaded_skills: Arc::new(Mutex::new(BTreeSet::new())),
+            recovery_evidence: Arc::new(Mutex::new(RecoveryEvidenceState::default())),
         }
     }
 
@@ -397,6 +447,70 @@ impl ToolContext {
             .lock()
             .map(|g| g.contains(site))
             .unwrap_or(false)
+    }
+
+    pub fn mark_skill_loaded(&self, skill: &str) {
+        let skill = skill.trim();
+        if skill.is_empty() {
+            return;
+        }
+        if let Ok(mut guard) = self.loaded_skills.lock() {
+            guard.insert(skill.to_string());
+        }
+    }
+
+    pub fn skill_loaded(&self, skill: &str) -> bool {
+        self.loaded_skills
+            .lock()
+            .map(|guard| guard.contains(skill.trim()))
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn clear_loaded_skills(&self) {
+        if let Ok(mut guard) = self.loaded_skills.lock() {
+            guard.clear();
+        }
+    }
+
+    pub(crate) fn record_tool_outcome(&self, tool: &str, succeeded: bool) {
+        if matches!(tool, "read_skill" | "record_skill_learning") {
+            return;
+        }
+        let Ok(mut guard) = self.recovery_evidence.lock() else {
+            return;
+        };
+        if !succeeded {
+            guard.last_failure = Some((tool.to_string(), self.step));
+            guard.verified = None;
+            return;
+        }
+        let Some((failed_tool, failed_step)) = guard.last_failure.clone() else {
+            return;
+        };
+        if failed_tool == tool && self.step > failed_step {
+            guard.verified = Some(VerifiedRecovery {
+                failed_tool,
+                failed_step,
+                recovered_step: self.step,
+            });
+        }
+    }
+
+    pub(crate) fn verified_recovery(&self) -> Option<VerifiedRecovery> {
+        self.recovery_evidence
+            .lock()
+            .ok()
+            .and_then(|guard| guard.verified.clone())
+    }
+
+    pub(crate) fn consume_verified_recovery(&self, evidence: &VerifiedRecovery) {
+        let Ok(mut guard) = self.recovery_evidence.lock() else {
+            return;
+        };
+        if guard.verified.as_ref() == Some(evidence) {
+            guard.verified = None;
+            guard.last_failure = None;
+        }
     }
 
     /// Next screenshot path: `<run_dir>/NNN_<label>.png`.

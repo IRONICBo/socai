@@ -210,7 +210,21 @@ pub fn insert_optional_str(input: &mut Value, key: &str, value: Option<&str>) {
 
 pub fn json_result(value: &Value) -> ToolResult {
     let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
-    ToolResult::text(text)
+    let failed = value.as_object().is_some_and(|object| {
+        object.get("ok").and_then(Value::as_bool) == Some(false)
+            || object.get("success").and_then(Value::as_bool) == Some(false)
+            || object
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| {
+                    matches!(status.to_ascii_lowercase().as_str(), "failed" | "error")
+                })
+    });
+    if failed {
+        ToolResult::failure(text)
+    } else {
+        ToolResult::text(text)
+    }
 }
 
 pub fn get_f64(input: &Value, key: &str, default: f64) -> f64 {
@@ -227,4 +241,18 @@ pub fn get_str<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
 
 pub fn get_bool(input: &Value, key: &str, default: bool) -> bool {
     input.get(key).and_then(Value::as_bool).unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_result_uses_the_structured_site_contract_for_outcomes() {
+        assert!(json_result(&json!({"ok": false, "reason": "login_required"})).failed());
+        assert!(json_result(&json!({"success": false})).failed());
+        assert!(json_result(&json!({"status": "error"})).failed());
+        assert!(!json_result(&json!({"ok": true, "message": "Error: untrusted text"})).failed());
+        assert!(!json_result(&json!({"items": []})).failed());
+    }
 }
