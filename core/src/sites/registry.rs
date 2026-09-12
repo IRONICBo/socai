@@ -1,9 +1,11 @@
 //! Site registry — the single wiring point for site capabilities.
 //!
 //! Each site module exposes one `pub static <ID>_SITE: SiteSpec` and gets
-//! listed in [`all_sites`]. Everything downstream (CLI subcommands, daemon
-//! dispatch, TUI/desktop agent setup) is derived from the spec, so adding a
-//! site never touches the CLI, daemon, or app shells.
+//! listed in [`all_sites`]. `SiteSpec` is the compile-time capability manifest;
+//! it does not prescribe a fixed set of files inside the platform module.
+//! CLI subcommands and daemon dispatch are derived from the spec. Interactive
+//! hosts select a registered spec explicitly; the registry never infers or
+//! switches platforms from task text.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -36,7 +38,9 @@ pub struct SiteSpec {
     /// a broader command/debug surface in `agent_tools` while exposing a
     /// smaller, product-safe macro surface to interactive users.
     pub default_agent_tools: Option<AgentToolsFn>,
-    /// Agent playbook (knowledge.md) with host-specific preamble prepended.
+    /// Compose optional site guidance with the host-specific preamble. A site
+    /// without durable guidance should pass the preamble through directly;
+    /// it does not need an empty knowledge file.
     pub agent_instructions: AgentInstructionsFn,
     /// Optional default playbook that matches `default_agent_tools`.
     pub default_agent_instructions: Option<AgentInstructionsFn>,
