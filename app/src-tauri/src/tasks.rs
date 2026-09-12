@@ -34,8 +34,6 @@ pub struct AgentTaskSnapshot {
     pub(crate) task: String,
     pub(crate) provider: Option<String>,
     pub(crate) model: Option<String>,
-    #[serde(default)]
-    pub(crate) site_id: Option<String>,
     pub(crate) status: String,
     pub(crate) created_at: u64,
     pub(crate) started_at: Option<u64>,
@@ -134,7 +132,6 @@ impl AgentTaskRegistry {
         task: String,
         provider: Option<String>,
         model: Option<String>,
-        site_id: String,
         run_dir: String,
         session_dir: String,
     ) -> AgentTaskSnapshot {
@@ -147,7 +144,6 @@ impl AgentTaskRegistry {
             task,
             provider,
             model,
-            site_id: Some(site_id),
             status: "queued".into(),
             created_at: now_ms(),
             started_at: None,
@@ -614,7 +610,6 @@ fn persist_task_index(tasks: &[AgentTaskSnapshot]) {
                 "task": &task.task,
                 "provider": &task.provider,
                 "model": &task.model,
-                "site_id": &task.site_id,
                 "status": &task.status,
                 "created_at": task.created_at,
                 "started_at": task.started_at,

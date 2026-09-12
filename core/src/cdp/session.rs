@@ -232,13 +232,20 @@ impl PageSession {
         url: &str,
         max_bytes: usize,
         destination: &Path,
+        allowed_https_host_suffixes: &[&str],
     ) -> anyhow::Result<(String, String)> {
         const CHUNK_BYTES: usize = 1024 * 1024;
 
         if max_bytes == 0 {
             anyhow::bail!("browser resource byte limit must be greater than zero");
         }
+        if allowed_https_host_suffixes.is_empty()
+            || !url_matches_https_host_suffixes(url, allowed_https_host_suffixes)
+        {
+            anyhow::bail!("browser resource URL is outside the allowed HTTPS host set");
+        }
         let encoded_url = serde_json::to_string(url)?;
+        let encoded_host_suffixes = serde_json::to_string(allowed_https_host_suffixes)?;
         let fetch_id = uuid::Uuid::new_v4().to_string();
         let encoded_id = serde_json::to_string(&fetch_id)?;
         let result = async {
@@ -247,10 +254,31 @@ impl PageSession {
 return (async () => {{
   const key = {encoded_id};
   const registry = globalThis.__socaiResourceFetches ||= new Map();
+  const allowedHostSuffixes = {encoded_host_suffixes};
+  const allowedUrl = (raw) => {{
+    try {{
+      const candidate = new URL(raw);
+      const host = candidate.hostname.toLowerCase();
+      return candidate.protocol === "https:" && !candidate.username && !candidate.password &&
+        !candidate.port && allowedHostSuffixes.some((suffix) =>
+          host === suffix || host.endsWith(`.${{suffix}}`));
+    }} catch (_) {{
+      return false;
+    }}
+  }};
   const response = await fetch({encoded_url}, {{
     credentials: "include",
     signal: AbortSignal.timeout(115000),
   }});
+  const finalUrl = response.url || "";
+  if (!allowedUrl(finalUrl)) {{
+    if (response.body) await response.body.cancel();
+    return {{
+      status: response.status,
+      error: "redirect target is outside the allowed HTTPS host set",
+      final_url: finalUrl,
+    }};
+  }}
   const contentLength = Number(response.headers.get("content-length") || 0);
   if (contentLength > {max_bytes}) {{
     if (response.body) await response.body.cancel();
@@ -269,7 +297,7 @@ return (async () => {{
   return {{
     status: response.status,
     content_type: response.headers.get("content-type") || "",
-    final_url: response.url || "",
+    final_url: finalUrl,
   }};
 }})();
 "#
@@ -298,6 +326,9 @@ return (async () => {{
                 .filter(|value| !value.is_empty())
                 .unwrap_or(url)
                 .to_string();
+            if !url_matches_https_host_suffixes(&final_url, allowed_https_host_suffixes) {
+                anyhow::bail!("browser resource redirect left the allowed HTTPS host set");
+            }
 
             let mut file = tokio::fs::File::create(destination)
                 .await
@@ -583,6 +614,26 @@ return (async () => {{
         self.owner.unregister_owned_target(&target_id).await;
         result.map(|_| ())
     }
+}
+
+fn url_matches_https_host_suffixes(value: &str, suffixes: &[&str]) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+    {
+        return false;
+    }
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    suffixes.iter().any(|suffix| {
+        let suffix = suffix.trim().trim_start_matches('.').to_ascii_lowercase();
+        !suffix.is_empty() && (host == suffix || host.ends_with(&format!(".{suffix}")))
+    })
 }
 
 fn remote_object_value(object: &Value) -> anyhow::Result<Value> {
