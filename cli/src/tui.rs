@@ -672,11 +672,8 @@ async fn run_agent_task(runtime: &SocaiRuntime, task: &str, state: &mut AppState
         "{TUI_AGENT_PREAMBLE}\n\n{}",
         state.conversation.context_note()
     );
-    let agent_instructions = site
-        .default_agent_instructions
-        .unwrap_or(site.agent_instructions);
     let config = AgentRunConfig {
-        extra_instructions: agent_instructions(&preamble),
+        extra_instructions: site.agent_instructions(&preamble),
         enabled_sites: vec![site.id.to_string()],
         seed_messages: state.conversation.chat_messages(),
         session_id: Some(state.conversation.id.clone()),

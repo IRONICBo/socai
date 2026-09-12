@@ -4,19 +4,22 @@
 socai是一个通用browser use agent，像人类一样通过页面交互来操作网页。每个网站沉淀了自己特定的操作在sites下面的文件夹，从而能更快、更准、更省token地操作成熟流程。
 socai总是用模拟人的方式，通过CDP和DOM进行每一步的网页操作。除了初次打开网站时，从不使用url导航、api接口等方式操作网站，和传统自动化工具和爬虫不同。
 
-站点目录是平台自治边界，不是固定文件模板。固定的是能力契约：每个站点目录需要用 `mod.rs` 声明模块并导出一个 `SiteSpec`；`SiteSpec` 是编译期 manifest，声明站点 id、入口、工具工厂、可选的站点 instructions 内容和 CLI/daemon commands。其余文件只在对应职责真实存在时创建：
+站点目录是平台自治边界，不是固定文件模板。固定的是能力契约：每个站点目录用 `mod.rs` 声明模块并导出一个 `SiteSpec`；`SiteSpec` 是编译期 capability manifest，声明站点 id、域名、入口、`knowledge.md`、browser tools、host/agent tools 和 CLI/daemon commands。共享 registry 只加载和执行声明过的能力，不包含平台选择器、页面状态或平台切换逻辑。
 
-- `tools.rs`：agent/CLI 接口层。定义原子工具或高频工作流工具，通常也承载 `SiteSpec`。工具实现 `Tool` trait（`core/src/agent/tool.rs`）：`name`/`description`/`input_schema`/`call`，返回 JSON 文本。description 里写清楚成本与耗时（是否打开页面、是否耗 token/需要本地 ASR 等），agent 靠它做性价比决策。命令包装一律复用共享 runner（`core/src/sites/runner.rs` 的 `run_tool_command`/`ToolCommand`，输入小工具 `get_*`/`trimmed_required`/`json_result` 也从那里 import，参考 xhs 的 `run_xhs_tool_command`）——**不要把 run_dir/快照/工具分发这套脚手架复制进站点文件夹**。
+`knowledge.md` 是每个站点包都保留的稳定学习入口，可以从空文件开始。它与 ego-lite manifest 中引用的 notes 语义一致：manifest 负责发现，文件负责沉淀经过真实页面验证、无法由 schema 完整表达的长期经验。不要删除文件，也不要为了填充而复制 tool description。
+
+实现文件按平台真实复杂度组织，不作为公共契约：
+
+- `tools.rs` 或 `tools/`：有 host/agent/CLI 能力时使用，定义原子工具、高频工作流、工具工厂和供 `SiteSpec` 引用的 command 表。工具实现 `Tool` trait（`core/src/agent/tool.rs`）：`name`/`description`/`input_schema`/`call`，返回 JSON 文本。description 里写清楚成本与耗时（是否打开页面、是否耗 token/需要本地 ASR 等），agent 靠它做性价比决策。命令包装一律复用共享 runner（`core/src/sites/runner.rs` 的 `run_tool_command`/`ToolCommand`，输入小工具 `get_*`/`trimmed_required`/`json_result` 也从那里 import，参考 xhs 的 `run_xhs_tool_command`）——**不要把 run_dir/快照/工具分发这套脚手架复制进站点文件夹**。
 - `page.rs`：存在非平凡的页面状态、导航、等待、重试或 CDP 操作编排时使用。选择器尽量稳定，优先结构性选择器、`data-*`、aria 属性；不要依赖构建生成的 hash class。**只用 snapshot DOM 里真实见过的元素/类名写选择器，绝不凭猜测。**简单站点可以直接在工具实现中完成，不必创建空壳 runtime。
-- `page_scripts.js` 或 `page_scripts/`：需要在页面上下文中提取 DOM 时使用。JS 只做单次页面操作或提取并返回 JSON；不返回 DOM 节点，不负责跨页面工作流。单文件可用 IIFE 挂载命名函数表（参考 xhs 的 `SocaiXhsPageScripts`）；当独立 browser tool 较多时可按能力拆成目录。点击、滚动、等待和重试等编排保留在 Rust 侧。
+- `page_scripts.js`、`browser_tools/` 或其他 JS 组织：需要在页面上下文中提取 DOM 时使用。JS 只做单次页面操作或提取并返回 JSON；不返回 DOM 节点，不负责跨页面工作流。用站点自己的 `BrowserToolset` 显式声明源码、binding 和允许调用的函数；共享执行器拒绝未声明函数。点击、滚动、等待和重试等编排保留在 Rust 侧。
 - `entities.rs`：多个工具或 runtime 共享稳定、可序列化的平台数据结构时使用；一次性的内部 JSON 不必为了形式一致单独建模。
-- `knowledge.md` 或 `knowledge/`：只在确有无法由 tool description/schema 表达、且经过真实页面验证的长期知识时使用，例如页面状态、登录/challenge、风控和可靠恢复策略。知识文件是可选资产；没有有效内容时不要创建空文件，也不要向 agent 注入占位文本。
 - 其他文件：按真实能力增加，例如 history、media manifest、diagnostics。不要复制其他平台未使用的模块。
 
-依赖方向保持为 `tools -> page -> entities/page scripts`。每个平台自行拥有域名、选择器、页面状态、登录/challenge、成功条件、详情完整性和媒体 allowlist；平台模块之间不得互相引用这些语义。`cdp`、`media`、`sites/runner` 等共享层只承载无平台语义的机制。
+不要规定统一的 `tools.rs -> page.rs -> entities.rs` 物理依赖链。应遵守的是语义边界：host tools 负责 agent/CLI schema 和跨页面编排；browser tools 只在当前页面上下文完成单点 DOM 操作；entities 只承载多个能力共享的稳定数据。每个平台自行拥有域名、选择器、页面状态、登录/challenge、成功条件、详情完整性和媒体 allowlist；平台模块之间不得互相引用这些语义。`cdp`、`media`、`sites/runner` 和 `BrowserToolset` 只承载无平台语义的机制。
 
 打通接口：
-1. 在站点模块里定义 `pub static <ID>_SITE: SiteSpec`（通常放在 `tools.rs`，参考 xhs 的 `XHS_SITE`）：声明 id、home_url、agent 工具工厂、instructions，以及要暴露成 CLI/daemon 命令的 `SiteCommand` 列表（含参数声明）。
+1. 在站点模块里定义并由 `mod.rs` 导出 `pub static <ID>_SITE: SiteSpec`：声明 id、domains、home_url、用 `include_str!("knowledge.md")` 嵌入的 knowledge、可选 `BrowserToolset`、agent 工具工厂，以及要暴露成 CLI/daemon 命令的 `SiteCommand` 列表（含参数声明）。
 2. 在 `core/src/sites/mod.rs` 声明模块，并把它加进 `core/src/sites/registry.rs` 的 `SITES` 数组。
 
 完成后 `socai <site_id> <command>` 子命令和 daemon 分发自动生效。TUI/桌面端必须由宿主显式选择已注册的 `SiteSpec`；当前宿主固定使用 XHS 时，新站点不会自动出现在交互界面，也不得通过用户文本隐式切换平台。
@@ -35,7 +38,7 @@ socai总是用模拟人的方式，通过CDP和DOM进行每一步的网页操作
   
   
 ### 2. Scaffold代码
-详细了解以上的用户回答后，如果sites目录下面还没有关于这个网站的文件夹，则增加一个，只 scaffold `mod.rs`、`SiteSpec` 和第一项能力实际需要的文件，不创建空的 entities/page/script/knowledge 占位文件。注意，先不实现具体工具逻辑。如果已有这个网站的文件夹，则可按需看是否需要增加文件或接口。新增的site_id和文件夹名保持一致，都用简写，比如小红书 `xhs`、抖音 `dy`。
+详细了解以上的用户回答后，如果sites目录下面还没有关于这个网站的文件夹，则增加一个，只 scaffold `mod.rs`、`knowledge.md`、`SiteSpec` 和第一项能力实际需要的实现文件，不创建空的 entities/page/script 占位文件。`knowledge.md` 初始可以为空，但必须由 `SiteSpec.knowledge` 通过 `include_str!` 接入。注意，先不实现具体工具逻辑。如果已有这个网站的文件夹，则可按需看是否需要增加文件或接口。新增的site_id和文件夹名保持一致，都用简写，比如小红书 `xhs`、抖音 `dy`。
 
 ### 3. （核心）开发Loop
 然后，按以下的3步流程逐步执行，并且不断循环这3步流程，一步一步地添加：
@@ -77,7 +80,7 @@ cargo run -p socai-cli -- stop
 新工具能力实现之后，运行3-5组不同参数，来全面测试新能力。如果遇到问题，返回上一步的流程进行修复。
 
 ### 5. 更新知识
-代码完成后，判断是否发现了 tool description/schema 无法表达、并且值得跨任务复用的网站知识。只有存在这类内容时才创建或更新 `knowledge.md`/`knowledge/`，并接入对应 instructions；否则不创建知识文件。不要复制工具 schema，也不要一上来先写 knowledge，而是在代码全部实现并经过真实页面验证后再沉淀。
+代码完成后，判断是否发现了 tool description/schema 无法表达、并且值得跨任务复用的网站知识。只有存在这类内容时才更新 `knowledge.md`；否则保留空文件。不要复制工具 schema，也不要一上来先写 knowledge，而是在代码全部实现并经过真实页面验证后再沉淀。
 
 
 

@@ -1,11 +1,11 @@
 //! Site registry — the single wiring point for site capabilities.
 //!
 //! Each site module exposes one `pub static <ID>_SITE: SiteSpec` and gets
-//! listed in [`all_sites`]. `SiteSpec` is the compile-time capability manifest;
-//! it does not prescribe a fixed set of files inside the platform module.
-//! CLI subcommands and daemon dispatch are derived from the spec. Interactive
-//! hosts select a registered spec explicitly; the registry never infers or
-//! switches platforms from task text.
+//! listed in [`all_sites`]. `SiteSpec` is the compile-time capability manifest:
+//! it declares the site's domains, durable knowledge, browser-context tools,
+//! host tools, and CLI commands without prescribing a fixed source-file layout.
+//! Interactive hosts select a registered spec explicitly; the registry never
+//! infers or switches platforms from task text.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -21,7 +21,53 @@ pub type BoxFuture<T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send>>;
 
 /// Async factory: build the site's agent tools against a shared page.
 pub type AgentToolsFn = fn(Arc<PageSession>, Arc<dyn LlmProvider>) -> BoxFuture<Vec<Arc<dyn Tool>>>;
+/// Compatibility alias for callers that compose site instructions directly.
 pub type AgentInstructionsFn = fn(&str) -> String;
+
+/// Browser-context capability bundle embedded into the binary by a site.
+///
+/// This is the Rust equivalent of an ego-lite `browserTools` manifest entry:
+/// the platform owns the JavaScript and its allow-list, while the shared
+/// runtime only performs validated loading and invocation.
+pub struct BrowserToolset {
+    pub binding: &'static str,
+    pub source: &'static str,
+    pub tools: &'static [&'static str],
+}
+
+impl BrowserToolset {
+    async fn run(
+        &self,
+        page: &PageSession,
+        site_id: &str,
+        name: &str,
+        arg: Option<&Value>,
+    ) -> anyhow::Result<Value> {
+        if !self.tools.contains(&name) {
+            anyhow::bail!("Unknown {site_id} browser tool: {name}");
+        }
+
+        let tool_name = serde_json::to_string(name)?;
+        let invocation = match arg {
+            Some(value) => format!("__socaiBrowserTool({})", serde_json::to_string(value)?),
+            None => "__socaiBrowserTool()".to_string(),
+        };
+        let trace_label = serde_json::to_string(&format!("{site_id}/{name}"))?;
+        let expression = format!(
+            "(function() {{\n{}\n// SOCAI_BROWSER_TOOL\n\
+             const __socaiBrowserToolTrace = {trace_label};\n\
+             const __socaiBrowserTools = {};\n\
+             const __socaiBrowserTool = __socaiBrowserTools[{tool_name}];\n\
+             if (typeof __socaiBrowserTool !== 'function') {{\n\
+               throw new Error('Browser tool is not callable: ' + {tool_name});\n\
+             }}\n\
+             return {invocation};\n\
+             }})()",
+            self.source, self.binding
+        );
+        page.evaluate_json(&expression).await
+    }
+}
 
 /// One-shot CLI/daemon command: `(page, JSON args, debug_snapshot, progress)` → JSON.
 pub type CommandRunFn =
@@ -32,18 +78,20 @@ pub struct SiteSpec {
     /// the daemon `site` field, and the `enabled_sites` gate value.
     pub id: &'static str,
     pub about: &'static str,
+    /// Host patterns declared for discovery and diagnostics. Security-sensitive
+    /// URL validation remains platform-owned because URL forms differ by site.
+    pub domains: &'static [&'static str],
     pub home_url: &'static str,
+    /// Durable, platform-owned instructions embedded at compile time. The file
+    /// may start empty, but remains a stable sink for verified site learnings.
+    pub knowledge: &'static str,
+    /// Page-context DOM capabilities. Host orchestration remains in Rust tools.
+    pub browser_tools: Option<&'static BrowserToolset>,
     pub agent_tools: AgentToolsFn,
     /// Optional default tool surface for normal app/TUI agents. Sites can keep
     /// a broader command/debug surface in `agent_tools` while exposing a
     /// smaller, product-safe macro surface to interactive users.
     pub default_agent_tools: Option<AgentToolsFn>,
-    /// Compose optional site guidance with the host-specific preamble. A site
-    /// without durable guidance should pass the preamble through directly;
-    /// it does not need an empty knowledge file.
-    pub agent_instructions: AgentInstructionsFn,
-    /// Optional default playbook that matches `default_agent_tools`.
-    pub default_agent_instructions: Option<AgentInstructionsFn>,
     pub commands: &'static [SiteCommand],
 }
 
@@ -101,6 +149,31 @@ impl SlowWhen {
 }
 
 impl SiteSpec {
+    /// Compose host instructions with this site's durable knowledge.
+    pub fn agent_instructions(&self, extra: &str) -> String {
+        let knowledge = self.knowledge.trim();
+        let extra = extra.trim();
+        match (extra.is_empty(), knowledge.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => knowledge.to_string(),
+            (false, true) => extra.to_string(),
+            (false, false) => format!("{extra}\n\n{knowledge}"),
+        }
+    }
+
+    /// Execute one browser-context capability declared by this manifest.
+    pub async fn run_browser_tool(
+        &self,
+        page: &PageSession,
+        name: &str,
+        arg: Option<&Value>,
+    ) -> anyhow::Result<Value> {
+        let tools = self
+            .browser_tools
+            .ok_or_else(|| anyhow::anyhow!("Site {} has no browser tools", self.id))?;
+        tools.run(page, self.id, name, arg).await
+    }
+
     pub fn command(&self, name: &str) -> Option<&'static SiteCommand> {
         self.commands.iter().find(|cmd| cmd.name == name)
     }
