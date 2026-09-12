@@ -12,12 +12,14 @@ use crate::agent::{Backend as LlmProvider, Tool, ToolContext, ToolResult};
 use crate::cdp::PageSession;
 use crate::media::MediaProcessor;
 use crate::sites::registry::{
-    required_string, ArgKind, BoxFuture, CommandArg, SiteCommand, SlowWhen,
+    required_string, ArgKind, BoxFuture, CommandArg, NativeSiteAdapter, SiteCommand, SlowWhen,
 };
 use crate::sites::runner::{get_f64, get_i64, json_result, run_tool_command, ToolCommand};
 use crate::sites::tiktok::TikTokPageRuntime;
 
-pub use super::{TIKTOK_KNOWLEDGE, TIKTOK_SITE};
+/// Bundled default note retained for API compatibility. Runtime site-skill
+/// overrides are loaded from `$SOCAI_HOME/site-skills/tiktok`.
+pub const TIKTOK_KNOWLEDGE: &str = include_str!("knowledge.md");
 
 const MAX_VIDEO_DOWNLOAD_BYTES: usize = 128 * 1024 * 1024;
 const MAX_POSTER_DOWNLOAD_BYTES: usize = 20 * 1024 * 1024;
@@ -59,12 +61,19 @@ pub async fn tiktok_agent_tools(
     Ok(tiktok_tools_with_llm_provider(page, Some(llm_provider)))
 }
 
-/// Preserve the host preamble when this site has no extra durable guidance.
 pub fn tiktok_agent_instructions(extra: &str) -> String {
-    TIKTOK_SITE.agent_instructions(extra)
+    crate::sites::learning::site_agent_instructions("tiktok", extra)
 }
 
-pub(crate) static TIKTOK_COMMANDS: &[SiteCommand] = &[
+pub static TIKTOK_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
+    id: "tiktok",
+    about: "TikTok (tiktok.com)",
+    home_url: "",
+    agent_tools: |page, llm| Box::pin(tiktok_agent_tools(page, llm)),
+    default_agent_tools: None,
+    agent_instructions: tiktok_agent_instructions,
+    default_agent_instructions: None,
+    commands: &[
         SiteCommand {
             name: "search",
             tool_name: "search",
@@ -195,7 +204,8 @@ pub(crate) static TIKTOK_COMMANDS: &[SiteCommand] = &[
             slow: SlowWhen::Always,
             run: run_page_state,
         },
-];
+    ],
+};
 
 fn run_search(
     page: Arc<PageSession>,

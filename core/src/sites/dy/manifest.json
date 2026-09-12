@@ -1,0 +1,65 @@
+{
+  "id": "dy",
+  "name": "Douyin",
+  "domains": [
+    "douyin.com",
+    "*.douyin.com",
+    "iesdouyin.com",
+    "*.iesdouyin.com"
+  ],
+  "notes": ["knowledge.md"],
+  "browserTools": {
+    "pageState": {
+      "description": "Read the current Douyin page, login, challenge, and hydration state.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiDouyinPageScripts",
+      "callable": "pageState",
+      "args": {},
+      "returns": { "type": "object", "description": "Current page state." }
+    },
+    "searchInput": {
+      "description": "Locate and inspect the Douyin search input.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiDouyinPageScripts",
+      "callable": "searchInput",
+      "args": {},
+      "returns": { "type": "object", "description": "Search input state and geometry." }
+    },
+    "setSearchInput": {
+      "description": "Set and submit the Douyin search input using the active page DOM.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiDouyinPageScripts",
+      "callable": "setSearchInput",
+      "args": { "query": { "type": "string", "required": true, "description": "Search text." } },
+      "returns": { "type": "object", "description": "Input and submit outcome." }
+    },
+    "searchState": {
+      "description": "Read the active Douyin search route and result state.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiDouyinPageScripts",
+      "callable": "searchState",
+      "args": { "query": { "type": "string", "required": false, "description": "Expected search text." } },
+      "returns": { "type": "object", "description": "Search transition and result state." }
+    },
+    "videoCards": {
+      "description": "Extract visible Douyin video cards from the current result or author grid.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiDouyinPageScripts",
+      "callable": "videoCards",
+      "args": {
+        "limit": { "type": "integer", "required": false, "description": "Maximum cards to return." }
+      },
+      "returns": { "type": "array", "description": "Visible Douyin video cards." }
+    },
+    "scrollFeed": {
+      "description": "Scroll the current Douyin feed or grid by a bounded amount.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiDouyinPageScripts",
+      "callable": "scrollFeed",
+      "args": {
+        "nudge_up": { "type": "boolean", "required": false, "description": "Move slightly upward instead of down." }
+      },
+      "returns": { "type": "object", "description": "Scroll position and movement." }
+    }
+  }
+}

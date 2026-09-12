@@ -4,33 +4,13 @@ use anyhow::{Context, Result};
 use serde_json::{json, Map, Value};
 
 use crate::cdp::PageSession;
-use crate::sites::registry::BrowserToolset;
 use crate::sites::tiktok::entities::{
     extract_handle, extract_video_id, is_tiktok_page_url, tiktok_author_url, tiktok_video_url,
     TikTokAuthorProfile, TikTokComment, TikTokVideo, TikTokVideoCard,
 };
-use crate::sites::tiktok::TIKTOK_SITE;
 
 pub const TIKTOK_HOME_URL: &str = "https://www.tiktok.com/";
 
-pub(crate) static TIKTOK_BROWSER_TOOLS: BrowserToolset = BrowserToolset {
-    binding: "window.SocaiTikTokPageScripts",
-    source: include_str!("page_scripts.js"),
-    tools: &[
-        "pageState",
-        "searchState",
-        "videoCards",
-        "scrollFeed",
-        "videoState",
-        "videoDetail",
-        "playerPlayButton",
-        "commentActivation",
-        "comments",
-        "scrollComments",
-        "authorState",
-        "authorProfile",
-    ],
-};
 const TRANSITION_TIMEOUT_S: f64 = 20.0;
 
 pub struct TikTokPageRuntime<'a> {
@@ -43,7 +23,7 @@ impl<'a> TikTokPageRuntime<'a> {
     }
 
     pub async fn run_script(&self, name: &str, arg: Option<&Value>) -> Result<Value> {
-        TIKTOK_SITE.run_browser_tool(self.page, name, arg).await
+        crate::sites::learning::run_site_browser_tool(self.page, "tiktok", name, arg).await
     }
 
     pub async fn current_url(&self) -> Result<String> {

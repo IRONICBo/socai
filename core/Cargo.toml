@@ -39,5 +39,8 @@ oar-ocr = "0.7"
 tracing-subscriber.workspace = true
 tempfile = "3"
 
+[build-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true
