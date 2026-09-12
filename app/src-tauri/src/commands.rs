@@ -19,7 +19,7 @@ use socai_core::runtime::{
     SocaiRuntime,
 };
 use socai_core::sites::xhs::{XhsHistoryStore, XhsPageRuntime};
-use socai_core::sites::{find_site, SiteSpec};
+use socai_core::sites::{find_native_site_adapter, site_learning_tools, NativeSiteAdapter};
 use socai_core::telemetry::query_text_enabled;
 use socai_core::telemetry::tool_call::{summarize_tool_args, summarize_tool_result};
 use socai_core::telemetry::trace::mark_run_trace_status;
@@ -64,8 +64,8 @@ const TAURI_ARTIFACT_RULES: &str = "\n\n## Deliverable files\n\
 /// app grows a site switcher.
 const APP_SITE_ID: &str = "xhs";
 
-fn app_site() -> Result<&'static SiteSpec> {
-    find_site(APP_SITE_ID)
+fn app_site() -> Result<&'static NativeSiteAdapter> {
+    find_native_site_adapter(APP_SITE_ID)
         .ok_or_else(|| anyhow::anyhow!("app default site {APP_SITE_ID} is not registered"))
 }
 
@@ -2340,45 +2340,45 @@ async fn run_agent_task_background(
         // Held for the whole task — LLM thinking pauses between tool calls
         // included — so the remote idle reaper only fires between tasks.
         let activity = runtime.begin_activity().await;
-        let (page, mut page_guard) =
-            match acquire_session_page(&runtime, &lease, &session_id).await {
-                Ok(admitted) => admitted,
-                Err(PageAdmission::Busy(busy)) => {
-                    drop(activity);
-                    drop(lease);
-                    drop(permit);
-                    if wait_out_browser_busy(&busy, &mut connect_attempts).await {
-                        continue;
-                    }
-                    fail_task_before_run(
-                        &app,
-                        &registry,
-                        &telemetry,
-                        &task_id,
-                        provider.as_deref(),
-                        model.as_deref(),
-                        browser_preflight_error(busy.reason),
-                    )
-                    .await;
-                    return;
+        let (page, mut page_guard) = match acquire_session_page(&runtime, &lease, &session_id).await
+        {
+            Ok(admitted) => admitted,
+            Err(PageAdmission::Busy(busy)) => {
+                drop(activity);
+                drop(lease);
+                drop(permit);
+                if wait_out_browser_busy(&busy, &mut connect_attempts).await {
+                    continue;
                 }
-                Err(PageAdmission::Failed(error)) => {
-                    drop(activity);
-                    drop(lease);
-                    drop(permit);
-                    fail_task_before_run(
-                        &app,
-                        &registry,
-                        &telemetry,
-                        &task_id,
-                        provider.as_deref(),
-                        model.as_deref(),
-                        error,
-                    )
-                    .await;
-                    return;
-                }
-            };
+                fail_task_before_run(
+                    &app,
+                    &registry,
+                    &telemetry,
+                    &task_id,
+                    provider.as_deref(),
+                    model.as_deref(),
+                    browser_preflight_error(busy.reason),
+                )
+                .await;
+                return;
+            }
+            Err(PageAdmission::Failed(error)) => {
+                drop(activity);
+                drop(lease);
+                drop(permit);
+                fail_task_before_run(
+                    &app,
+                    &registry,
+                    &telemetry,
+                    &task_id,
+                    provider.as_deref(),
+                    model.as_deref(),
+                    error,
+                )
+                .await;
+                return;
+            }
+        };
         if !bind_task_page(
             &app,
             &registry,
@@ -2750,6 +2750,7 @@ async fn run_agent_task_on_session_page(
     let outcome = async {
         let agent_tools = site.default_agent_tools.unwrap_or(site.agent_tools);
         let mut tools = agent_tools(page.clone(), llm_provider.clone()).await?;
+        tools.extend(site_learning_tools(page.clone()));
         tools.extend(desktop_agent_tools());
         tools.push(Arc::new(PublishArtifactTool::new(
             session_dir.as_deref().map(PathBuf::from),
@@ -2763,11 +2764,14 @@ async fn run_agent_task_on_session_page(
             rx,
         );
 
+        let agent_instructions = site
+            .default_agent_instructions
+            .unwrap_or(site.agent_instructions);
         let preamble = format!("{TAURI_AGENT_PREAMBLE}\n\n{context_note}");
         let config = AgentRunConfig {
             extra_instructions: format!(
                 "{}{}{}",
-                site.agent_instructions(&preamble),
+                agent_instructions(&preamble),
                 TAURI_CITATION_RULES,
                 TAURI_ARTIFACT_RULES
             ),

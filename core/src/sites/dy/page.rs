@@ -8,29 +8,9 @@ use crate::sites::dy::entities::{
     douyin_author_url, douyin_video_url, extract_author_id, extract_video_id, is_douyin_page_url,
     DouyinAuthorProfile, DouyinComment, DouyinVideo, DouyinVideoCard,
 };
-use crate::sites::dy::DY_SITE;
-use crate::sites::registry::BrowserToolset;
 
 pub const DOUYIN_HOME_URL: &str = "https://www.douyin.com/";
 
-pub(crate) static DOUYIN_BROWSER_TOOLS: BrowserToolset = BrowserToolset {
-    binding: "window.SocaiDouyinPageScripts",
-    source: include_str!("page_scripts.js"),
-    tools: &[
-        "pageState",
-        "searchInput",
-        "setSearchInput",
-        "searchState",
-        "videoCards",
-        "scrollFeed",
-        "videoState",
-        "videoDetail",
-        "comments",
-        "scrollComments",
-        "authorState",
-        "authorProfile",
-    ],
-};
 const SEARCH_TRANSITION_TIMEOUT_S: f64 = 20.0;
 
 pub struct DouyinPageRuntime<'a> {
@@ -43,7 +23,7 @@ impl<'a> DouyinPageRuntime<'a> {
     }
 
     pub async fn run_script(&self, name: &str, arg: Option<&Value>) -> Result<Value> {
-        DY_SITE.run_browser_tool(self.page, name, arg).await
+        crate::sites::learning::run_site_browser_tool(self.page, "dy", name, arg).await
     }
 
     pub async fn current_url(&self) -> Result<String> {

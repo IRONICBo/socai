@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use socai_core::agent::tool::{ToolProgressEvent, ToolProgressSender};
 use socai_core::runtime::SocaiRuntime;
-use socai_core::sites::{find_site, SiteCommand, SiteSpec};
+use socai_core::sites::{find_native_site_adapter, NativeSiteAdapter, SiteCommand};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -465,7 +465,8 @@ async fn handle_request(
         } else {
             request.site.trim()
         };
-        let site = find_site(site_id).ok_or_else(|| anyhow!("unknown site: {site_id}"))?;
+        let site =
+            find_native_site_adapter(site_id).ok_or_else(|| anyhow!("unknown site: {site_id}"))?;
         let spec = site
             .command(&command)
             .ok_or_else(|| anyhow!("unknown {site_id} command: {command}"))?;
@@ -498,7 +499,7 @@ impl DaemonState {
     async fn run_site_command(
         &mut self,
         request_id: &str,
-        site: &'static SiteSpec,
+        site: &'static NativeSiteAdapter,
         spec: &'static SiteCommand,
         args: Value,
         telemetry: &DaemonTelemetry,

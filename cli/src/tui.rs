@@ -24,14 +24,14 @@ use socai_core::agent::{local_agent_tools, make_run_dir, Conversation};
 use socai_core::runtime::{
     create_llm_provider_for, run_agent_task as run_agent_with_tools, AgentRunConfig, SocaiRuntime,
 };
-use socai_core::sites::{find_site, SiteSpec};
+use socai_core::sites::{find_native_site_adapter, site_learning_tools, NativeSiteAdapter};
 
 /// Site the interactive TUI drives. Becomes a runtime choice once the TUI
 /// grows a site switcher.
 const TUI_SITE_ID: &str = "xhs";
 
-fn tui_site() -> Result<&'static SiteSpec> {
-    find_site(TUI_SITE_ID)
+fn tui_site() -> Result<&'static NativeSiteAdapter> {
+    find_native_site_adapter(TUI_SITE_ID)
         .ok_or_else(|| anyhow::anyhow!("TUI default site {TUI_SITE_ID} is not registered"))
 }
 
@@ -320,7 +320,10 @@ async fn slash_menu() -> Result<Option<String>> {
 fn handle_clear_command(state: &mut AppState) -> Result<()> {
     state.conversation =
         Conversation::new(state.model.clone()).context("failed to start a new session")?;
-    println!("[socai] chat cleared — new session {}", state.conversation.id);
+    println!(
+        "[socai] chat cleared — new session {}",
+        state.conversation.id
+    );
     Ok(())
 }
 
@@ -645,7 +648,8 @@ async fn run_agent_task(runtime: &SocaiRuntime, task: &str, state: &mut AppState
         }
     };
     let agent_tools = site.default_agent_tools.unwrap_or(site.agent_tools);
-    let mut tools = agent_tools(page, llm_provider.clone()).await?;
+    let mut tools = agent_tools(page.clone(), llm_provider.clone()).await?;
+    tools.extend(site_learning_tools(page));
     tools.extend(local_agent_tools());
 
     // Track run_id + latest assistant text live off the event stream so we can
@@ -672,8 +676,11 @@ async fn run_agent_task(runtime: &SocaiRuntime, task: &str, state: &mut AppState
         "{TUI_AGENT_PREAMBLE}\n\n{}",
         state.conversation.context_note()
     );
+    let agent_instructions = site
+        .default_agent_instructions
+        .unwrap_or(site.agent_instructions);
     let config = AgentRunConfig {
-        extra_instructions: site.agent_instructions(&preamble),
+        extra_instructions: agent_instructions(&preamble),
         enabled_sites: vec![site.id.to_string()],
         seed_messages: state.conversation.chat_messages(),
         session_id: Some(state.conversation.id.clone()),
@@ -745,7 +752,10 @@ async fn run_agent_task(runtime: &SocaiRuntime, task: &str, state: &mut AppState
     // whole provider message in the conversation seed. Generic wording: the
     // error may also be max-token truncation or a failed forced summary.
     let (recorded, status) = if outcome.error.is_some() {
-        ("[run failed before producing a final answer]".to_string(), "failed")
+        (
+            "[run failed before producing a final answer]".to_string(),
+            "failed",
+        )
     } else {
         (outcome.final_text.clone(), "completed")
     };
