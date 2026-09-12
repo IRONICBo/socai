@@ -1,87 +1,103 @@
-这份文档指导你如何添加一个新网站能力，或者在已有网站里添加新能力。
+---
+name: create-site-skill
+description: 为 socai 新增或维护按域名发现的站点 skill；用于页面探索、DOM browser tool、站点知识沉淀以及确有必要的 native 工具接入。
+---
 
-# 代码准则
-socai是一个通用browser use agent，像人类一样通过页面交互来操作网页。每个网站沉淀了自己特定的操作在sites下面的文件夹，从而能更快、更准、更省token地操作成熟流程。
-socai总是用模拟人的方式，通过CDP和DOM进行每一步的网页操作。除了初次打开网站时，从不使用url导航、api接口等方式操作网站，和传统自动化工具和爬虫不同。
+# Socai site skills
 
-站点目录是平台自治边界，不是固定文件模板。固定的是能力契约：每个站点目录用 `mod.rs` 声明模块并导出一个 `SiteSpec`；`SiteSpec` 是编译期 capability manifest，声明站点 id、域名、入口、`knowledge.md`、browser tools、host/agent tools 和 CLI/daemon commands。共享 registry 只加载和执行声明过的能力，不包含平台选择器、页面状态或平台切换逻辑。
+Socai 的浏览器/CDP runtime 是稳定执行面。站点能力是独立的 learning package，由 `manifest.json` 自描述并在运行时按 id 或域名发现；不要从其他平台复制 Rust 目录结构，也不要把 `NativeSiteAdapter` 当作 capability manifest。
 
-`knowledge.md` 是每个站点包都保留的稳定学习入口，可以从空文件开始。它与 ego-lite manifest 中引用的 notes 语义一致：manifest 负责发现，文件负责沉淀经过真实页面验证、无法由 schema 完整表达的长期经验。不要删除文件，也不要为了填充而复制 tool description。
+参考语义：
 
-实现文件按平台真实复杂度组织，不作为公共契约：
+- browser-use：通用 runtime 不内置站点做法；进入域名后才发现并读取匹配的 domain skill。
+- ego-lite：manifest 声明 domains、notes 和 browser tools；notes 与脚本按需加载，路径必须留在 package 内。
+- Socai：内置 package 在构建时从 `core/src/sites/*/manifest.json` 自动收集，发布时嵌入二进制；`$SOCAI_SITE_SKILLS_DIR/<id>` 或 `$SOCAI_HOME/site-skills/<id>` 中的完整同名 package 可在运行时覆盖内置版本。
 
-- `tools.rs` 或 `tools/`：有 host/agent/CLI 能力时使用，定义原子工具、高频工作流、工具工厂和供 `SiteSpec` 引用的 command 表。工具实现 `Tool` trait（`core/src/agent/tool.rs`）：`name`/`description`/`input_schema`/`call`，返回 JSON 文本。description 里写清楚成本与耗时（是否打开页面、是否耗 token/需要本地 ASR 等），agent 靠它做性价比决策。命令包装一律复用共享 runner（`core/src/sites/runner.rs` 的 `run_tool_command`/`ToolCommand`，输入小工具 `get_*`/`trimmed_required`/`json_result` 也从那里 import，参考 xhs 的 `run_xhs_tool_command`）——**不要把 run_dir/快照/工具分发这套脚手架复制进站点文件夹**。
-- `page.rs`：存在非平凡的页面状态、导航、等待、重试或 CDP 操作编排时使用。选择器尽量稳定，优先结构性选择器、`data-*`、aria 属性；不要依赖构建生成的 hash class。**只用 snapshot DOM 里真实见过的元素/类名写选择器，绝不凭猜测。**简单站点可以直接在工具实现中完成，不必创建空壳 runtime。
-- `page_scripts.js`、`browser_tools/` 或其他 JS 组织：需要在页面上下文中提取 DOM 时使用。JS 只做单次页面操作或提取并返回 JSON；不返回 DOM 节点，不负责跨页面工作流。用站点自己的 `BrowserToolset` 显式声明源码、binding 和允许调用的函数；共享执行器拒绝未声明函数。点击、滚动、等待和重试等编排保留在 Rust 侧。
-- `entities.rs`：多个工具或 runtime 共享稳定、可序列化的平台数据结构时使用；一次性的内部 JSON 不必为了形式一致单独建模。
-- 其他文件：按真实能力增加，例如 history、media manifest、diagnostics。不要复制其他平台未使用的模块。
+## Package contract
 
-不要规定统一的 `tools.rs -> page.rs -> entities.rs` 物理依赖链。应遵守的是语义边界：host tools 负责 agent/CLI schema 和跨页面编排；browser tools 只在当前页面上下文完成单点 DOM 操作；entities 只承载多个能力共享的稳定数据。每个平台自行拥有域名、选择器、页面状态、登录/challenge、成功条件、详情完整性和媒体 allowlist；平台模块之间不得互相引用这些语义。`cdp`、`media`、`sites/runner` 和 `BrowserToolset` 只承载无平台语义的机制。
+`manifest.json` 是唯一必需入口：
 
-打通接口：
-1. 在站点模块里定义并由 `mod.rs` 导出 `pub static <ID>_SITE: SiteSpec`：声明 id、domains、home_url、用 `include_str!("knowledge.md")` 嵌入的 knowledge、可选 `BrowserToolset`、agent 工具工厂，以及要暴露成 CLI/daemon 命令的 `SiteCommand` 列表（含参数声明）。
-2. 在 `core/src/sites/mod.rs` 声明模块，并把它加进 `core/src/sites/registry.rs` 的 `SITES` 数组。
+```json
+{
+  "id": "example",
+  "name": "Example",
+  "domains": ["example.com", "*.example.com"],
+  "notes": ["knowledge.md"],
+  "browserTools": {
+    "readPage": {
+      "description": "Read the active page.",
+      "path": "page-tools.js",
+      "binding": "window.ExamplePageTools",
+      "callable": "readPage",
+      "args": {},
+      "returns": {"type": "object", "description": "Page state."}
+    }
+  }
+}
+```
 
-完成后 `socai <site_id> <command>` 子命令和 daemon 分发自动生效。TUI/桌面端必须由宿主显式选择已注册的 `SiteSpec`；当前宿主固定使用 XHS 时，新站点不会自动出现在交互界面，也不得通过用户文本隐式切换平台。
+- `id` 必须和 package 目录名一致。
+- `domains` 只写 hostname；根域名和 `*.subdomain` 分开声明。
+- `notes` 是需要按需加载的 Markdown 资源列表。已有 `knowledge.md` 必须保留；没有验证过的新知识时允许保持为空。
+- `browserTools` 是页面上下文能力表。每项声明 description、相对 path、args、returns；现有 IIFE bundle 用安全的 binding + callable，独立脚本也可以直接导出一个匿名 async function。
+- 所有资源路径必须是 package 内的相对路径，不允许绝对路径、反斜杠、`..` 或符号链接逃逸。
+- manifest 没有声明的 browser tool 不可执行。
 
-# 操作步骤
+文件名和 Rust 模块布局不是协议。一个 package 可以按页面、工作流或维护边界组织多个 notes/scripts，也可以只有一个脚本。不要要求每个平台都具备 `tools.rs`、`page.rs`、`page_scripts.js`、`entities.rs` 或相同依赖方向。
 
-当用户想要增加新网站或新能力时，**严格**遵循以下步骤，逐步执行：
+Agent 通过三个通用工具消费 package，而不是为平台注册一套固定 host 工具：
 
-### 1. 确认需求
-首先，不能直接开始写实现代码，而是先让用户尽可能详细地描述如下信息：
-  1) 目标网页 URL / 入口页。
-  2) 用户想完成的具体流程，用自然语言。
-  3) 详细描述每一步预期的人类操作方式，例如点击、输入、滚动、悬浮、快捷键。比如点击还是悬浮鼠标、在哪个区域上下滑滚轮，是否有键盘按键能更准确地操作（比如上下左右键切换帖子、esc键退出当前页面等等）。
-  4) 目标输出的数据结构或至少要抽取哪些字段。
-  5) 是否需要登录，以及当前账号/浏览器是否已经处于可用状态。
-  
-  
-### 2. Scaffold代码
-详细了解以上的用户回答后，如果sites目录下面还没有关于这个网站的文件夹，则增加一个，只 scaffold `mod.rs`、`knowledge.md`、`SiteSpec` 和第一项能力实际需要的实现文件，不创建空的 entities/page/script 占位文件。`knowledge.md` 初始可以为空，但必须由 `SiteSpec.knowledge` 通过 `include_str!` 接入。注意，先不实现具体工具逻辑。如果已有这个网站的文件夹，则可按需看是否需要增加文件或接口。新增的site_id和文件夹名保持一致，都用简写，比如小红书 `xhs`、抖音 `dy`。
+- `navigate_site`：只进入已安装 skill 覆盖的 HTTPS 域名，并在跳转后返回匹配的 notes 与 tool schemas；
+- `read_site_skills`：按当前页面真实 hostname 重新发现和读取 skill；
+- `run_site_browser_tool`：按 `site_id + tool_name` 执行 manifest 声明的页面工具，同时校验当前域名、输入 schema 和返回类型。
 
-### 3. （核心）开发Loop
-然后，按以下的3步流程逐步执行，并且不断循环这3步流程，一步一步地添加：
-  1) 首先，添加下一步单点操作的代码。代码结构要符合上面的代码准则。如果是刚开始实现第一步，则新增一个打开网页的操作；如果是后面的步骤，则是新增一个鼠标或键盘操作或页面js操作等等，你需要基于上一个循环中对snapshot理解，去准确写出代码。避免猜测页面元素，总是根据上一个循环中的实际DOM信息来写代码。确保新增的工具函数里支持--debug-snapshot参数，确保每执行一个动作都能保存下来变化的snapshots。
-  2) 然后，你调用目前代码已有的半成品工具函数，比如 `cargo run -p socai-cli -- <site_id> <command> ... --debug-snapshot`。此时cli会开始操作Chrome，每次命令在 stderr 打印 `run_dir`（目录名形如 `<本地时间>_<site_id>_<command>[_<搜索词>]`，位于 ~/.socai/runs/ 下），snapshots 保存在 `<run_dir>/snapshots/`。
+XHS、Douyin、TikTok 与后续平台都走同一个发现入口；平台差异只存在各自 package 的 manifest、notes 和脚本内容中。
 
-  3) 这步工具运行完成后，你需要查看最新一步的增量snapshot。每帧目录包含：`screenshot.jpg`（用户视窗）、`screenshot_full.jpg`（全页截图，和DOM范围对应）、`a11y.json`（精简无障碍树）、`dom.html`（精简DOM）、`dom.raw.html`（原始DOM，很大，一般不需要）。你每次先用多模态能力看两张截图来理解页面，再读 `a11y.json` 理解页面区块与状态，然后重点从 `dom.html` 里面来确认元素。确认当前操作是否符合预期。由于你是一步一步添加操作的，这时候的工具结果只是中间结果，你要检验的是so far这个中间结果是否符合预期。如果符合预期，则基于这一步snapshot的结果，继续实现下一步的代码。如果结果不符合预期，说明上一步的代码有问题，你排查snapshot，修改上一步的代码。
-重复以上3步循环，直到新加的工具完整执行每一步，能完成用户的需求。总是按照上面的三部曲，每一步都要确认snapshot再添加下一步的代码，避免跳步。如果再开发过程中发现有和用户描述不符或者一开始用户没有描述清楚的地方，这时你应该用户再次交互对话，来理清楚操作细节。
-代码实现过程中，多参考sites目录下已有的其他网站代码。
+## Native adapter boundary
 
-以下是一个例子来帮你理解如何按照3步循环流程来实现新能力：
-例如，如果用户需要做搜索关键词并收集帖子信息，则
-- 第一轮，先根据你一开始向用户询问网页地址的回答，给工具函数中首先加上打开网页。不加其他操作。然后你运行工具，并查看snapshot（截图和DOM都需要验证，下同）。如果正确，则进行下一轮。如果不正确则进行修复，下同。
-- 第二轮，在工具函数中增加“点击/聚焦到搜索框”的操作，这里的搜索框应该是根据上一轮的snapshot的元素精确找到的，不是猜测的元素值。然后再次运行工具，并查看snapshot。如果正确，则进行下一轮
-- 第三轮，在工具函数中增加“输入搜索关键词”的操作，然后再次运行工具，并查看snapshot。如果正确，则进行下一轮
-- 第四轮，在工具函数中增加“点击搜索按钮提交”的操作，或是根据上一轮拿到的snapshot DOM来找到搜索按钮，或是使用回车键，选择更稳定、robust、精确的方式。然后再次运行工具，并查看snapshot。如果正确，则进行下一轮
-- 第五轮，工具函数中增加“等待搜索结果页加载”的操作，至于如何判断搜索结果页正确加载了，不是猜测了一些heuristic，而是明确根据上一轮执行完的snapshot来操作。然后再次运行工具，并查看snapshot，确认这次加的判断条件是否成功等到了搜索结果页加载。如果正确，则进行下一轮。如果不正确，根据最新运行结果，找出snapshot中如何能准确判定搜索结果页成功加载的信号，然后修改，并重复运行、查看、验证。
-- 第六轮，上一轮的成功运行结果中，snapshot应该已经显示出了搜索结果页的帖子信息是什么样的结构，因此，这一步在工具函数中增加“从搜索结果页中获取帖子信息并返回”的操作，然后和前面所有轮次类似，做运行、查看、验证。
-- 如果用户有更详细的需求，比如逐个点开帖子拿详细内容或评论、或者需要传入能拿的帖子数因而需要滚动页面，等等，则根据具体的需求修改，原理和步骤都和上面类似。
+只有能力必须使用已编译 Rust 组件时才增加 native adapter，例如：
 
-#### 开发前先把 Chrome 切到 managed profile，避免反复弹 allow-debugging。
-socai 默认复用用户日常 Chrome，每次 rebuild 重启 daemon 后首次连接都会弹一次 allow-debugging；开发时反复 rebuild 会很烦。所以在开始这一轮自我创建开发前，先执行一次：
+- 多轮 CDP 状态机、长等待和快照编排；
+- 媒体下载、OCR、ASR；
+- 需要成为 `socai <site> <command>` 的稳定 CLI/daemon 工作流；
+- 多个 native 工具共享的强类型结果。
+
+`NativeSiteAdapter` 仅绑定 Rust 函数指针、agent tool factory 和 CLI command handler。它不是发现入口，不声明 domains/notes/browser scripts，也不决定 package 文件结构。纯 DOM 能力应只增加 manifest browser tool，不创建空 Rust 模块。
+
+## Development loop
+
+1. 先确认目标 URL、用户操作流程、输出字段、登录状态与成功条件。
+2. 查看当前页面真实 snapshot：截图、a11y tree 和精简 DOM。禁止凭其他平台的 selector 或 class 猜测。
+3. 只实现下一项最小页面动作或提取，并在 manifest 中声明对应 browser tool。
+4. 运行当前半成品命令并开启 `--debug-snapshot`：
+   ```bash
+   cargo run -p socai-cli -- <site_id> <command> ... --debug-snapshot
+   ```
+5. 检查最新 snapshot 与 JSON 结果。状态不符合预期时先修复当前动作；验证通过后再增加下一步。
+6. 循环直到搜索、详情、评论、作者或媒体流程达到明确成功条件。
+
+开发时如需避免反复确认 remote debugging，可临时使用 managed profile：
 
 ```bash
 cargo run -p socai-cli -- config set chrome.profile managed
-cargo run -p socai-cli -- stop   # 让 daemon 下次用新 profile
+cargo run -p socai-cli -- stop
 ```
 
-之后 socai 会拉起一个它自己管理的独立 Chrome（profile 目录 `~/.socai/chrome-profile`），不碰用户日常浏览器，不再弹 allow-debugging，daemon 反复重启也不会。代价是这个独立 Chrome 是干净 profile：首次运行时请提醒用户在弹出的 Chrome 窗口里手动登录一次目标网站（如小红书），登录态会持久化在该 profile 目录里，后续重建无需再登录。
-
-开发全部完成后，把 profile 改回去，恢复日常使用默认 Chrome 的行为：
+完成后恢复默认：
 
 ```bash
 cargo run -p socai-cli -- config unset chrome.profile
 cargo run -p socai-cli -- stop
 ```
 
-### 4. 测试
-新工具能力实现之后，运行3-5组不同参数，来全面测试新能力。如果遇到问题，返回上一步的流程进行修复。
+## Validation
 
-### 5. 更新知识
-代码完成后，判断是否发现了 tool description/schema 无法表达、并且值得跨任务复用的网站知识。只有存在这类内容时才更新 `knowledge.md`；否则保留空文件。不要复制工具 schema，也不要一上来先写 knowledge，而是在代码全部实现并经过真实页面验证后再沉淀。
+- 使用 3–5 组真实参数运行完整流程，不只做编译检查。
+- 确认 manifest id/domains、资源路径和所有 browser tool callable。
+- 对每次页面跳转验证真实 URL、页面状态和内容身份。
+- 请求的详情、评论、媒体或 ASR 不完整时必须返回明确错误，不得伪装成功。
+- 运行 core/CLI/desktop 检查、页面脚本语法检查和 `git diff --check`。
 
+## Learning update
 
-
-以上流程都完成后，向用户汇报上面的结果，并把上面的3-5次不同参数的运行结果汇报给用户。
+完成真实页面验证后，才把跨任务仍然有效、且无法由 tool schema 表达的页面知识写入 manifest 已列出的 note。不要复制 schema，不记录一次性 snapshot ref、会话数据、账号信息或未验证猜测；没有新知识时保留现有 `knowledge.md` 原样。

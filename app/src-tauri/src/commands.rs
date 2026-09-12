@@ -21,7 +21,7 @@ use socai_core::runtime::{
     SocaiRuntime,
 };
 use socai_core::sites::xhs::{XhsHistoryStore, XhsPageRuntime};
-use socai_core::sites::{find_site, SiteSpec};
+use socai_core::sites::{find_native_site_adapter, site_learning_tools, NativeSiteAdapter};
 use socai_core::telemetry::tool_call::{
     is_site_tool_result, summarize_site_tool_result, summarize_tool_args,
 };
@@ -68,8 +68,8 @@ const TAURI_ARTIFACT_RULES: &str = "\n\n## Deliverable files\n\
 /// app grows a site switcher.
 const APP_SITE_ID: &str = "xhs";
 
-fn app_site() -> Result<&'static SiteSpec> {
-    find_site(APP_SITE_ID)
+fn app_site() -> Result<&'static NativeSiteAdapter> {
+    find_native_site_adapter(APP_SITE_ID)
         .ok_or_else(|| anyhow::anyhow!("app default site {APP_SITE_ID} is not registered"))
 }
 
@@ -2999,6 +2999,7 @@ async fn run_agent_task_on_session_page(
                 browser_tools,
             }) as SharedToolFailureRecovery
         });
+        tools.extend(site_learning_tools(page.clone()));
         tools.extend(desktop_agent_tools());
         tools.push(Arc::new(PublishArtifactTool::new(
             session_dir.as_deref().map(PathBuf::from),
@@ -3012,11 +3013,14 @@ async fn run_agent_task_on_session_page(
             rx,
         );
 
+        let agent_instructions = site
+            .default_agent_instructions
+            .unwrap_or(site.agent_instructions);
         let preamble = format!("{TAURI_AGENT_PREAMBLE}\n\n{context_note}");
         let config = AgentRunConfig {
             extra_instructions: format!(
                 "{}{}{}",
-                site.agent_instructions(&preamble),
+                agent_instructions(&preamble),
                 TAURI_CITATION_RULES,
                 TAURI_ARTIFACT_RULES
             ),
