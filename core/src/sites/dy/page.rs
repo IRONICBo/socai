@@ -8,24 +8,29 @@ use crate::sites::dy::entities::{
     douyin_author_url, douyin_video_url, extract_author_id, extract_video_id, is_douyin_page_url,
     DouyinAuthorProfile, DouyinComment, DouyinVideo, DouyinVideoCard,
 };
+use crate::sites::dy::DY_SITE;
+use crate::sites::registry::BrowserToolset;
 
 pub const DOUYIN_HOME_URL: &str = "https://www.douyin.com/";
 
-const PAGE_SCRIPTS_JS: &str = include_str!("page_scripts.js");
-const DOUYIN_PAGE_SCRIPT_FUNCTIONS: &[&str] = &[
-    "pageState",
-    "searchInput",
-    "setSearchInput",
-    "searchState",
-    "videoCards",
-    "scrollFeed",
-    "videoState",
-    "videoDetail",
-    "comments",
-    "scrollComments",
-    "authorState",
-    "authorProfile",
-];
+pub(crate) static DOUYIN_BROWSER_TOOLS: BrowserToolset = BrowserToolset {
+    binding: "window.SocaiDouyinPageScripts",
+    source: include_str!("page_scripts.js"),
+    tools: &[
+        "pageState",
+        "searchInput",
+        "setSearchInput",
+        "searchState",
+        "videoCards",
+        "scrollFeed",
+        "videoState",
+        "videoDetail",
+        "comments",
+        "scrollComments",
+        "authorState",
+        "authorProfile",
+    ],
+};
 const SEARCH_TRANSITION_TIMEOUT_S: f64 = 20.0;
 
 pub struct DouyinPageRuntime<'a> {
@@ -38,17 +43,7 @@ impl<'a> DouyinPageRuntime<'a> {
     }
 
     pub async fn run_script(&self, name: &str, arg: Option<&Value>) -> Result<Value> {
-        if !DOUYIN_PAGE_SCRIPT_FUNCTIONS.contains(&name) {
-            anyhow::bail!("Unknown Douyin page script: {name}");
-        }
-        let args = match arg {
-            None => String::new(),
-            Some(v) => serde_json::to_string(v)?,
-        };
-        let expr = format!(
-            "(function() {{\n{PAGE_SCRIPTS_JS}\n// SOCAI_DOUYIN_CALL: {name}\nreturn SocaiDouyinPageScripts.{name}({args});\n}})()"
-        );
-        self.page.evaluate_json(&expr).await
+        DY_SITE.run_browser_tool(self.page, name, arg).await
     }
 
     pub async fn current_url(&self) -> Result<String> {

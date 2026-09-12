@@ -2763,14 +2763,11 @@ async fn run_agent_task_on_session_page(
             rx,
         );
 
-        let agent_instructions = site
-            .default_agent_instructions
-            .unwrap_or(site.agent_instructions);
         let preamble = format!("{TAURI_AGENT_PREAMBLE}\n\n{context_note}");
         let config = AgentRunConfig {
             extra_instructions: format!(
                 "{}{}{}",
-                agent_instructions(&preamble),
+                site.agent_instructions(&preamble),
                 TAURI_CITATION_RULES,
                 TAURI_ARTIFACT_RULES
             ),

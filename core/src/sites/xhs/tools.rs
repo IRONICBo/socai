@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 
 use crate::sites::registry::{
-    required_string, ArgKind, BoxFuture, CommandArg, SiteCommand, SiteSpec, SlowWhen,
+    required_string, ArgKind, BoxFuture, CommandArg, SiteCommand, SlowWhen,
 };
 use crate::sites::runner::{
     get_bool, get_f64, get_i64, get_str, json_result, run_tool_command, trimmed_required, PageHook,
@@ -43,6 +43,8 @@ use crate::sites::xhs::page_diagnostics::{
 use crate::sites::xhs::{
     ReadNoteOptions, XhsAuthorProfile, XhsHistoryStore, XhsNoteCard, XhsPageRuntime, XHS_HOME_URL,
 };
+
+pub use super::{XHS_KNOWLEDGE, XHS_SITE};
 
 /// Default number of notes `search` reads when the caller doesn't specify.
 const DEFAULT_NUM_NOTES: i64 = 10;
@@ -64,10 +66,6 @@ const TOP_COMMENTS_PER_NOTE: i64 = 8;
 /// lower than the CLI's top-level default so multi-note agent runs spend less
 /// context and latency on comment threads.
 const AGENT_TOP_COMMENTS_PER_NOTE: i64 = 5;
-
-/// XHS macro-agent playbook for the single app/TUI agent interface. Embedded
-/// at compile time so the agent prompt always carries the latest copy.
-pub const XHS_KNOWLEDGE: &str = include_str!("knowledge.md");
 
 /// All XHS tools constructed against the same page. Convenience helper for
 /// the CLI / agent host — just register everything.
@@ -192,26 +190,11 @@ pub async fn xhs_default_agent_tools(
 }
 
 pub fn xhs_agent_instructions(extra: &str) -> String {
-    let base = XHS_KNOWLEDGE.trim().to_string();
-    let extra = extra.trim();
-    if extra.is_empty() {
-        base
-    } else {
-        format!("{extra}\n\n{base}")
-    }
+    XHS_SITE.agent_instructions(extra)
 }
 
-/// Registry entry for Xiaohongshu — the only wiring a site needs beyond its
-/// module declaration in `sites/mod.rs`.
-pub static XHS_SITE: SiteSpec = SiteSpec {
-    id: "xhs",
-    about: "Xiaohongshu (xiaohongshu.com)",
-    home_url: XHS_HOME_URL,
-    agent_tools: |page, llm| Box::pin(xhs_agent_tools(page, llm)),
-    default_agent_tools: Some(|page, llm| Box::pin(xhs_default_agent_tools(page, llm))),
-    agent_instructions: xhs_agent_instructions,
-    default_agent_instructions: Some(xhs_agent_instructions),
-    commands: &[
+pub(crate) const fn xhs_commands() -> &'static [SiteCommand] {
+    &[
         SiteCommand {
             name: "get-notes",
             tool_name: "get_notes",
@@ -425,8 +408,8 @@ pub static XHS_SITE: SiteSpec = SiteSpec {
             slow: SlowWhen::Always,
             run: run_author_scan,
         },
-    ],
-};
+    ]
+}
 
 fn run_get_notes(
     page: Arc<PageSession>,
