@@ -21,6 +21,16 @@ pub const TIKTOK_KNOWLEDGE: &str = include_str!("knowledge.md");
 
 const MAX_VIDEO_DOWNLOAD_BYTES: usize = 128 * 1024 * 1024;
 const MAX_POSTER_DOWNLOAD_BYTES: usize = 20 * 1024 * 1024;
+const TIKTOK_MEDIA_HOST_SUFFIXES: &[&str] = &[
+    "tiktokcdn.com",
+    "tiktokcdn-us.com",
+    "tiktokv.com",
+    "tiktok.com",
+    "byteoversea.com",
+    "ibytedtos.com",
+    "muscdn.com",
+    "akamaized.net",
+];
 
 pub fn tiktok_tools(page: Arc<PageSession>) -> Vec<Arc<dyn Tool>> {
     tiktok_tools_with_llm_provider(page, None)
@@ -378,7 +388,7 @@ impl Tool for GetVideosTool {
 
     fn description(&self) -> &str {
         "Read one or more TikTok posts by video id or URL. Returns one entry per input under \
-         `videos[]`; successful entries place platform-aligned normalized post data under `entity`, \
+         `videos[]`; successful entries place TikTok-native post data under `entity`, \
          including `video_id`, `description`, `hashtags`, creator \
          `author_id`/`author_internal_id`, `created_at`, engagement fields, `video`, and \
          `top_comments`. Media can be downloaded and sent to the paid socai ASR service when \
@@ -418,12 +428,12 @@ impl Tool for GetVideosTool {
             .get("transcribe_audio")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let download_media = input
+        let download_media_requested = input
             .get("download_media")
             .and_then(Value::as_bool)
-            .unwrap_or(false)
-            || transcribe_audio;
-        let (media, media_init_error) = if download_media || ocr {
+            .unwrap_or(false);
+        let download_video = download_media_requested || transcribe_audio;
+        let (media, media_init_error) = if download_video || ocr {
             let setup = (|| -> anyhow::Result<_> {
                 let mut processor =
                     MediaProcessor::for_run_dir(ctx.output_dir(), self.llm_provider.clone())?;
@@ -442,7 +452,7 @@ impl Tool for GetVideosTool {
         let mut results = Vec::with_capacity(videos.len());
         for locator in videos {
             let mut result = match runtime
-                .read_video(&locator, wait_seconds, num_comments, download_media)
+                .read_video(&locator, wait_seconds, num_comments, download_video)
                 .await
             {
                 Ok(value) => value,
@@ -458,7 +468,8 @@ impl Tool for GetVideosTool {
                     processor,
                     downloader,
                     &mut result,
-                    download_media,
+                    download_video,
+                    download_media_requested,
                     ocr,
                     transcribe_audio,
                 )
@@ -483,6 +494,8 @@ impl Tool for GetVideosTool {
 
 fn attach_enrichment_initialization_error(result: &mut Value, error: &str) {
     if result.get("entity").is_some_and(Value::is_object) {
+        result["ok"] = Value::Bool(false);
+        result["reason"] = Value::String("enrichment_initialization_failed".to_string());
         attach_optional_enrichment_error(result, "enrichment_initialization_failed", error);
     }
 }
@@ -597,7 +610,8 @@ async fn enrich_video_result(
     media: &MediaProcessor,
     downloader: &SafeTikTokMediaClient,
     result: &mut Value,
-    download_media: bool,
+    download_video: bool,
+    download_media_requested: bool,
     ocr: bool,
     transcribe_audio: bool,
 ) {
@@ -618,7 +632,7 @@ async fn enrich_video_result(
     downloader
         .download_poster(media, &mut enriched, &video_id, &referer)
         .await;
-    if download_media {
+    if download_video {
         downloader
             .download_video_file(media, &mut enriched, &video_id, &referer)
             .await;
@@ -639,6 +653,15 @@ async fn enrich_video_result(
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string);
+    let poster_ocr_error = enriched
+        .get("poster_ocr_error")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    let poster_present = enriched
+        .get("poster_local_path")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
     let transcript_error = enriched
         .get("transcript_error")
         .and_then(Value::as_str)
@@ -649,19 +672,47 @@ async fn enrich_video_result(
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty());
     entity.insert("video".into(), enriched);
-    let failure = if let Some(error) = download_error {
-        Some(("media_download_failed", error))
-    } else if let Some(error) = poster_download_error {
-        Some(("poster_download_failed", error))
-    } else if transcribe_audio && !transcript_present {
-        Some((
-            "transcription_failed",
-            transcript_error.unwrap_or_else(|| "transcript was empty".to_string()),
-        ))
+    let failure = if download_media_requested {
+        if let Some(error) = download_error {
+            Some(("media_download_failed", error))
+        } else {
+            poster_download_error
+                .clone()
+                .map(|error| ("poster_download_failed", error))
+        }
     } else {
         None
-    };
+    }
+    .or_else(|| {
+        if !ocr {
+            return None;
+        }
+        if let Some(error) = poster_download_error {
+            Some(("poster_download_failed", error))
+        } else if let Some(error) = poster_ocr_error {
+            Some(("poster_ocr_failed", error))
+        } else if !poster_present {
+            Some((
+                "poster_ocr_failed",
+                "downloaded poster was not available for OCR".to_string(),
+            ))
+        } else {
+            None
+        }
+    })
+    .or_else(|| {
+        if transcribe_audio && !transcript_present {
+            Some((
+                "transcription_failed",
+                transcript_error.unwrap_or_else(|| "transcript was empty".to_string()),
+            ))
+        } else {
+            None
+        }
+    });
     if let Some((reason, error)) = failure {
+        result["ok"] = Value::Bool(false);
+        result["reason"] = Value::String(reason.to_string());
         result["enrichment"] = json!({
             "ok": false,
             "reason": reason,
@@ -887,7 +938,7 @@ impl SafeTikTokMediaClient {
     ) -> anyhow::Result<()> {
         let (content_type, final_url) = self
             .page
-            .fetch_file_with_browser(url, max_bytes, destination)
+            .fetch_file_with_browser(url, max_bytes, destination, TIKTOK_MEDIA_HOST_SUFFIXES)
             .await?;
         let final_url = reqwest::Url::parse(&final_url)?;
         if !tiktok_media_url_allowed(&final_url) {
@@ -987,18 +1038,9 @@ fn tiktok_media_url_allowed(url: &reqwest::Url) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
-    [
-        "tiktokcdn.com",
-        "tiktokcdn-us.com",
-        "tiktokv.com",
-        "tiktok.com",
-        "byteoversea.com",
-        "ibytedtos.com",
-        "muscdn.com",
-        "akamaized.net",
-    ]
-    .iter()
-    .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+    TIKTOK_MEDIA_HOST_SUFFIXES
+        .iter()
+        .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
 }
 
 fn is_hls_url(value: &str) -> bool {
