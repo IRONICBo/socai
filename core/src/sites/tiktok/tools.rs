@@ -12,14 +12,12 @@ use crate::agent::{Backend as LlmProvider, Tool, ToolContext, ToolResult};
 use crate::cdp::PageSession;
 use crate::media::MediaProcessor;
 use crate::sites::registry::{
-    required_string, ArgKind, BoxFuture, CommandArg, SiteCommand, SiteSpec, SlowWhen,
+    required_string, ArgKind, BoxFuture, CommandArg, SiteCommand, SlowWhen,
 };
 use crate::sites::runner::{get_f64, get_i64, json_result, run_tool_command, ToolCommand};
 use crate::sites::tiktok::TikTokPageRuntime;
 
-/// Compatibility value for callers of the former file-backed playbook.
-/// New sites should omit knowledge assets when they have no durable guidance.
-pub const TIKTOK_KNOWLEDGE: &str = "";
+pub use super::{TIKTOK_KNOWLEDGE, TIKTOK_SITE};
 
 const MAX_VIDEO_DOWNLOAD_BYTES: usize = 128 * 1024 * 1024;
 const MAX_POSTER_DOWNLOAD_BYTES: usize = 20 * 1024 * 1024;
@@ -63,18 +61,10 @@ pub async fn tiktok_agent_tools(
 
 /// Preserve the host preamble when this site has no extra durable guidance.
 pub fn tiktok_agent_instructions(extra: &str) -> String {
-    extra.trim().to_string()
+    TIKTOK_SITE.agent_instructions(extra)
 }
 
-pub static TIKTOK_SITE: SiteSpec = SiteSpec {
-    id: "tiktok",
-    about: "TikTok (tiktok.com)",
-    home_url: "",
-    agent_tools: |page, llm| Box::pin(tiktok_agent_tools(page, llm)),
-    default_agent_tools: None,
-    agent_instructions: tiktok_agent_instructions,
-    default_agent_instructions: None,
-    commands: &[
+pub(crate) static TIKTOK_COMMANDS: &[SiteCommand] = &[
         SiteCommand {
             name: "search",
             tool_name: "search",
@@ -205,8 +195,7 @@ pub static TIKTOK_SITE: SiteSpec = SiteSpec {
             slow: SlowWhen::Always,
             run: run_page_state,
         },
-    ],
-};
+];
 
 fn run_search(
     page: Arc<PageSession>,

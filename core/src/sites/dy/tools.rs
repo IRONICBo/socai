@@ -8,11 +8,11 @@ use crate::agent::{Backend as LlmProvider, Tool, ToolContext, ToolResult};
 use crate::cdp::PageSession;
 use crate::sites::dy::DouyinPageRuntime;
 use crate::sites::registry::{
-    required_string, ArgKind, BoxFuture, CommandArg, SiteCommand, SiteSpec, SlowWhen,
+    required_string, ArgKind, BoxFuture, CommandArg, SiteCommand, SlowWhen,
 };
 use crate::sites::runner::{get_f64, get_i64, json_result, run_tool_command, ToolCommand};
 
-pub const DY_KNOWLEDGE: &str = include_str!("knowledge.md");
+pub use super::{DY_KNOWLEDGE, DY_SITE};
 
 pub fn dy_tools(page: Arc<PageSession>) -> Vec<Arc<dyn Tool>> {
     dy_tools_with_llm_provider(page, None)
@@ -39,26 +39,10 @@ pub async fn dy_agent_tools(
 }
 
 pub fn dy_agent_instructions(extra: &str) -> String {
-    let base = DY_KNOWLEDGE.trim().to_string();
-    let extra = extra.trim();
-    if extra.is_empty() {
-        base
-    } else {
-        format!("{extra}\n\n{base}")
-    }
+    DY_SITE.agent_instructions(extra)
 }
 
-pub static DY_SITE: SiteSpec = SiteSpec {
-    id: "dy",
-    about: "Douyin (douyin.com)",
-    // Let Douyin tools own first navigation so they can use a much longer
-    // timeout for the site's occasional 4-5 minute blank-page throttling.
-    home_url: "",
-    agent_tools: |page, llm| Box::pin(dy_agent_tools(page, llm)),
-    default_agent_tools: None,
-    agent_instructions: dy_agent_instructions,
-    default_agent_instructions: None,
-    commands: &[
+pub(crate) static DY_COMMANDS: &[SiteCommand] = &[
         SiteCommand {
             name: "search",
             tool_name: "search",
@@ -107,8 +91,7 @@ pub static DY_SITE: SiteSpec = SiteSpec {
             slow: SlowWhen::Always,
             run: run_page_state,
         },
-    ],
-};
+];
 
 fn run_search(
     page: Arc<PageSession>,
