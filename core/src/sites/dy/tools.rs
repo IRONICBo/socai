@@ -208,14 +208,6 @@ fn run_get_videos(
     progress: Option<ToolProgressSender>,
 ) -> BoxFuture<Value> {
     Box::pin(async move {
-        let mut args = args;
-        if args
-            .get("transcribe_audio")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            args["download_media"] = Value::Bool(true);
-        }
         run_tool_command(
             ToolCommand {
                 site_id: "dy",
@@ -338,7 +330,7 @@ impl Tool for GetVideosTool {
 
     fn description(&self) -> &str {
         "Read one or more Douyin works by video id or URL. Returns one entry per input under \
-         `videos[]`; successful entries place platform-aligned normalized work data under `entity`, including \
+         `videos[]`; successful entries place Douyin-native work data under `entity`, including \
          `video_id`, `description`, `hashtags`, creator `author_id` (sec_uid), `created_at`, \
          engagement fields, `video`, and `top_comments`. Set download_media to save video files \
          or transcribe_audio to use the paid socai ASR service."
@@ -381,12 +373,12 @@ impl Tool for GetVideosTool {
             .get("transcribe_audio")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let download_media = input
+        let download_media_requested = input
             .get("download_media")
             .and_then(Value::as_bool)
-            .unwrap_or(false)
-            || transcribe_audio;
-        let (media, media_init_error) = if download_media || ocr {
+            .unwrap_or(false);
+        let download_video = download_media_requested || transcribe_audio;
+        let (media, media_init_error) = if download_video || ocr {
             let setup = (|| -> anyhow::Result<_> {
                 let mut processor =
                     MediaProcessor::for_run_dir(ctx.output_dir(), self.llm_provider.clone())?;
@@ -421,7 +413,8 @@ impl Tool for GetVideosTool {
                     processor,
                     downloader,
                     &mut result,
-                    download_media,
+                    download_video,
+                    download_media_requested,
                     ocr,
                     transcribe_audio,
                 )
@@ -447,6 +440,8 @@ impl Tool for GetVideosTool {
 
 fn attach_enrichment_initialization_error(result: &mut Value, error: &str) {
     if result.get("entity").is_some_and(Value::is_object) {
+        result["ok"] = Value::Bool(false);
+        result["reason"] = Value::String("enrichment_initialization_failed".to_string());
         attach_optional_enrichment_error(result, "enrichment_initialization_failed", error);
     }
 }
@@ -674,7 +669,8 @@ async fn enrich_video_result(
     media: &MediaProcessor,
     downloader: &SafeDouyinMediaClient,
     result: &mut Value,
-    download_media: bool,
+    download_video: bool,
+    download_media_requested: bool,
     ocr: bool,
     transcribe_audio: bool,
 ) {
@@ -695,7 +691,7 @@ async fn enrich_video_result(
     downloader
         .download_poster(media, &mut enriched, &video_id, &referer)
         .await;
-    if download_media {
+    if download_video {
         downloader
             .download_video_file(media, &mut enriched, &video_id, &referer)
             .await;
@@ -738,6 +734,15 @@ async fn enrich_video_result(
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string);
+    let poster_ocr_error = enriched
+        .get("poster_ocr_error")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    let poster_present = enriched
+        .get("poster_local_path")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
     let transcript_error = enriched
         .get("transcript_error")
         .and_then(Value::as_str)
@@ -748,19 +753,47 @@ async fn enrich_video_result(
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty());
     entity.insert("video".into(), enriched);
-    let failure = if let Some(error) = download_error {
-        Some(("media_download_failed", error))
-    } else if let Some(error) = poster_download_error {
-        Some(("poster_download_failed", error))
-    } else if transcribe_audio && !transcript_present {
-        Some((
-            "transcription_failed",
-            transcript_error.unwrap_or_else(|| "transcript was empty".to_string()),
-        ))
+    let failure = if download_media_requested {
+        if let Some(error) = download_error {
+            Some(("media_download_failed", error))
+        } else {
+            poster_download_error
+                .clone()
+                .map(|error| ("poster_download_failed", error))
+        }
     } else {
         None
-    };
+    }
+    .or_else(|| {
+        if !ocr {
+            return None;
+        }
+        if let Some(error) = poster_download_error {
+            Some(("poster_download_failed", error))
+        } else if let Some(error) = poster_ocr_error {
+            Some(("poster_ocr_failed", error))
+        } else if !poster_present {
+            Some((
+                "poster_ocr_failed",
+                "downloaded poster was not available for OCR".to_string(),
+            ))
+        } else {
+            None
+        }
+    })
+    .or_else(|| {
+        if transcribe_audio && !transcript_present {
+            Some((
+                "transcription_failed",
+                transcript_error.unwrap_or_else(|| "transcript was empty".to_string()),
+            ))
+        } else {
+            None
+        }
+    });
     if let Some((reason, error)) = failure {
+        result["ok"] = Value::Bool(false);
+        result["reason"] = Value::String(reason.to_string());
         result["enrichment"] = json!({
             "ok": false,
             "reason": reason,

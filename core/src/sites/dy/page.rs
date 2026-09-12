@@ -248,6 +248,26 @@ impl<'a> DouyinPageRuntime<'a> {
                 "state": state,
             }));
         }
+        let mut missing = Vec::new();
+        if entity.author_id.trim().is_empty() {
+            missing.push("author_id");
+        }
+        if entity
+            .video
+            .get("resolved_url")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            missing.push("video.resolved_url");
+        }
+        if !missing.is_empty() {
+            return Ok(json!({
+                "ok": false,
+                "reason": "video_detail_incomplete",
+                "missing": missing,
+                "entity": entity,
+            }));
+        }
         let comments_error = if num_comments > 0 {
             match self.collect_comments(num_comments).await {
                 Ok(comments) => {
@@ -629,21 +649,35 @@ impl<'a> DouyinPageRuntime<'a> {
 
     async fn collect_video_cards(&self, target: usize) -> Result<Vec<DouyinVideoCard>> {
         const MAX_STALLS: usize = 4;
-        let mut cards = self.extract_video_cards(target).await?;
+        let mut cards = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        append_unique_video_cards(
+            &mut cards,
+            &mut seen,
+            self.extract_video_cards(target).await?,
+        );
         let mut stalls = 0usize;
         while cards.len() < target && stalls < MAX_STALLS {
             let before = cards.len();
             self.expect_object("scrollFeed", Some(&json!({ "nudge_up": false })))
                 .await?;
             sleep_ms(1200).await;
-            cards = self.extract_video_cards(target).await?;
-            if cards.len() <= before {
+            append_unique_video_cards(
+                &mut cards,
+                &mut seen,
+                self.extract_video_cards(target).await?,
+            );
+            if cards.len() == before {
                 self.expect_object("scrollFeed", Some(&json!({ "nudge_up": true })))
                     .await?;
                 sleep_ms(700).await;
-                cards = self.extract_video_cards(target).await?;
+                append_unique_video_cards(
+                    &mut cards,
+                    &mut seen,
+                    self.extract_video_cards(target).await?,
+                );
             }
-            if cards.len() <= before {
+            if cards.len() == before {
                 stalls += 1;
             } else {
                 stalls = 0;
@@ -788,6 +822,23 @@ impl<'a> DouyinPageRuntime<'a> {
                 value_type(&value)
             )
         })
+    }
+}
+
+fn append_unique_video_cards(
+    cards: &mut Vec<DouyinVideoCard>,
+    seen: &mut std::collections::HashSet<String>,
+    batch: Vec<DouyinVideoCard>,
+) {
+    for card in batch {
+        let key = if card.video_id.trim().is_empty() {
+            card.url.trim()
+        } else {
+            card.video_id.trim()
+        };
+        if !key.is_empty() && seen.insert(key.to_string()) {
+            cards.push(card);
+        }
     }
 }
 
