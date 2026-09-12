@@ -15,7 +15,9 @@ use crate::sites::registry::{
 };
 use crate::sites::runner::{get_f64, get_i64, json_result, run_tool_command, ToolCommand};
 
-pub const DY_KNOWLEDGE: &str = include_str!("knowledge.md");
+/// Compatibility value for callers of the former file-backed playbook.
+/// New sites should omit knowledge assets when they have no durable guidance.
+pub const DY_KNOWLEDGE: &str = "";
 
 const MAX_VIDEO_DOWNLOAD_BYTES: usize = 128 * 1024 * 1024;
 const MAX_POSTER_DOWNLOAD_BYTES: usize = 20 * 1024 * 1024;
@@ -47,14 +49,9 @@ pub async fn dy_agent_tools(
     Ok(dy_tools_with_llm_provider(page, Some(llm_provider)))
 }
 
+/// Preserve the host preamble when this site has no extra durable guidance.
 pub fn dy_agent_instructions(extra: &str) -> String {
-    let base = DY_KNOWLEDGE.trim().to_string();
-    let extra = extra.trim();
-    if extra.is_empty() {
-        base
-    } else {
-        format!("{extra}\n\n{base}")
-    }
+    extra.trim().to_string()
 }
 
 pub static DY_SITE: SiteSpec = SiteSpec {
