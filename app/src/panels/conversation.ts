@@ -47,6 +47,8 @@ export interface ComposerProps {
   modelReady: boolean;
   /** True while the shown task runs — the composer waits for the slot. */
   running: boolean;
+  /** The active task cancelled by the stop control rendered in the composer. */
+  cancelTaskId?: string;
   /**
    * Configured browser source is the remote hosted browser. Disconnected is
    * routine there (hosted sessions expire between runs) and submitting a run
@@ -103,7 +105,7 @@ export function renderConversation(props: ConversationProps): string {
         </div>
       </div>
       <div class="composer-dock">
-        ${renderComposer(props.composer)}
+        ${renderComposer({ ...props.composer, cancelTaskId: running ? task.task_id : undefined })}
       </div>
     </section>
   `;
@@ -184,7 +186,7 @@ function renderConnectOverlay(status: Status, remoteDebuggingReady: boolean): st
 function renderHead(task: AgentTaskView, running: boolean): string {
   const dotClass = running ? "badge-dot-ink badge-dot-pulse" : "badge-dot-hollow";
   const actions = running
-    ? `<button type="button" class="btn-ghost btn-compact" data-cancel-task="${esc(task.task_id)}">${esc(t("task.cancel"))}</button>`
+    ? ""
     : `${task.status === "interrupted" || task.status === "cancelled"
       ? `<button type="button" class="btn-ghost btn-compact" data-resume-task="${esc(task.task_id)}">${esc(t("task.resume"))}</button>`
       : ""}<button type="button" class="btn-ghost btn-compact" data-delete-task="${esc(task.task_id)}">${esc(t("task.delete"))}</button>`;
@@ -713,6 +715,22 @@ function renderComposer(c: ComposerProps): string {
   const glyph = c.submitting
     ? `<span class="composer__send-dot" aria-hidden="true"></span>`
     : `<svg class="composer__send-glyph" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 7 16 13 8 13"></polyline><polyline points="11 10 8 13 11 16"></polyline></svg>`;
+  const action = c.running && c.cancelTaskId
+    ? `<button
+        type="button"
+        class="composer__send composer__cancel"
+        title="${esc(t("task.cancel"))}"
+        aria-label="${esc(t("task.cancel"))}"
+        data-cancel-task="${esc(c.cancelTaskId)}"
+      ><span class="composer__stop-glyph" aria-hidden="true"></span></button>`
+    : `<button
+        id="composer-send"
+        type="submit"
+        class="composer__send"
+        title="${esc(sendShortcutLabel)}"
+        aria-label="${esc(t(c.mode === "new" ? "task.new" : "task.replySend"))}"
+        ${sendDisabled ? "disabled" : ""}
+      >${glyph}</button>`;
   const connectHint = connected
     ? ""
     : c.remoteProfile
@@ -737,14 +755,7 @@ function renderComposer(c: ComposerProps): string {
             placeholder="${esc(placeholder)}"
             ${disabled ? "disabled" : ""}
           >${esc(c.value)}</textarea>
-          <button
-            id="composer-send"
-            type="submit"
-            class="composer__send"
-            title="${esc(sendShortcutLabel)}"
-            aria-label="${esc(t(c.mode === "new" ? "task.new" : "task.replySend"))}"
-            ${sendDisabled ? "disabled" : ""}
-          >${glyph}</button>
+          ${action}
         </div>
       </form>
       ${connectHint}
