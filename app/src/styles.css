@@ -1166,7 +1166,7 @@ body.has-paper > * { position: relative; z-index: 1; }
 
 /* ── Deleting tasks from history ──────────────────────────────────
    A quiet × per row, revealed on hover/focus (finished tasks only —
-   running rows keep cancel in the detail head). Every delete routes
+   running rows keep cancel in the conversation composer). Every delete routes
    through the centered confirm dialog below. Monochrome danger:
    destruction reads through copy + confirmation, never red. */
 .task-row-delete {

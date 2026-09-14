@@ -36,7 +36,7 @@ export function renderSidebar(props: SidebarProps): string {
 // a real <button> covering the glyph+title+meta (click/Enter/Space opens the
 // task) and, for finished tasks, a quiet × button that surfaces on hover/focus
 // (running/queued must be cancelled first — cancel lives in the conversation
-// head). Two siblings, never nested: an interactive control inside a
+// composer). Two siblings, never nested: an interactive control inside a
 // role="button" is invalid ARIA and would fold the ×'s label into the row's
 // name. Every delete affordance routes through the universal centered confirm
 // dialog — nothing is destroyed until confirmed.
