@@ -54,6 +54,10 @@ pub struct AgentTaskSnapshot {
     pub(crate) cache_creation_input_tokens: Option<u64>,
     pub(crate) estimated_cost: Option<f64>,
     pub(crate) cost_currency: Option<String>,
+    #[serde(default)]
+    pub(crate) partial: bool,
+    #[serde(default)]
+    pub(crate) degraded_reason: Option<String>,
     /// Server-authoritative LLM + paid cloud-tool charge for the latest turn.
     pub(crate) points_used: Option<i64>,
     // The text driving the in-flight/most recent run — distinct from `task`,
@@ -163,6 +167,8 @@ impl AgentTaskRegistry {
             cache_creation_input_tokens: None,
             estimated_cost: None,
             cost_currency: None,
+            partial: false,
+            degraded_reason: None,
             points_used: None,
         };
         guard.tasks.push(snapshot.clone());
@@ -348,7 +354,12 @@ impl AgentTaskRegistry {
                 })
                 .unwrap_or_default();
             let candidate = marker_match.or_else(|| {
-                if site_matches.len() == 1 {
+                // A missing id can be intentional: degraded browser recovery
+                // clears it so the task can finish from gathered evidence.
+                // Only use the legacy site heuristic when replacing a known
+                // stale id; otherwise another task's sole XHS tab can be
+                // claimed and later closed by the wrong task.
+                if task.target_id.is_some() && site_matches.len() == 1 {
                     site_matches.first().copied()
                 } else {
                     None
@@ -543,6 +554,15 @@ fn hydrate_task_snapshot(mut snapshot: AgentTaskSnapshot) -> AgentTaskSnapshot {
                     .pointer("/usage/cost/currency")
                     .and_then(Value::as_str)
                     .map(str::to_string);
+                snapshot.partial = run
+                    .get("partial")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(snapshot.partial);
+                snapshot.degraded_reason = run
+                    .get("degraded_reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or(snapshot.degraded_reason);
                 snapshot.points_used = run
                     .pointer("/billing/points_used")
                     .and_then(Value::as_i64)
@@ -616,6 +636,8 @@ fn persist_task_index(tasks: &[AgentTaskSnapshot]) {
                 "finished_at": task.finished_at,
                 "run_dir": &task.run_dir,
                 "session_dir": &task.session_dir,
+                "partial": task.partial,
+                "degraded_reason": &task.degraded_reason,
                 "points_used": task.points_used,
             })
         })

@@ -302,9 +302,16 @@ impl RunTraceBuilder {
 
     /// Close the root span and write the OTLP `ExportTraceServiceRequest` to
     /// `run_dir/trace.json` (best-effort, like every other telemetry write).
-    pub fn finish(&mut self, status: &str, steps: u32, usage: &TokenUsage, error: Option<&str>) {
+    pub fn finish(
+        &mut self,
+        status: &str,
+        steps: u32,
+        usage: &TokenUsage,
+        error: Option<&str>,
+        degraded_reason: Option<&str>,
+    ) {
         self.finalized = true;
-        let payload = self.build_payload(status, steps, usage, error);
+        let payload = self.build_payload(status, steps, usage, error, degraded_reason);
         self.write_trace_file(&payload);
     }
 
@@ -314,6 +321,7 @@ impl RunTraceBuilder {
         steps: u32,
         usage: &TokenUsage,
         error: Option<&str>,
+        degraded_reason: Option<&str>,
     ) -> Value {
         let end_ns = now_ns();
         let mut attrs = vec![
@@ -338,6 +346,13 @@ impl RunTraceBuilder {
         attrs.push(attr_int("socai.seed_messages", self.seed_messages as i64));
         if self.dropped_spans > 0 {
             attrs.push(attr_int("socai.spans_dropped", self.dropped_spans as i64));
+        }
+        if let Some(reason) = degraded_reason {
+            attrs.push(attr_bool("socai.partial", true));
+            attrs.push(attr_str(
+                "socai.degraded_reason",
+                &truncate_chars(&redact_secrets(reason), ERROR_MAX_CHARS),
+            ));
         }
 
         // Keep the span name low-cardinality (OTel GenAI convention:
@@ -440,7 +455,7 @@ impl Drop for RunTraceBuilder {
             return;
         }
         let usage = self.usage.clone();
-        let payload = self.build_payload("interrupted", self.steps_seen, &usage, None);
+        let payload = self.build_payload("interrupted", self.steps_seen, &usage, None, None);
         self.write_trace_file(&payload);
     }
 }

@@ -3,6 +3,48 @@ use serde_json::{json, Value};
 use crate::cdp::connection::Cdp;
 use crate::cdp::session::PageSession;
 
+/// Owns a target from the moment Chrome returns its id until the fully
+/// attached `PageSession` takes over. Cancellation during attachment drops
+/// this guard and closes the otherwise orphaned tab.
+struct TargetCreationGuard {
+    cdp: Cdp,
+    client: crate::cdp::raw_client::RawCdpClient,
+    target_id: Option<String>,
+}
+
+impl TargetCreationGuard {
+    fn disarm(&mut self) {
+        self.target_id = None;
+    }
+
+    async fn close(mut self) {
+        let Some(target_id) = self.target_id.take() else {
+            return;
+        };
+        let _ = self
+            .client
+            .execute("Target.closeTarget", json!({ "targetId": target_id }))
+            .await;
+        self.cdp.unregister_owned_target(&target_id).await;
+    }
+}
+
+impl Drop for TargetCreationGuard {
+    fn drop(&mut self) {
+        let Some(target_id) = self.target_id.take() else {
+            return;
+        };
+        let client = self.client.clone();
+        let cdp = self.cdp.clone();
+        tokio::spawn(async move {
+            let _ = client
+                .execute("Target.closeTarget", json!({ "targetId": target_id }))
+                .await;
+            cdp.unregister_owned_target(&target_id).await;
+        });
+    }
+}
+
 /// Thin page factory over one remote-debugging endpoint. Higher-level runtime
 /// code decides whether a page belongs to a tool session, an agent run, or a
 /// debug command.
@@ -50,6 +92,11 @@ impl PageSessionManager {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("Target.createTarget missing targetId"))?
             .to_string();
+        let mut target_guard = TargetCreationGuard {
+            cdp: self.cdp.clone(),
+            client: browser_client.clone(),
+            target_id: Some(target_id.clone()),
+        };
 
         let attached = match browser_client
             .execute(
@@ -60,9 +107,7 @@ impl PageSessionManager {
         {
             Ok(attached) => attached,
             Err(err) => {
-                let _ = browser_client
-                    .execute("Target.closeTarget", json!({ "targetId": target_id }))
-                    .await;
+                target_guard.close().await;
                 return Err(err);
             }
         };
@@ -73,13 +118,15 @@ impl PageSessionManager {
             .to_string();
 
         self.cdp.register_owned_target(target_id.clone()).await;
-        Ok(PageSession::attached(
+        let page = PageSession::attached(
             target_id,
             browser_client,
             session_id,
             self.cdp.clone(),
             remote_browser,
-        ))
+        );
+        target_guard.disarm();
+        Ok(page)
     }
 
     /// Close a page target by target id. This is stronger than consuming a

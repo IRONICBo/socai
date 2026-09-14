@@ -1723,6 +1723,8 @@ export namespace agentPanel {
         incoming.cache_creation_input_tokens ?? existing.cache_creation_input_tokens,
       estimated_cost: incoming.estimated_cost ?? existing.estimated_cost,
       cost_currency: incoming.cost_currency ?? existing.cost_currency,
+      partial: terminalIncoming ? incoming.partial : incoming.partial || existing.partial,
+      degraded_reason: incoming.degraded_reason ?? existing.degraded_reason,
       points_used: incoming.points_used ?? existing.points_used,
     };
   }

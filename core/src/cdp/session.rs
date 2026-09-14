@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -21,16 +22,19 @@ use super::snapshot::SnapshotRecorder;
 /// first lets the recorder capture a DOM/a11y/screenshot bundle if the page
 /// changed since the last capture. See [`SnapshotRecorder`].
 pub struct PageSession {
-    target_id: String,
     owner: Cdp,
+    connection: tokio::sync::RwLock<PageConnection>,
+    /// Whether the browser backing the current connection is a remote hosted
+    /// one. Updated together with the connection during recovery: asking the
+    /// shared `Cdp` later could report a different browser during a swap.
+    remote_browser: AtomicBool,
+    recorder: StdMutex<Option<Arc<SnapshotRecorder>>>,
+}
+
+struct PageConnection {
+    target_id: String,
     client: RawCdpClient,
     session_id: Option<String>,
-    /// Whether the browser this page was created in was a remote hosted one.
-    /// Captured at attach time: the page keeps its own websocket and can
-    /// outlive `owner`'s current connection, so asking the shared `Cdp` later
-    /// could report a different browser's mode.
-    remote_browser: bool,
-    recorder: StdMutex<Option<Arc<SnapshotRecorder>>>,
 }
 
 const PAGE_INFO_JS: &str = r#"
@@ -56,23 +60,50 @@ impl PageSession {
         remote_browser: bool,
     ) -> Self {
         Self {
-            target_id,
             owner,
-            client,
-            session_id: Some(session_id),
-            remote_browser,
+            connection: tokio::sync::RwLock::new(PageConnection {
+                target_id,
+                client,
+                session_id: Some(session_id),
+            }),
+            remote_browser: AtomicBool::new(remote_browser),
             recorder: StdMutex::new(None),
         }
     }
 
-    pub fn target_id(&self) -> &str {
-        &self.target_id
+    pub async fn target_id(&self) -> String {
+        self.connection.read().await.target_id.clone()
     }
 
     /// True when this page was created in a remote hosted browser (socai pro
     /// `chrome.profile remote`) rather than any local chrome.
     pub fn is_remote_browser(&self) -> bool {
+        self.remote_browser.load(Ordering::Acquire)
+    }
+
+    /// True once the websocket command loop backing this page has ended.
+    /// Target closure keeps the browser websocket alive and therefore remains
+    /// distinguishable from a recoverable whole-CDP transport loss.
+    pub async fn transport_closed(&self) -> bool {
+        self.connection.read().await.client.is_closed()
+    }
+
+    /// Rebind this stable page handle to a freshly-created target. All tools
+    /// for a running agent hold the outer `Arc<PageSession>`; swapping only
+    /// the connection lets a retried tool transparently use the new browser
+    /// without rebuilding the tool registry or losing the agent transcript.
+    pub(crate) async fn replace_connection(&self, replacement: PageSession) {
+        let replacement_remote = replacement.remote_browser.load(Ordering::Acquire);
+        let replacement_connection = replacement.connection.into_inner();
+        let old_target_id = {
+            let mut connection = self.connection.write().await;
+            let old_target_id = connection.target_id.clone();
+            *connection = replacement_connection;
+            old_target_id
+        };
         self.remote_browser
+            .store(replacement_remote, Ordering::Release);
+        self.owner.unregister_owned_target(&old_target_id).await;
     }
 
     /// Attach a debug snapshot recorder. Captures begin on the next
@@ -94,8 +125,12 @@ impl PageSession {
     }
 
     async fn execute(&self, method: &str, params: Value) -> anyhow::Result<Value> {
-        self.client
-            .execute_for_session(self.session_id.as_deref(), method, params)
+        let (client, session_id) = {
+            let connection = self.connection.read().await;
+            (connection.client.clone(), connection.session_id.clone())
+        };
+        client
+            .execute_for_session(session_id.as_deref(), method, params)
             .await
     }
 
@@ -373,13 +408,14 @@ impl PageSession {
 
     /// Close the underlying tab. Consumes the session.
     pub async fn close(self) -> anyhow::Result<()> {
-        let target_id = self.target_id.clone();
+        let connection = self.connection.into_inner();
+        let target_id = connection.target_id;
         // Use the browser websocket that created/attached this PageSession, not
         // whatever browser client the runtime currently holds. The runtime may
         // have disconnected/reconnected or switched profile by the time a
         // session is dropped/cancelled; cleanup should still target the browser
         // that owns this target id.
-        let result = self
+        let result = connection
             .client
             .execute("Target.closeTarget", json!({ "targetId": target_id }))
             .await;

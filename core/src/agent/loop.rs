@@ -41,7 +41,10 @@ use crate::agent::run_logging::{make_run_dir, AgentRunRecorder};
 use crate::agent::run_state::RunState;
 use crate::agent::signature::tool_call_signature;
 use crate::agent::system_prompt::build_system_prompt;
-use crate::agent::tool::{SharedTool, ToolContext, ToolProgressEvent, ToolResult, ToolResultBlock};
+use crate::agent::tool::{
+    SharedTool, SharedToolFailureRecovery, ToolContext, ToolProgressEvent, ToolRecoveryOutcome,
+    ToolResult, ToolResultBlock,
+};
 use crate::telemetry::trace::RunTraceBuilder;
 
 /// Events streamed to subscribers while the agent is running.
@@ -97,6 +100,8 @@ pub enum AgentEvent {
         run_id: String,
         steps: u32,
         final_text: String,
+        partial: bool,
+        degraded_reason: Option<String>,
     },
 }
 
@@ -122,6 +127,10 @@ pub struct AgentOptions {
     pub background_media_generation: Option<u64>,
     /// Optional client task id for aggregating paid cloud-tool usage.
     pub billing_task_id: Option<String>,
+    /// Optional entrypoint-owned recovery hook for transient dependencies used
+    /// by tools. A recovered call is retried once; failed recovery switches
+    /// the loop to a tool-free best-effort summary.
+    pub tool_failure_recovery: Option<SharedToolFailureRecovery>,
 }
 
 impl Default for AgentOptions {
@@ -138,6 +147,7 @@ impl Default for AgentOptions {
             session_id: None,
             background_media_generation: None,
             billing_task_id: None,
+            tool_failure_recovery: None,
         }
     }
 }
@@ -155,6 +165,10 @@ pub struct AgentOutcome {
     /// `final_text` is best-effort — an error placeholder, or partial output
     /// from earlier steps — so callers must not report the run as completed.
     pub error: Option<String>,
+    /// Why the run completed with a best-effort partial answer after tools
+    /// became unavailable. This is not a terminal error: the final LLM summary
+    /// completed successfully and `final_text` is user-visible.
+    pub degraded_reason: Option<String>,
 }
 
 pub async fn run_agent(
@@ -237,6 +251,7 @@ pub async fn run_agent_with_events(
     let mut tool_call_history: BTreeMap<String, Vec<u32>> = BTreeMap::new();
     let mut completed = false;
     let mut terminal_error: Option<String> = None;
+    let mut degraded_reason: Option<String> = None;
     let mut truncation_retries = 0u32;
     let mut last_system: String = build_system_prompt(&[], &options.extra_instructions);
 
@@ -454,25 +469,73 @@ pub async fn run_agent_with_events(
             );
             run_state.note_tool_call(step, name, &effective_input);
             let started = Instant::now();
-            let dispatch = dispatch_tool(&tools, name, &effective_input, &tool_ctx);
-            tokio::pin!(dispatch);
-            let mut progress_open = true;
-            let (result, error) = loop {
-                tokio::select! {
-                    outcome = &mut dispatch => break outcome,
-                    progress = progress_rx.recv(), if progress_open => {
-                        match progress {
-                            Some(progress) => emit(
-                                &events,
-                                AgentEvent::ToolProgress {
-                                    id: id.clone(),
-                                    step,
-                                    sequence,
-                                    name: name.clone(),
-                                    progress,
-                                },
-                            ),
-                            None => progress_open = false,
+            let (result, error) = if let Some(reason) = degraded_reason.clone() {
+                let error = format!("tool skipped because recovery already failed: {reason}");
+                (ToolResult::text(format!("Error: {error}")), Some(error))
+            } else {
+                let mut retry_number = 0u8;
+                loop {
+                    let dispatch = dispatch_tool(&tools, name, &effective_input, &tool_ctx);
+                    tokio::pin!(dispatch);
+                    let mut progress_open = true;
+                    let outcome = loop {
+                        tokio::select! {
+                            outcome = &mut dispatch => break outcome,
+                            progress = progress_rx.recv(), if progress_open => {
+                                match progress {
+                                    Some(progress) => emit(
+                                        &events,
+                                        AgentEvent::ToolProgress {
+                                            id: id.clone(),
+                                            step,
+                                            sequence,
+                                            name: name.clone(),
+                                            progress,
+                                        },
+                                    ),
+                                    None => progress_open = false,
+                                }
+                            }
+                        }
+                    };
+                    let recovery = match &options.tool_failure_recovery {
+                        Some(recovery) => recovery.recover_after_tool(name, retry_number).await,
+                        None => ToolRecoveryOutcome::NotNeeded,
+                    };
+                    match recovery {
+                        ToolRecoveryOutcome::NotNeeded => break outcome,
+                        ToolRecoveryOutcome::Recovered if retry_number == 0 => {
+                            retry_number = 1;
+                            info!(
+                                step,
+                                sequence,
+                                tool = name,
+                                "tool dependency recovered; retrying"
+                            );
+                        }
+                        ToolRecoveryOutcome::Recovered => {
+                            let reason =
+                                format!("{name} still requires recovery after its single retry");
+                            degraded_reason = Some(reason.clone());
+                            let (mut result, _) = outcome;
+                            result.blocks.insert(
+                                0,
+                                ToolResultBlock::text(format!(
+                                    "[Tool execution stopped: {reason}. Use prior results for the final answer.]"
+                                )),
+                            );
+                            break (result, Some(reason));
+                        }
+                        ToolRecoveryOutcome::Degraded { reason } => {
+                            degraded_reason = Some(reason.clone());
+                            let (mut result, _) = outcome;
+                            result.blocks.insert(
+                                0,
+                                ToolResultBlock::text(format!(
+                                    "[Browser tools are unavailable: {reason}. Use prior results for the final answer.]"
+                                )),
+                            );
+                            break (result, Some(reason));
                         }
                     }
                 }
@@ -547,85 +610,153 @@ pub async fn run_agent_with_events(
             ctx.active_tool_name.clear();
         }
         messages.push(Message::user_blocks(tool_result_blocks));
+        if degraded_reason.is_some() {
+            break;
+        }
     }
 
-    if !completed && terminal_error.is_none() && step >= options.max_steps {
-        info!(step, "reached max_steps, forcing final summary");
-        messages.push(Message::user(format!(
-            "You have reached the maximum of {} tool-using steps. Do not call any \
-             more tools. Based on the evidence already gathered, produce the best \
-             possible final answer for the user now in the same language as the \
-             original task. If information is incomplete, state what is known, \
-             what is missing, and give your best-effort conclusion.",
-            options.max_steps
-        )));
-        if compact_messages_for_context(
-            &mut messages,
-            options.compact_after_messages,
-            options.keep_recent_messages,
-            &mut anchor_user_index,
-            is_follow_up,
-        ) {
-            traced_len = messages.len();
-        }
-        let request_messages = messages.clone();
-        let request_payload =
-            backend.request_payload(&last_system, &request_messages, &[], options.max_tokens)?;
-        run_recorder.record_llm_request(step + 1, &request_payload)?;
-        let llm_started = Instant::now();
-        match send_with_retry(
-            &backend,
-            &last_system,
-            &request_messages,
-            &[],
-            options.max_tokens,
-            step + 1,
-        )
-        .await
-        {
-            Ok(response) => {
-                let duration_ms = llm_started.elapsed().as_millis() as u64;
-                run_recorder.record_llm_response(step + 1, &response, duration_ms)?;
-                run_trace.record_llm(
-                    step + 1,
-                    duration_ms,
-                    &last_system,
-                    &messages[traced_len..],
-                    &response,
-                );
-                usage += &response.usage;
-                let (visible_texts, _) = split_thinking(&response.text_blocks);
-                for text in &visible_texts {
+    let forced_summary_prompt = degraded_reason
+        .as_ref()
+        .map(|reason| {
+            info!(
+                step,
+                reason, "tool recovery failed; forcing partial summary"
+            );
+            format!(
+                "The browser connection was lost and automatic recovery did not succeed: {reason}. \
+                 Do not call any more tools. Produce the best possible final answer now in the same \
+                 language as the original task, using only evidence already present in the tool \
+                 results and conversation. Clearly label the answer as partial, distinguish verified \
+                 facts from missing information, and never guess or invent values."
+            )
+        })
+        .or_else(|| {
+            (step >= options.max_steps).then(|| {
+                info!(step, "reached max_steps, forcing final summary");
+                format!(
+                    "You have reached the maximum of {} tool-using steps. Do not call any \
+                     more tools. Based on the evidence already gathered, produce the best \
+                     possible final answer for the user now in the same language as the \
+                     original task. If information is incomplete, state what is known, \
+                     what is missing, and give your best-effort conclusion.",
+                    options.max_steps
+                )
+            })
+        });
+    if !completed && terminal_error.is_none() {
+        let Some(mut forced_summary_prompt) = forced_summary_prompt else {
+            unreachable!("an incomplete run must have a forced-summary reason")
+        };
+        for summary_attempt in 0..2u32 {
+            let summary_step = step + 1 + summary_attempt;
+            messages.push(Message::user(forced_summary_prompt));
+            if compact_messages_for_context(
+                &mut messages,
+                options.compact_after_messages,
+                options.keep_recent_messages,
+                &mut anchor_user_index,
+                is_follow_up,
+            ) {
+                traced_len = messages.len();
+            }
+            let request_messages = messages.clone();
+            let request_payload = backend.request_payload(
+                &last_system,
+                &request_messages,
+                &[],
+                options.max_tokens,
+            )?;
+            run_recorder.record_llm_request(summary_step, &request_payload)?;
+            let llm_started = Instant::now();
+            match send_with_retry(
+                &backend,
+                &last_system,
+                &request_messages,
+                &[],
+                options.max_tokens,
+                summary_step,
+            )
+            .await
+            {
+                Ok(response) => {
+                    let duration_ms = llm_started.elapsed().as_millis() as u64;
+                    run_recorder.record_llm_response(summary_step, &response, duration_ms)?;
+                    run_trace.record_llm(
+                        summary_step,
+                        duration_ms,
+                        &last_system,
+                        &messages[traced_len..],
+                        &response,
+                    );
+                    traced_len = messages.len();
+                    usage += &response.usage;
+                    let (visible_texts, _) = split_thinking(&response.text_blocks);
+                    let invalid_summary = response.stop_reason == StopReason::MaxTokens
+                        || visible_texts.is_empty()
+                        || !response.tool_calls.is_empty();
+                    if invalid_summary {
+                        warn!(
+                            step = summary_step,
+                            summary_attempt,
+                            stop_reason = ?response.stop_reason,
+                            visible_blocks = visible_texts.len(),
+                            tool_calls = response.tool_calls.len(),
+                            "forced summary was incomplete"
+                        );
+                        if summary_attempt == 0 {
+                            forced_summary_prompt =
+                                "Your previous tool-free summary was incomplete or truncated. Do not call tools or include reasoning-only output. Respond once with a concise, complete user-visible answer based only on the gathered evidence, clearly marking any missing information."
+                                    .to_string();
+                            continue;
+                        }
+                        let msg = format!(
+                            "forced summary did not produce complete visible text after two attempts (stop reason: {:?})",
+                            response.stop_reason
+                        );
+                        emit(
+                            &events,
+                            AgentEvent::ApiError {
+                                step: summary_step,
+                                message: msg.clone(),
+                            },
+                        );
+                        terminal_error = Some(msg);
+                        break;
+                    }
+                    for text in &visible_texts {
+                        emit(
+                            &events,
+                            AgentEvent::AssistantText {
+                                step: summary_step,
+                                text: text.clone(),
+                            },
+                        );
+                        final_text = text.clone();
+                    }
+                    break;
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    let duration_ms = llm_started.elapsed().as_millis() as u64;
+                    run_recorder.record_llm_error(summary_step, &msg, duration_ms)?;
+                    run_trace.record_llm_error(
+                        summary_step,
+                        duration_ms,
+                        &last_system,
+                        &messages[traced_len..],
+                        &msg,
+                    );
+                    warn!(step = summary_step, error = %msg, "forced summary error");
                     emit(
                         &events,
-                        AgentEvent::AssistantText {
-                            step: step + 1,
-                            text: text.clone(),
+                        AgentEvent::ApiError {
+                            step: summary_step,
+                            message: msg.clone(),
                         },
                     );
-                    final_text = text.clone();
+                    terminal_error = Some(msg);
+                    break;
                 }
-            }
-            Err(e) => {
-                let msg = format!("{e:#}");
-                let duration_ms = llm_started.elapsed().as_millis() as u64;
-                run_recorder.record_llm_error(step + 1, &msg, duration_ms)?;
-                run_trace.record_llm_error(
-                    step + 1,
-                    duration_ms,
-                    &last_system,
-                    &messages[traced_len..],
-                    &msg,
-                );
-                warn!(step = step + 1, error = %msg, "forced summary error");
-                emit(
-                    &events,
-                    AgentEvent::ApiError {
-                        step: step + 1,
-                        message: msg.clone(),
-                    },
-                );
-                terminal_error = Some(msg);
             }
         }
     }
@@ -639,6 +770,8 @@ pub async fn run_agent_with_events(
                 run_id: run_id.clone(),
                 steps: step,
                 final_text: final_text.clone(),
+                partial: degraded_reason.is_some(),
+                degraded_reason: degraded_reason.clone(),
             },
         );
     }
@@ -651,8 +784,20 @@ pub async fn run_agent_with_events(
     } else {
         "completed"
     };
-    run_recorder.finish(status, step, &usage, terminal_error.as_deref())?;
-    run_trace.finish(status, step, &usage, terminal_error.as_deref());
+    run_recorder.finish(
+        status,
+        step,
+        &usage,
+        terminal_error.as_deref(),
+        degraded_reason.as_deref(),
+    )?;
+    run_trace.finish(
+        status,
+        step,
+        &usage,
+        terminal_error.as_deref(),
+        degraded_reason.as_deref(),
+    );
 
     Ok(AgentOutcome {
         run_id,
@@ -661,6 +806,7 @@ pub async fn run_agent_with_events(
         final_text,
         usage,
         error: terminal_error,
+        degraded_reason,
     })
 }
 

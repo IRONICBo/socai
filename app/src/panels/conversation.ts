@@ -303,6 +303,7 @@ function renderTurn(
     } else if (task.final_text) {
       exportText = task.final_text;
       answer = `<div class="conv-answer result-md note-answer">${renderNoteAnswer(task.final_text)}</div>`;
+      if (task.partial) metaBits.push(t("task.partialResult"));
       if (finishedAt) metaBits.push(finishedAt);
       if (!hosted && task.model) metaBits.push(task.model);
       if (metrics.durationMs !== null) metaBits.push(formatDurationMs(metrics.durationMs));
@@ -329,6 +330,8 @@ function renderTurn(
   } else if (answerText != null) {
     exportText = answerText;
     answer = `<div class="conv-answer result-md note-answer">${renderNoteAnswer(answerText)}</div>`;
+    const done = [...events].reverse().find((event) => event.kind === "done");
+    if (done?.partial) metaBits.push(t("task.partialResult"));
     if (answerAt) metaBits.push(formatTaskTimestamp(answerAt));
     const started = events.find((ev) => ev.kind === "started");
     if (!hosted && started?.model) metaBits.push(started.model);

@@ -182,6 +182,7 @@ and model in use are captured on `socai_agent_task_start`.
 | Event | Emitted when | Event-specific fields |
 | --- | --- | --- |
 | `socai_browser_connect` | Chrome connection requested, completes, fails, or disconnects | `outcome`, `browser_profile`, `browser_source`, hosted-session `remote_timeout_seconds` / `remote_remaining_seconds`, `error` |
+| `socai_browser_task_recovery` | A running browser tool detects CDP loss and recovery completes, fails, or falls back after the one allowed retry | `task_id`, `outcome`, `duration_ms`, `error` |
 | `socai_auth_sms_requested` | User requests an SMS code | `account_phone`, `outcome`, `error` |
 | `socai_auth_login` / `socai_auth_logout` | A login attempt completes or the user logs out | `account_phone`, `account_device_id` on successful login, `outcome`, `error` |
 | `socai_invite_redeemed` | An invite-code redemption completes or fails | `outcome`, `added_points`, `balance_points`, `duration_days`, `pro_active_until`, `error` |
@@ -189,7 +190,7 @@ and model in use are captured on `socai_agent_task_start`.
 | `socai_subscription_checkout` | A WeChat Pay or Alipay order is created or fails | `provider`, `plan_id`, `outcome`, `order_id`, `amount_fen`, `points`, `duration_days`, `error` |
 | `socai_subscription_paid` | Polling first observes a paid subscription order | `order_id`, `amount_fen`, `added_points`, `duration_days`, `pro_active_until` |
 | `socai_agent_task_start` | A task begins running | `task_id`, `provider`, `model`, `task_len`, `task_text` |
-| `socai_agent_task_end` | A task reaches a terminal state | `task_id`, `run_id`, `provider`, `model`, `outcome`, `steps`, token/cache usage, estimated cost breakdown, authoritative `points_used` when settlement completes, `duration_ms`, `error` |
+| `socai_agent_task_end` | A task reaches a terminal state | `task_id`, `run_id`, `provider`, `model`, `outcome`, `steps`, token/cache usage, estimated cost breakdown, authoritative `points_used` when settlement completes, `partial`, `degraded_reason`, `duration_ms`, `error` |
 | `socai_tool_call` | Each tool call completes | `task_id`, `run_id`, `tool_name`, `turn`, `sequence`, `duration_ms`, `ok`, `error`, query/result summaries, and bounded unexpected-page diagnostics when present |
 | `socai_feishu_export` | A Feishu export completes/fails, including user-visible setup failures before the native export command starts | `task_id`, `run_id`, `destination`, optional `stage`, `outcome`, `duration_ms`, `error`; chat sends also include privacy-safe CLI failure metadata (`cli_exit_code`, `cli_error_type`, `cli_error_subtype`, `cli_error_code`, `cli_log_id`, `cli_update_available`) and `message_id_present` |
 | `socai_server_payment_callback` | The backend accepts, rejects, or fails a merchant callback | `provider`, `stage`, `outcome`, `order_id`, `amount_fen`, `added_points`, `duration_days`, `error` |
@@ -212,6 +213,8 @@ profile, document/chat ID, URL, or credential is reported.
 | `provider` | string | LLM provider requested for the task. |
 | `model` | string | Model id requested for the task. |
 | `outcome` | string | Terminal state: `completed`, `failed`, `cancelled`, or `interrupted`. |
+| `partial` | boolean | True when browser recovery failed but the task still completed by summarizing evidence already gathered. |
+| `degraded_reason` | string | Bounded reason for a partial completion. Omitted for normal completed tasks. |
 | `steps` | number | Agent loop steps when known. |
 | `input_tokens` / `output_tokens` | number | Token usage for the run when known. Input includes cached input. |
 | `uncached_input_tokens` | number | Input tokens processed normally rather than read from or written to cache. |
@@ -341,7 +344,8 @@ pipeline for reading what an agent actually did:
   and pricing source. The root values aggregate the run; `chat` values describe
   one provider call.
 - root span — `socai.task_text` (capped at 8,000 chars) plus run status and step
-  count.
+  count. Partial completions also carry `socai.partial=true` and a bounded
+  `socai.degraded_reason`.
 - trace resource — upload-time snapshots of `socai.pro_activated`,
   `socai.account_phone`, `socai.points_balance`, `socai.pro_active_until`, and
   `socai.pro_subscribed` when logged in. No device token or server user id is

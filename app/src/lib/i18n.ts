@@ -387,6 +387,7 @@ const messages = {
   "task.you": { en: "you", zh: "你" },
   "task.working": { en: "working…", zh: "运行中…" },
   "task.activityLabel": { en: "activity", zh: "运行过程" },
+  "task.partialResult": { en: "partial result", zh: "部分结果" },
   "task.interruptedAppClosed": {
     en: "the app was closed before this task finished.",
     zh: "应用在任务完成前已关闭。",

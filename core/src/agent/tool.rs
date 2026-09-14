@@ -136,6 +136,30 @@ impl From<&str> for ToolResult {
     }
 }
 
+/// Decision returned after a tool call when an entrypoint can repair a
+/// transient dependency used by that tool. The core loop stays dependency-
+/// agnostic: desktop browser recovery is one implementation, while CLI/TUI
+/// runs simply leave the hook unset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolRecoveryOutcome {
+    /// The dependency is healthy, so keep the tool result as-is.
+    NotNeeded,
+    /// The dependency was repaired. The loop retries the same tool call once.
+    Recovered,
+    /// Recovery is unavailable or failed. Stop calling tools and produce a
+    /// best-effort final answer from results already present in the history.
+    Degraded { reason: String },
+}
+
+#[async_trait]
+pub trait ToolFailureRecovery: std::fmt::Debug + Send + Sync {
+    /// Inspect dependency health after `tool_name` finishes. `retry_number` is
+    /// zero for the original call and one after the single allowed retry.
+    async fn recover_after_tool(&self, tool_name: &str, retry_number: u8) -> ToolRecoveryOutcome;
+}
+
+pub type SharedToolFailureRecovery = Arc<dyn ToolFailureRecovery>;
+
 /// Per-run shared context. Counters, dedup tables, and the run-state handle
 /// live in `Arc<Mutex>` so tools can clone the context and still cooperate.
 #[derive(Clone)]
