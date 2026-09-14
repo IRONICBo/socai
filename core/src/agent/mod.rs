@@ -14,18 +14,25 @@ pub mod memory;
 pub mod note_store;
 pub mod provider;
 pub mod report;
+pub(crate) mod research;
+pub(crate) mod research_coverage;
+pub(crate) mod research_finalizer;
+pub(crate) mod research_planner;
+pub(crate) mod research_workflow;
 pub mod run_logging;
 pub mod run_state;
 pub mod signature;
 pub mod system_prompt;
 pub mod tool;
 
+pub use self::conversation::{default_sessions_root, Conversation, Run};
 pub use self::file_bash_tools::{
     desktop_agent_tools, local_agent_tools, BashTool, ReadFileTool, ShellTool,
 };
 pub use self::llm::{
     AnthropicBackend, Backend, Block, LLMResponse, Message, MessageContent, MessageRole,
-    OpenAICompatBackend, StopReason, TokenUsage, ToolCall, ToolResultContent, ToolSchema, UsageCost,
+    OpenAICompatBackend, StopReason, TokenUsage, ToolCall, ToolResultContent, ToolSchema,
+    UsageCost,
 };
 pub use self::provider::{
     catalog_model_display_name, catalog_models_for, config_for, configured_default_model_for,
@@ -34,7 +41,6 @@ pub use self::provider::{
     save_api_key, save_default_model, Credential, CredentialKind, ModelCatalogEntry, ModelPricing,
     ModelPricingTier, Provider, ProviderConfig, PROVIDERS,
 };
-pub use self::conversation::{default_sessions_root, Conversation, Run};
 pub use self::r#loop::{run_agent, run_agent_with_events, AgentEvent, AgentOptions, AgentOutcome};
 pub use self::run_logging::{
     default_runs_root, make_run_dir, mark_agent_run_status, AgentRunRecorder, ToolCallRecorder,
