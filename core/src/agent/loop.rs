@@ -691,9 +691,11 @@ pub async fn run_agent_with_events(
                     traced_len = messages.len();
                     usage += &response.usage;
                     let (visible_texts, _) = split_thinking(&response.text_blocks);
+                    let visible_text = visible_texts.join("\n\n");
                     let invalid_summary = response.stop_reason == StopReason::MaxTokens
                         || visible_texts.is_empty()
-                        || !response.tool_calls.is_empty();
+                        || !response.tool_calls.is_empty()
+                        || contains_pseudo_tool_call(&visible_text);
                     if invalid_summary {
                         warn!(
                             step = summary_step,
@@ -723,13 +725,17 @@ pub async fn run_agent_with_events(
                         terminal_error = Some(msg);
                         break;
                     }
-                    let visible_text = visible_texts.join("\n\n");
                     if let Some(message) = forced_summary_failure(
                         task,
                         &response,
                         &visible_text,
                         run_state.as_ref(),
                         tools.iter().any(|tool| tool.name() == "publish_artifact"),
+                        if degraded_reason.is_some() {
+                            ForcedSummaryKind::RecoveryPartial
+                        } else {
+                            ForcedSummaryKind::ExecutionLimit
+                        },
                     ) {
                         warn!(
                             step = summary_step,
@@ -784,6 +790,14 @@ pub async fn run_agent_with_events(
         }
     }
 
+    // A degraded reason represents a successfully delivered partial answer,
+    // not merely the browser failure that caused us to attempt one. If the
+    // summary itself failed, persist and return only the terminal error.
+    let completed_degraded_reason = terminal_error
+        .is_none()
+        .then(|| degraded_reason.clone())
+        .flatten();
+
     // Failed runs already signalled ApiError; a Done event on top would give
     // subscribers contradictory success ("✓ done") and failure signals.
     if terminal_error.is_none() {
@@ -793,8 +807,8 @@ pub async fn run_agent_with_events(
                 run_id: run_id.clone(),
                 steps: step,
                 final_text: final_text.clone(),
-                partial: degraded_reason.is_some(),
-                degraded_reason: degraded_reason.clone(),
+                partial: completed_degraded_reason.is_some(),
+                degraded_reason: completed_degraded_reason.clone(),
             },
         );
     }
@@ -812,14 +826,14 @@ pub async fn run_agent_with_events(
         step,
         &usage,
         terminal_error.as_deref(),
-        degraded_reason.as_deref(),
+        completed_degraded_reason.as_deref(),
     )?;
     run_trace.finish(
         status,
         step,
         &usage,
         terminal_error.as_deref(),
-        degraded_reason.as_deref(),
+        completed_degraded_reason.as_deref(),
     );
 
     Ok(AgentOutcome {
@@ -829,7 +843,7 @@ pub async fn run_agent_with_events(
         final_text,
         usage,
         error: terminal_error,
-        degraded_reason,
+        degraded_reason: completed_degraded_reason,
     })
 }
 
@@ -1071,12 +1085,19 @@ fn split_thinking(text_blocks: &[String]) -> (Vec<String>, Vec<String>) {
     (visible, thinking)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForcedSummaryKind {
+    ExecutionLimit,
+    RecoveryPartial,
+}
+
 fn forced_summary_failure(
     task: &str,
     response: &LLMResponse,
     visible_text: &str,
     run_state: &RunState,
     publish_required: bool,
+    summary_kind: ForcedSummaryKind,
 ) -> Option<String> {
     let tried_unavailable_tool =
         !response.tool_calls.is_empty() || contains_pseudo_tool_call(visible_text);
@@ -1088,7 +1109,14 @@ fn forced_summary_failure(
                 && artifact.metadata.get("category").and_then(Value::as_str) == Some("deliverable")
         })
         .collect::<Vec<_>>();
-    let mut required_kinds = requested_artifact_kinds(task);
+    // A max-step summary must still honour the original deliverable request.
+    // A recovery summary is explicitly allowed to report that the requested
+    // file is missing; only deliverables it claims were created must exist.
+    let mut required_kinds = if summary_kind == ForcedSummaryKind::ExecutionLimit {
+        requested_artifact_kinds(task)
+    } else {
+        Vec::new()
+    };
     for kind in claimed_artifact_kinds(visible_text) {
         if !required_kinds.contains(&kind) {
             required_kinds.push(kind);
@@ -1120,12 +1148,20 @@ fn forced_summary_failure(
         .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch));
     Some(if chinese {
         if missing_required_deliverable {
-            "任务在达到最大执行步数时仍未完成，且没有经过验证并成功发布的交付文件。已有过程记录已保留，请重试或缩小任务范围。".to_string()
+            if summary_kind == ForcedSummaryKind::RecoveryPartial {
+                "浏览器连接中断后的部分总结声称已生成交付文件，但没有找到经过验证并成功发布的对应文件。已有过程记录已保留，请重试。".to_string()
+            } else {
+                "任务在达到最大执行步数时仍未完成，且没有经过验证并成功发布的交付文件。已有过程记录已保留，请重试或缩小任务范围。".to_string()
+            }
         } else {
             "任务在达到最大执行步数后仍试图调用工具，但该操作没有实际执行。已有过程记录已保留，请重试。".to_string()
         }
     } else if missing_required_deliverable {
-        "The task reached its execution limit without a verified, published deliverable. Progress was preserved; retry or narrow the task scope.".to_string()
+        if summary_kind == ForcedSummaryKind::RecoveryPartial {
+            "The partial recovery summary claimed a deliverable that was not verified and published. Progress was preserved; please retry.".to_string()
+        } else {
+            "The task reached its execution limit without a verified, published deliverable. Progress was preserved; retry or narrow the task scope.".to_string()
+        }
     } else {
         "The task reached its execution limit while still attempting a tool call, so that operation was not executed. Progress was preserved; please retry.".to_string()
     })
@@ -1434,4 +1470,77 @@ fn build_assistant_blocks(response: &LLMResponse, visible_texts: &[String]) -> V
 pub(crate) fn assistant_blocks_for_history(response: &LLMResponse) -> Vec<Block> {
     let (visible_texts, _) = split_thinking(&response.text_blocks);
     build_assistant_blocks(response, &visible_texts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary_response(text: &str) -> LLMResponse {
+        LLMResponse {
+            text_blocks: vec![text.to_string()],
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+            provider_usage: None,
+            reasoning_content: String::new(),
+            thinking_blocks: Vec::new(),
+            reasoning_items: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn recovery_partial_can_report_a_requested_deliverable_as_missing() {
+        let response = summary_response("浏览器连接中断；已整理数据如下，PDF 尚未生成。");
+        let state = RunState::new("请根据搜索结果生成 PDF 报告");
+
+        assert!(forced_summary_failure(
+            "请根据搜索结果生成 PDF 报告",
+            &response,
+            &response.text_blocks.join("\n\n"),
+            &state,
+            true,
+            ForcedSummaryKind::RecoveryPartial,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn recovery_partial_rejects_an_unpublished_deliverable_claim() {
+        let response = summary_response("已生成 PDF 报告，可供下载。");
+        let state = RunState::new("请根据搜索结果生成 PDF 报告");
+
+        assert!(forced_summary_failure(
+            "请根据搜索结果生成 PDF 报告",
+            &response,
+            &response.text_blocks.join("\n\n"),
+            &state,
+            true,
+            ForcedSummaryKind::RecoveryPartial,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn execution_limit_still_requires_the_requested_deliverable() {
+        let response = summary_response("目前只完成了数据整理。");
+        let state = RunState::new("请根据搜索结果生成 PDF 报告");
+
+        assert!(forced_summary_failure(
+            "请根据搜索结果生成 PDF 报告",
+            &response,
+            &response.text_blocks.join("\n\n"),
+            &state,
+            true,
+            ForcedSummaryKind::ExecutionLimit,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn pseudo_tool_markup_is_not_a_valid_summary() {
+        assert!(contains_pseudo_tool_call(
+            "<function_calls><invoke name=\"publish_artifact\">"
+        ));
+    }
 }
