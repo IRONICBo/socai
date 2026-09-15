@@ -415,9 +415,57 @@ impl<'a> XhsPageRuntime<'a> {
             }
         }
 
+        // The current homepage composer can accept the requested keyword but
+        // ignore both Enter and its visible submit button (most often on
+        // Windows). At that point the input state is already verified, so use
+        // Xiaohongshu's own search-results route as a final in-site recovery.
+        // Still validate the resulting page and keyword before reporting
+        // success: navigation alone is not proof that search worked.
+        let manual_state = state.clone();
+        let direct_url = xhs_search_result_url(query);
+        let direct_navigation = if manual_state
+            .get("login_required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            json!({ "ok": false, "skipped": "login_required" })
+        } else {
+            match self.page.navigate(&direct_url).await {
+                Ok(()) => {
+                    state = self
+                        .wait_for_search_transition(
+                            query,
+                            wait_seconds.max(SEARCH_TRANSITION_TIMEOUT_S),
+                        )
+                        .await?;
+                    if search_transition_ok(&state, query) {
+                        return Ok(json!({
+                            "ok": true,
+                            "strategy": "direct_search_result_navigation",
+                            "recovered_from": "manual_submit_failed",
+                            "manual_state": manual_state,
+                            "state": state,
+                            "url": self.current_url().await?,
+                        }));
+                    }
+                    json!({
+                        "ok": false,
+                        "url": self.current_url().await?,
+                        "state": state.clone(),
+                    })
+                }
+                Err(error) => json!({
+                    "ok": false,
+                    "error": format!("{error:#}"),
+                }),
+            }
+        };
+
         let mut result = json!({
             "ok": false,
-            "strategy": "manual_submit_failed",
+            "strategy": "all_search_submit_strategies_failed",
+            "manual_state": manual_state,
+            "direct_navigation": direct_navigation,
             "state": state,
             "url": self.current_url().await?,
             "error": if state.get("login_required").and_then(Value::as_bool).unwrap_or(false) {
@@ -2103,6 +2151,22 @@ fn normalize_keyword(value: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
+}
+
+fn xhs_search_result_url(query: &str) -> String {
+    let mut encoded = String::with_capacity(query.len());
+    for byte in query.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(char::from(*byte));
+            }
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(encoded, "%{byte:02X}");
+            }
+        }
+    }
+    format!("https://www.xiaohongshu.com/search_result?keyword={encoded}&source=web_explore_feed")
 }
 
 fn normalize_image_url(value: &str) -> String {
