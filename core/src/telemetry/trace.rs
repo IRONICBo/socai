@@ -16,8 +16,8 @@
 //! (`gen_ai.*`) — Axiom promotes those to first-class trace columns — with
 //! socai-specific context under `socai.*`. Tool args go through
 //! `summarize_tool_args` (query text gated by `SOCAI_TELEMETRY_QUERY_TEXT`)
-//! and tool output through `summarize_tool_result` (counts plus bounded
-//! unexpected-page OCR diagnostics).
+//! and trusted site-tool output through `summarize_site_tool_result` (counts
+//! plus bounded unexpected-page OCR diagnostics).
 //!
 //! Chat content rides on the `chat` spans (gated by
 //! `SOCAI_TELEMETRY_CHAT_TEXT`): `gen_ai.input.messages` carries only the
@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use super::tool_call::{summarize_tool_args, summarize_tool_result};
+use super::tool_call::{is_site_tool_result, summarize_site_tool_result, summarize_tool_args};
 use super::{chat_text_enabled, query_text_enabled};
 use crate::agent::llm::{
     Block, LLMResponse, Message, MessageContent, MessageRole, TokenUsage, ToolResultContent,
@@ -278,9 +278,9 @@ impl RunTraceBuilder {
             attr_bool("socai.ok", error.is_none()),
         ];
         extend_prefixed(&mut attrs, summarize_tool_args(input, query_text_enabled()));
-        extend_prefixed(&mut attrs, summarize_tool_result(output));
+        extend_prefixed(&mut attrs, summarize_site_tool_result(name, output));
         if chat_text_enabled() {
-            let notes = note_summaries(output);
+            let notes = note_summaries(name, output);
             if !notes.is_empty() {
                 let mut rendered = Value::Array(notes).to_string();
                 // Field caps bound this far below CHAT_ATTR_MAX_BYTES; the
@@ -709,9 +709,12 @@ fn chat_text(text: &str, part_cap: usize) -> String {
 /// replaying the run. Matches the opened-note shape (`notes[].entity`) and the
 /// preview/profile card arrays — the same paths `summarize_tool_result`
 /// counts. Stats stay the raw displayed strings ("1.2万", "评论").
-fn note_summaries(output: &Value) -> Vec<Value> {
+fn note_summaries(tool_name: &str, output: &Value) -> Vec<Value> {
     let mut notes: Vec<Value> = Vec::new();
     let mut seen_ids: Vec<String> = Vec::new();
+    if !is_site_tool_result(tool_name) {
+        return notes;
+    }
     let Some(blocks) = output.as_array() else {
         return notes;
     };

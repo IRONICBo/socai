@@ -1,9 +1,24 @@
 use async_trait::async_trait;
+use calamine::{Reader, Xlsx};
 use cap_std::{ambient_authority, fs::Dir};
+use quick_xml::{events::Event as XmlEvent, Reader as XmlReader};
 use serde_json::{json, Value};
 use socai_core::agent::{Tool, ToolContext, ToolResult};
-use std::io::Write;
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+const MAX_OOXML_ARCHIVE_ENTRIES: usize = 4_096;
+const MAX_OOXML_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+const DOCX_MAIN_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
+const DOCM_MAIN_CONTENT_TYPE: &str = "application/vnd.ms-word.document.macroEnabled.main+xml";
+const PPTX_MAIN_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml";
+const PPTM_MAIN_CONTENT_TYPE: &str =
+    "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml";
+const XLSX_MAIN_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
+const XLSM_MAIN_CONTENT_TYPE: &str = "application/vnd.ms-excel.sheet.macroEnabled.main+xml";
 
 /// Publish a completed file from this conversation as a desktop download card.
 /// The source stays in place; the user-facing copy lives in this turn's
@@ -131,6 +146,8 @@ impl Tool for PublishArtifactTool {
                 requested.display()
             );
         }
+
+        validate_artifact_format(&source, &mut source_file)?;
 
         let (run_dir, outputs, outputs_dir) = prepare_outputs_directory(&run_root)?;
         let (published, published_file) = if source.starts_with(&outputs) {
@@ -282,6 +299,442 @@ fn resolve_source_path(raw_path: &str, run_dir: &Path) -> PathBuf {
     } else {
         run_dir.join(path)
     }
+}
+
+fn validate_artifact_format(path: &Path, file: &mut std::fs::File) -> anyhow::Result<()> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let validation = match extension.as_str() {
+        "xlsx" => validate_spreadsheet(file, XLSX_MAIN_CONTENT_TYPE),
+        "xlsm" => validate_spreadsheet(file, XLSM_MAIN_CONTENT_TYPE),
+        "docx" => validate_ooxml_archive(
+            file,
+            "Word document",
+            "word/document.xml",
+            "document",
+            DOCX_MAIN_CONTENT_TYPE,
+        ),
+        "docm" => validate_ooxml_archive(
+            file,
+            "Word document",
+            "word/document.xml",
+            "document",
+            DOCM_MAIN_CONTENT_TYPE,
+        ),
+        "pptx" => validate_ooxml_archive(
+            file,
+            "PowerPoint presentation",
+            "ppt/presentation.xml",
+            "presentation",
+            PPTX_MAIN_CONTENT_TYPE,
+        ),
+        "pptm" => validate_ooxml_archive(
+            file,
+            "PowerPoint presentation",
+            "ppt/presentation.xml",
+            "presentation",
+            PPTM_MAIN_CONTENT_TYPE,
+        ),
+        "pdf" => validate_pdf(file),
+        _ => Ok(()),
+    };
+    file.seek(SeekFrom::Start(0))?;
+    validation
+}
+
+fn validate_spreadsheet(file: &mut std::fs::File, main_content_type: &str) -> anyhow::Result<()> {
+    crate::commands::validate_spreadsheet_archive(file)
+        .map_err(|error| anyhow::anyhow!("artifact extension/content mismatch: {error}"))?;
+    file.seek(SeekFrom::Start(0))?;
+    {
+        let mut archive = zip::ZipArchive::new(&mut *file).map_err(|error| {
+            anyhow::anyhow!("artifact extension/content mismatch: invalid Excel workbook: {error}")
+        })?;
+        validate_ooxml_content_type(
+            &mut archive,
+            "Excel workbook",
+            "xl/workbook.xml",
+            main_content_type,
+        )?;
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut workbook = Xlsx::new(&mut *file).map_err(|error| {
+        anyhow::anyhow!(
+            "artifact extension/content mismatch: could not open Excel workbook: {error}"
+        )
+    })?;
+    if workbook.sheet_names().is_empty() {
+        anyhow::bail!("artifact extension/content mismatch: Excel workbook has no worksheets");
+    }
+    workbook
+        .worksheet_range_at(0)
+        .ok_or_else(|| anyhow::anyhow!("Excel workbook has no readable worksheet"))?
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "artifact extension/content mismatch: could not read Excel worksheet: {error}"
+            )
+        })?;
+    Ok(())
+}
+
+fn validate_ooxml_archive(
+    file: &mut std::fs::File,
+    kind: &str,
+    main_entry: &str,
+    main_root: &str,
+    main_content_type: &str,
+) -> anyhow::Result<()> {
+    let mut archive = zip::ZipArchive::new(&mut *file).map_err(|error| {
+        anyhow::anyhow!("artifact extension/content mismatch: invalid {kind}: {error}")
+    })?;
+    if archive.len() > MAX_OOXML_ARCHIVE_ENTRIES {
+        anyhow::bail!(
+            "artifact extension/content mismatch: {kind} exceeds the {MAX_OOXML_ARCHIVE_ENTRIES} entry limit"
+        );
+    }
+
+    let mut expanded_bytes = 0_u64;
+    let mut has_content_types = false;
+    let mut has_package_relationships = false;
+    let mut has_main_entry = false;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|error| anyhow::anyhow!("could not inspect {kind}: {error}"))?;
+        has_content_types |= entry.name() == "[Content_Types].xml";
+        has_package_relationships |= entry.name() == "_rels/.rels";
+        has_main_entry |= entry.name() == main_entry;
+        expanded_bytes = expanded_bytes
+            .checked_add(entry.size())
+            .ok_or_else(|| anyhow::anyhow!("{kind} expanded size overflowed"))?;
+        if expanded_bytes > MAX_OOXML_UNCOMPRESSED_BYTES {
+            anyhow::bail!(
+                "artifact extension/content mismatch: {kind} exceeds the {} MB expanded size limit",
+                MAX_OOXML_UNCOMPRESSED_BYTES / (1024 * 1024)
+            );
+        }
+    }
+    if !has_content_types || !has_package_relationships || !has_main_entry {
+        anyhow::bail!(
+            "artifact extension/content mismatch: {kind} is missing required OOXML entries"
+        );
+    }
+    validate_ooxml_content_type(&mut archive, kind, main_entry, main_content_type)?;
+    validate_ooxml_relationship(&mut archive, kind, main_entry)?;
+    validate_ooxml_main_document(&mut archive, kind, main_entry, main_root)?;
+    Ok(())
+}
+
+fn validate_ooxml_content_type<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    kind: &str,
+    main_entry: &str,
+    main_content_type: &str,
+) -> anyhow::Result<()> {
+    let entry = archive
+        .by_name("[Content_Types].xml")
+        .map_err(|error| anyhow::anyhow!("could not open {kind} content types: {error}"))?;
+    let mut xml = XmlReader::from_reader(BufReader::new(entry));
+    let mut buffer = Vec::new();
+    let expected_part = format!("/{main_entry}");
+    let mut found = false;
+    let mut depth = 0_usize;
+    let mut root_seen = false;
+    loop {
+        buffer.clear();
+        match xml.read_event_into(&mut buffer) {
+            Ok(XmlEvent::Start(event)) => {
+                validate_ooxml_root(
+                    &event,
+                    kind,
+                    "content types",
+                    b"Types",
+                    depth,
+                    &mut root_seen,
+                )?;
+                found |= ooxml_element_has_attributes(
+                    &event,
+                    b"Override",
+                    &[
+                        (b"PartName", expected_part.as_str()),
+                        (b"ContentType", main_content_type),
+                    ],
+                    kind,
+                )?;
+                depth = depth.checked_add(1).ok_or_else(|| {
+                    anyhow::anyhow!("{kind} content types XML is too deeply nested")
+                })?;
+            }
+            Ok(XmlEvent::Empty(event)) => {
+                validate_ooxml_root(
+                    &event,
+                    kind,
+                    "content types",
+                    b"Types",
+                    depth,
+                    &mut root_seen,
+                )?;
+                found |= ooxml_element_has_attributes(
+                    &event,
+                    b"Override",
+                    &[
+                        (b"PartName", expected_part.as_str()),
+                        (b"ContentType", main_content_type),
+                    ],
+                    kind,
+                )?;
+            }
+            Ok(XmlEvent::End(_)) => {
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "artifact extension/content mismatch: invalid {kind} content types XML"
+                    )
+                })?;
+            }
+            Ok(XmlEvent::Eof) => {
+                if !root_seen || depth != 0 {
+                    anyhow::bail!(
+                        "artifact extension/content mismatch: incomplete {kind} content types XML"
+                    );
+                }
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => anyhow::bail!(
+                "artifact extension/content mismatch: invalid {kind} content types XML: {error}"
+            ),
+        }
+    }
+    if !found {
+        anyhow::bail!(
+            "artifact extension/content mismatch: {kind} main content type is missing or invalid"
+        );
+    }
+    Ok(())
+}
+
+fn validate_ooxml_relationship<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    kind: &str,
+    main_entry: &str,
+) -> anyhow::Result<()> {
+    let entry = archive
+        .by_name("_rels/.rels")
+        .map_err(|error| anyhow::anyhow!("could not open {kind} relationships: {error}"))?;
+    let mut xml = XmlReader::from_reader(BufReader::new(entry));
+    let mut buffer = Vec::new();
+    let mut found = false;
+    let mut depth = 0_usize;
+    let mut root_seen = false;
+    loop {
+        buffer.clear();
+        match xml.read_event_into(&mut buffer) {
+            Ok(XmlEvent::Start(event)) => {
+                validate_ooxml_root(
+                    &event,
+                    kind,
+                    "relationships",
+                    b"Relationships",
+                    depth,
+                    &mut root_seen,
+                )?;
+                found |= ooxml_relationship_targets(&event, main_entry, kind)?;
+                depth = depth.checked_add(1).ok_or_else(|| {
+                    anyhow::anyhow!("{kind} relationships XML is too deeply nested")
+                })?;
+            }
+            Ok(XmlEvent::Empty(event)) => {
+                validate_ooxml_root(
+                    &event,
+                    kind,
+                    "relationships",
+                    b"Relationships",
+                    depth,
+                    &mut root_seen,
+                )?;
+                found |= ooxml_relationship_targets(&event, main_entry, kind)?;
+            }
+            Ok(XmlEvent::End(_)) => {
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "artifact extension/content mismatch: invalid {kind} relationships XML"
+                    )
+                })?;
+            }
+            Ok(XmlEvent::Eof) => {
+                if !root_seen || depth != 0 {
+                    anyhow::bail!(
+                        "artifact extension/content mismatch: incomplete {kind} relationships XML"
+                    );
+                }
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => anyhow::bail!(
+                "artifact extension/content mismatch: invalid {kind} relationships XML: {error}"
+            ),
+        }
+    }
+    if !found {
+        anyhow::bail!(
+            "artifact extension/content mismatch: {kind} package does not target its main document"
+        );
+    }
+    Ok(())
+}
+
+fn validate_ooxml_main_document<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    kind: &str,
+    main_entry: &str,
+    main_root: &str,
+) -> anyhow::Result<()> {
+    let entry = archive
+        .by_name(main_entry)
+        .map_err(|error| anyhow::anyhow!("could not open {kind} main document: {error}"))?;
+    let mut xml = XmlReader::from_reader(BufReader::new(entry));
+    let mut buffer = Vec::new();
+    let mut depth = 0_usize;
+    let mut root_seen = false;
+    loop {
+        buffer.clear();
+        match xml.read_event_into(&mut buffer) {
+            Ok(XmlEvent::Start(event)) => {
+                validate_ooxml_root(
+                    &event,
+                    kind,
+                    "main document",
+                    main_root.as_bytes(),
+                    depth,
+                    &mut root_seen,
+                )?;
+                depth = depth.checked_add(1).ok_or_else(|| {
+                    anyhow::anyhow!("{kind} main document XML is too deeply nested")
+                })?;
+            }
+            Ok(XmlEvent::Empty(event)) => {
+                validate_ooxml_root(
+                    &event,
+                    kind,
+                    "main document",
+                    main_root.as_bytes(),
+                    depth,
+                    &mut root_seen,
+                )?;
+            }
+            Ok(XmlEvent::End(_)) => {
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "artifact extension/content mismatch: invalid {kind} main document XML"
+                    )
+                })?;
+            }
+            Ok(XmlEvent::Eof) => {
+                if !root_seen || depth != 0 {
+                    anyhow::bail!(
+                        "artifact extension/content mismatch: incomplete {kind} main document XML"
+                    );
+                }
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(error) => anyhow::bail!(
+                "artifact extension/content mismatch: invalid {kind} main document XML: {error}"
+            ),
+        }
+    }
+}
+
+fn validate_ooxml_root(
+    event: &quick_xml::events::BytesStart<'_>,
+    kind: &str,
+    section: &str,
+    expected_root: &[u8],
+    depth: usize,
+    root_seen: &mut bool,
+) -> anyhow::Result<()> {
+    if depth != 0 {
+        return Ok(());
+    }
+    if *root_seen || event.local_name().as_ref() != expected_root {
+        anyhow::bail!("artifact extension/content mismatch: invalid {kind} {section} root");
+    }
+    *root_seen = true;
+    Ok(())
+}
+
+fn ooxml_element_has_attributes(
+    event: &quick_xml::events::BytesStart<'_>,
+    element: &[u8],
+    expected: &[(&[u8], &str)],
+    kind: &str,
+) -> anyhow::Result<bool> {
+    if event.local_name().as_ref() != element {
+        return Ok(false);
+    }
+    let mut matches = vec![false; expected.len()];
+    for attribute in event.attributes().with_checks(false) {
+        let attribute =
+            attribute.map_err(|error| anyhow::anyhow!("invalid {kind} XML attributes: {error}"))?;
+        for (index, (name, value)) in expected.iter().enumerate() {
+            if attribute.key.local_name().as_ref() == *name
+                && attribute.value.as_ref() == value.as_bytes()
+            {
+                matches[index] = true;
+            }
+        }
+    }
+    Ok(matches.into_iter().all(|matched| matched))
+}
+
+fn ooxml_relationship_targets(
+    event: &quick_xml::events::BytesStart<'_>,
+    main_entry: &str,
+    kind: &str,
+) -> anyhow::Result<bool> {
+    if event.local_name().as_ref() != b"Relationship" {
+        return Ok(false);
+    }
+    let mut relationship_type = None;
+    let mut target = None;
+    for attribute in event.attributes().with_checks(false) {
+        let attribute = attribute
+            .map_err(|error| anyhow::anyhow!("invalid {kind} relationship attributes: {error}"))?;
+        match attribute.key.local_name().as_ref() {
+            b"Type" => relationship_type = Some(attribute.value.into_owned()),
+            b"Target" => target = Some(attribute.value.into_owned()),
+            _ => {}
+        }
+    }
+    Ok(relationship_type
+        .as_deref()
+        .is_some_and(|value| value.ends_with(b"/officeDocument"))
+        && target.as_deref().is_some_and(|value| {
+            value.strip_prefix(b"/").unwrap_or(value) == main_entry.as_bytes()
+        }))
+}
+
+fn validate_pdf(file: &mut std::fs::File) -> anyhow::Result<()> {
+    let len = file.metadata()?.len();
+    if len < 8 {
+        anyhow::bail!("artifact extension/content mismatch: invalid PDF header");
+    }
+    let mut header = [0_u8; 5];
+    file.read_exact(&mut header)?;
+    if &header != b"%PDF-" {
+        anyhow::bail!("artifact extension/content mismatch: invalid PDF header");
+    }
+    let tail_len = len.min(1_024) as usize;
+    file.seek(SeekFrom::End(-(tail_len as i64)))?;
+    let mut tail = vec![0_u8; tail_len];
+    file.read_exact(&mut tail)?;
+    if !tail.windows(5).any(|window| window == b"%%EOF") {
+        anyhow::bail!("artifact extension/content mismatch: PDF end marker is missing");
+    }
+    Ok(())
 }
 
 fn prepare_outputs_directory(run_root: &Path) -> anyhow::Result<(Dir, PathBuf, Dir)> {

@@ -21,7 +21,9 @@ use socai_core::runtime::{
 use socai_core::sites::xhs::{XhsHistoryStore, XhsPageRuntime};
 use socai_core::sites::{find_site, SiteSpec};
 use socai_core::telemetry::query_text_enabled;
-use socai_core::telemetry::tool_call::{summarize_tool_args, summarize_tool_result};
+use socai_core::telemetry::tool_call::{
+    is_site_tool_result, summarize_site_tool_result, summarize_tool_args,
+};
 use socai_core::telemetry::trace::mark_run_trace_status;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -1563,7 +1565,7 @@ fn spreadsheet_preview_response(file: std::fs::File) -> Result<tauri::ipc::Respo
         .map_err(|error| format!("could not encode Excel preview: {error}"))
 }
 
-fn validate_spreadsheet_archive(file: &mut Cursor<Vec<u8>>) -> Result<(), String> {
+pub(crate) fn validate_spreadsheet_archive<R: Read + Seek>(file: &mut R) -> Result<(), String> {
     let mut archive = zip::ZipArchive::new(&mut *file)
         .map_err(|error| format!("invalid Excel workbook: {error}"))?;
     if archive.len() > ARTIFACT_SPREADSHEET_MAX_ARCHIVE_ENTRIES {
@@ -1573,10 +1575,21 @@ fn validate_spreadsheet_archive(file: &mut Cursor<Vec<u8>>) -> Result<(), String
         ));
     }
     let mut uncompressed_bytes = 0_u64;
+    let mut has_content_types = false;
+    let mut has_workbook = false;
+    let mut has_worksheet = false;
     for index in 0..archive.len() {
         let entry = archive
             .by_index(index)
             .map_err(|error| format!("could not inspect Excel workbook: {error}"))?;
+        match entry.name() {
+            "[Content_Types].xml" => has_content_types = true,
+            "xl/workbook.xml" => has_workbook = true,
+            name if name.starts_with("xl/worksheets/") && name.ends_with(".xml") => {
+                has_worksheet = true;
+            }
+            _ => {}
+        }
         uncompressed_bytes = uncompressed_bytes
             .checked_add(entry.size())
             .ok_or_else(|| "Excel workbook uncompressed size overflowed".to_string())?;
@@ -1586,6 +1599,11 @@ fn validate_spreadsheet_archive(file: &mut Cursor<Vec<u8>>) -> Result<(), String
                 ARTIFACT_SPREADSHEET_MAX_UNCOMPRESSED_BYTES / (1024 * 1024)
             ));
         }
+    }
+    if !has_content_types || !has_workbook || !has_worksheet {
+        return Err(
+            "invalid Excel workbook: required OOXML workbook entries are missing".to_string(),
+        );
     }
     for index in 0..archive.len() {
         let entry = archive
@@ -2861,14 +2879,17 @@ fn pump_agent_task_events(
                     props.insert("duration_ms".into(), json!(tool_duration_ms));
                     props.insert("ok".into(), json!(error.is_none()));
                     props.insert("error".into(), json!(error.as_deref().map(short_error)));
-                    // Same shared summarizer the CLI daemon uses: the search
-                    // query is lifted into query_text/query_len (gated by
-                    // query_text_enabled) and every other arg folds into
-                    // metadata; result counts and bounded unexpected-page OCR
-                    // diagnostics are extracted from the output. Note bodies
-                    // and comments are never included.
+                    if is_site_tool_result(name) {
+                        props.insert("site".into(), json!(APP_SITE_ID));
+                    }
+                    // The search query is lifted into query_text/query_len
+                    // (gated by query_text_enabled), and every other arg folds
+                    // into metadata. Trusted site results are decoded from the
+                    // desktop content blocks before the shared summarizer
+                    // extracts counts and bounded diagnostics. Local tool
+                    // output, note bodies, and comments are never included.
                     props.extend(summarize_tool_args(input, query_text_enabled()));
-                    props.extend(summarize_tool_result(content));
+                    props.extend(summarize_site_tool_result(name, content));
                     telemetry.capture("socai_tool_call", Value::Object(props));
                 }
                 _ => {}
