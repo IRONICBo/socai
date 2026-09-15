@@ -39,8 +39,12 @@ import type { AgentTaskView } from "./tasks";
 
 export interface ComposerProps {
   mode: "new" | "reply";
+  /** Existing task controlled by the reply composer. */
+  taskId?: string;
   value: string;
   submitting: boolean;
+  /** True while cancellation for this task is being committed. */
+  cancelling: boolean;
   error: string;
   status: Status;
   /** New-task gate: the selected model has a key. Replies always pass. */
@@ -184,7 +188,7 @@ function renderConnectOverlay(status: Status, remoteDebuggingReady: boolean): st
 function renderHead(task: AgentTaskView, running: boolean): string {
   const dotClass = running ? "badge-dot-ink badge-dot-pulse" : "badge-dot-hollow";
   const actions = running
-    ? `<button type="button" class="btn-ghost btn-compact" data-cancel-task="${esc(task.task_id)}">${esc(t("task.cancel"))}</button>`
+    ? ""
     : `${task.status === "interrupted" || task.status === "cancelled"
       ? `<button type="button" class="btn-ghost btn-compact" data-resume-task="${esc(task.task_id)}">${esc(t("task.resume"))}</button>`
       : ""}<button type="button" class="btn-ghost btn-compact" data-delete-task="${esc(task.task_id)}">${esc(t("task.delete"))}</button>`;
@@ -192,7 +196,7 @@ function renderHead(task: AgentTaskView, running: boolean): string {
     <div class="conversation-head">
       <span class="conversation-head__title" title="${esc(task.task)}">${esc(task.task)}</span>
       <div class="conversation-head__actions">
-        <span class="conv-status">
+        <span class="conv-status" role="status" aria-live="polite" aria-atomic="true">
           <i class="badge-dot ${dotClass}" aria-hidden="true"></i>
           ${esc(taskStatusLabel(task.status))}
         </span>
@@ -716,6 +720,28 @@ function renderComposer(c: ComposerProps): string {
   const glyph = c.submitting
     ? `<span class="composer__send-dot" aria-hidden="true"></span>`
     : `<svg class="composer__send-glyph" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 7 16 13 8 13"></polyline><polyline points="11 10 8 13 11 16"></polyline></svg>`;
+  const stopGlyph = c.cancelling
+    ? `<span class="composer__send-dot" aria-hidden="true"></span>`
+    : `<span class="composer__stop-glyph" aria-hidden="true"></span>`;
+  const action = c.running && c.taskId
+    ? `<button
+        id="composer-stop"
+        type="button"
+        class="composer__send composer__stop"
+        data-cancel-task="${esc(c.taskId)}"
+        title="${esc(t("task.stop"))}"
+        aria-label="${esc(t("task.stop"))}"
+        aria-disabled="${c.cancelling ? "true" : "false"}"
+        aria-busy="${c.cancelling ? "true" : "false"}"
+      >${stopGlyph}</button>`
+    : `<button
+        id="composer-send"
+        type="submit"
+        class="composer__send"
+        title="${esc(sendShortcutLabel)}"
+        aria-label="${esc(t(c.mode === "new" ? "task.new" : "task.replySend"))}"
+        ${sendDisabled ? "disabled" : ""}
+      >${glyph}</button>`;
   const connectHint = connected
     ? ""
     : c.remoteProfile
@@ -740,19 +766,12 @@ function renderComposer(c: ComposerProps): string {
             placeholder="${esc(placeholder)}"
             ${disabled ? "disabled" : ""}
           >${esc(c.value)}</textarea>
-          <button
-            id="composer-send"
-            type="submit"
-            class="composer__send"
-            title="${esc(sendShortcutLabel)}"
-            aria-label="${esc(t(c.mode === "new" ? "task.new" : "task.replySend"))}"
-            ${sendDisabled ? "disabled" : ""}
-          >${glyph}</button>
+          ${action}
         </div>
       </form>
       ${connectHint}
       ${keyHint}
-      ${c.error ? `<pre class="composer__error">${esc(c.error)}</pre>` : ""}
+      ${c.error ? `<pre class="composer__error" role="alert" aria-live="assertive" aria-atomic="true">${esc(c.error)}</pre>` : ""}
     </div>
   `;
 }

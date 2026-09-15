@@ -371,6 +371,7 @@ const messages = {
   "task.viewAria": { en: "task view", zh: "任务视图" },
   "task.noTasks": { en: "no tasks yet.", zh: "暂无任务。" },
   "task.cancel": { en: "cancel", zh: "取消" },
+  "task.stop": { en: "stop task", zh: "终止会话" },
   "task.resume": { en: "continue", zh: "继续" },
   "task.resumePrompt": {
     en: "Continue the interrupted task from its saved progress. Reuse the completed work and saved artifacts, avoid repeating finished work unless necessary, and finish the original request.",
