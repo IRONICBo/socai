@@ -138,6 +138,10 @@ pub(crate) enum AgentTaskEventKind {
         cost_currency: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         points_used: Option<i64>,
+        #[serde(default)]
+        partial: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        degraded_reason: Option<String>,
         text: String,
     },
     Completed {
@@ -288,6 +292,8 @@ impl AgentTaskEventKind {
                 estimated_cost: None,
                 cost_currency: None,
                 points_used: None,
+                partial: false,
+                degraded_reason: None,
                 text,
             },
             "completed" => Self::Completed { text },
@@ -515,7 +521,13 @@ pub(crate) fn agent_event_to_timeline(event: &AgentEvent) -> AgentTaskEventKind 
             message: message.clone(),
             text: message.clone(),
         },
-        AgentEvent::Done { run_id, steps, .. } => AgentTaskEventKind::Done {
+        AgentEvent::Done {
+            run_id,
+            steps,
+            partial,
+            degraded_reason,
+            ..
+        } => AgentTaskEventKind::Done {
             run_id: Some(run_id.clone()),
             steps: *steps,
             duration_ms: None,
@@ -526,6 +538,8 @@ pub(crate) fn agent_event_to_timeline(event: &AgentEvent) -> AgentTaskEventKind 
             estimated_cost: None,
             cost_currency: None,
             points_used: None,
+            partial: *partial,
+            degraded_reason: degraded_reason.clone(),
             text: "done".to_string(),
         },
     }
@@ -714,6 +728,11 @@ fn replay_run_events(snapshot: &AgentTaskSnapshot, run_dir: &Path) -> Vec<AgentT
                     .and_then(Value::as_str)
                     .map(str::to_string),
                 points_used: run.pointer("/billing/points_used").and_then(Value::as_i64),
+                partial: run.get("partial").and_then(Value::as_bool).unwrap_or(false),
+                degraded_reason: run
+                    .get("degraded_reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 text: "done".to_string(),
             },
         ));
@@ -745,6 +764,8 @@ fn append_terminal_snapshot_events(
                         estimated_cost: snapshot.estimated_cost,
                         cost_currency: snapshot.cost_currency.clone(),
                         points_used: snapshot.points_used,
+                        partial: snapshot.partial,
+                        degraded_reason: snapshot.degraded_reason.clone(),
                         text: "done".into(),
                     },
                 );
@@ -754,7 +775,12 @@ fn append_terminal_snapshot_events(
                     snapshot,
                     events,
                     AgentTaskEventKind::Completed {
-                        text: "task completed".into(),
+                        text: if snapshot.partial {
+                            "task completed with partial results after browser recovery failed"
+                                .into()
+                        } else {
+                            "task completed".into()
+                        },
                     },
                 );
             }

@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::agent::{
     config_for, configured_default_model_for, load_provider_credential, resolve_provider,
     run_agent_with_events, AgentEvent, AgentOptions, AgentOutcome, AnthropicBackend, Backend,
-    Message, OpenAICompatBackend, Provider, Tool,
+    Message, OpenAICompatBackend, Provider, SharedToolFailureRecovery, Tool,
 };
 use crate::cdp::{
     BrowserEvent, Cdp, ChromeConnectOptions, ChromeProfile, PageSession, PageSessionManager,
@@ -354,6 +354,26 @@ struct UncachedPageGuard {
     target_id: Option<String>,
 }
 
+/// Keeps a replacement target cancellation-safe until the desktop task has
+/// completed login validation and rebound its active-task metadata.
+pub struct RecoveredPageGuard(UncachedPageGuard);
+
+impl RecoveredPageGuard {
+    /// Transfer ownership of the replacement target to the active task.
+    pub fn commit(mut self) {
+        self.0.disarm();
+    }
+
+    /// Close the replacement synchronously when validation or task rebinding
+    /// fails. `Drop` remains the cancellation backstop.
+    pub async fn discard(mut self) {
+        let Some(target_id) = self.0.target_id.take() else {
+            return;
+        };
+        let _ = self.0.runtime.close_target(&target_id).await;
+    }
+}
+
 impl UncachedPageGuard {
     fn disarm(&mut self) {
         self.target_id = None;
@@ -491,6 +511,12 @@ impl SocaiRuntime {
         self.cdp.connect_with_options(options);
     }
 
+    fn recover_browser_with_options(&self, options: ChromeConnectOptions) {
+        self.activity.touch();
+        self.ensure_idle_reaper();
+        self.cdp.recover_with_options(options);
+    }
+
     pub async fn disconnect_browser(&self) {
         self.cdp.disconnect().await;
     }
@@ -563,6 +589,96 @@ impl SocaiRuntime {
         let page_key = format!("session:{session_id}:{site_id}");
         self.ensure_site_page_inner(&page_key, start_url, Some(options))
             .await
+    }
+
+    /// Recreate a conversation page after the shared CDP transport is lost,
+    /// then swap the fresh target into the stable `PageSession` held by the
+    /// running task's tools. The caller keeps its original browser lease, so
+    /// this recovery does not consume another run slot.
+    pub async fn recover_session_site_page_with_browser_options(
+        &self,
+        _lease: &BrowserLease,
+        session_id: &str,
+        site_id: &str,
+        start_url: &str,
+        options: ChromeConnectOptions,
+        page: &Arc<PageSession>,
+    ) -> Result<RecoveredPageGuard> {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            anyhow::bail!("session_id is empty");
+        }
+        let site_id = site_id.trim();
+        if site_id.is_empty() {
+            anyhow::bail!("site_id is empty");
+        }
+        self.ensure_idle_reaper();
+
+        // Every task affected by one transport loss reaches this method. The
+        // first reconnects the shared browser; later tasks reuse it and only
+        // create their own conversation target.
+        let _admission_gate = self.admission.gate.lock().await;
+        let status = self.browser_status().await;
+        let connected_transport_usable = match self.cdp.browser_client().await {
+            Some(client) => !client.is_closed(),
+            None => false,
+        };
+        match &status {
+            StatusPayload::Connected { .. }
+                if browser_status_matches_options(&status, &options)
+                    && connected_transport_usable => {}
+            StatusPayload::Connected { .. }
+                if browser_status_matches_options(&status, &options) =>
+            {
+                // The page command loop can observe websocket closure a moment
+                // before the target poller publishes Disconnected. Normalize
+                // that short race without turning it into a user_disconnect.
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if matches!(
+                            self.browser_status().await,
+                            StatusPayload::Disconnected { .. }
+                        ) {
+                            break;
+                        }
+                        sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await
+                .map_err(|_| anyhow!("CDP loss was not published within 5s"))?;
+                self.cdp.wait_for_teardown().await;
+                wait_browser_recovered_with_options(self, options.clone()).await?;
+            }
+            StatusPayload::Connected { .. } => {
+                anyhow::bail!("the reconnected browser does not match the configured profile")
+            }
+            StatusPayload::Disconnected { reason } if reason == "user_disconnected" => {
+                anyhow::bail!("browser reconnect cancelled by user")
+            }
+            StatusPayload::Disconnected { .. } => {
+                self.cdp.wait_for_teardown().await;
+                wait_browser_recovered_with_options(self, options.clone()).await?;
+            }
+            StatusPayload::Connecting { .. } => {
+                wait_browser_recovered_with_options(self, options.clone()).await?;
+            }
+        }
+
+        let replacement = self.create_page("about:blank").await?;
+        let replacement_target_id = replacement.target_id().await;
+        let page_guard = UncachedPageGuard {
+            runtime: self.clone(),
+            target_id: Some(replacement_target_id),
+        };
+        if !start_url.trim().is_empty() {
+            replacement.navigate_with_timeout(start_url, 60.0).await?;
+        }
+        page.replace_connection(replacement).await;
+        let page_key = format!("session:{session_id}:{site_id}");
+        self.site_pages.lock().await.insert(page_key, page.clone());
+        self.admission.clear_cooldown();
+        self.admission.finish_draining();
+        Ok(RecoveredPageGuard(page_guard))
     }
 
     async fn ensure_site_page_inner(
@@ -679,7 +795,7 @@ impl SocaiRuntime {
         let page = Arc::new(self.create_page("about:blank").await?);
         let mut page_guard = UncachedPageGuard {
             runtime: self.clone(),
-            target_id: Some(page.target_id().to_string()),
+            target_id: Some(page.target_id().await),
         };
         if !start_url.trim().is_empty() {
             page.navigate_with_timeout(start_url, 60.0).await?;
@@ -779,6 +895,14 @@ pub async fn wait_browser_connected_with_options(
     wait_browser_connected_inner(runtime, Some(options)).await
 }
 
+async fn wait_browser_recovered_with_options(
+    runtime: &SocaiRuntime,
+    options: ChromeConnectOptions,
+) -> Result<()> {
+    runtime.recover_browser_with_options(options);
+    wait_browser_connected_status(runtime, true).await
+}
+
 async fn wait_browser_connected_inner(
     runtime: &SocaiRuntime,
     options: Option<ChromeConnectOptions>,
@@ -787,12 +911,24 @@ async fn wait_browser_connected_inner(
         Some(options) => runtime.connect_browser_with_options(options),
         None => runtime.connect_browser(),
     }
+    wait_browser_connected_status(runtime, false).await
+}
+
+async fn wait_browser_connected_status(
+    runtime: &SocaiRuntime,
+    stop_on_user_disconnect: bool,
+) -> Result<()> {
     let deadline = Instant::now() + CONNECT_TIMEOUT;
     let mut saw_connect_attempt = false;
     loop {
         match runtime.browser_status().await {
             BrowserStatus::Connected { .. } => return Ok(()),
             BrowserStatus::Connecting { .. } => saw_connect_attempt = true,
+            BrowserStatus::Disconnected { reason }
+                if stop_on_user_disconnect && reason == "user_disconnected" =>
+            {
+                return Err(anyhow!("browser reconnect cancelled by user"));
+            }
             BrowserStatus::Disconnected { reason }
                 if reason != "not_yet_connected" && saw_connect_attempt =>
             {
@@ -897,6 +1033,7 @@ pub struct AgentRunConfig {
     pub session_id: Option<String>,
     pub background_media_generation: Option<u64>,
     pub billing_task_id: Option<String>,
+    pub tool_failure_recovery: Option<SharedToolFailureRecovery>,
 }
 
 impl Default for AgentRunConfig {
@@ -916,6 +1053,7 @@ impl Default for AgentRunConfig {
             session_id: None,
             background_media_generation: None,
             billing_task_id: None,
+            tool_failure_recovery: None,
         }
     }
 }
@@ -943,6 +1081,7 @@ pub async fn run_agent_task(
         session_id: config.session_id,
         background_media_generation: config.background_media_generation,
         billing_task_id: config.billing_task_id,
+        tool_failure_recovery: config.tool_failure_recovery,
     };
     run_agent_with_events(task, llm_provider, tools, options, events_tx).await
 }

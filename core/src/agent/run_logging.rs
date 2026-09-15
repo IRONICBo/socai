@@ -237,6 +237,7 @@ impl AgentRunRecorder {
         steps: u32,
         usage: &TokenUsage,
         error: Option<&str>,
+        degraded_reason: Option<&str>,
     ) -> std::io::Result<()> {
         let mut manifest = self.manifest.lock().expect("poisoned");
         manifest["status"] = json!(status);
@@ -245,6 +246,10 @@ impl AgentRunRecorder {
         manifest["usage"] = serde_json::to_value(usage).map_err(std::io::Error::other)?;
         if let Some(error) = error {
             manifest["error"] = json!(error);
+        }
+        if let Some(reason) = degraded_reason {
+            manifest["partial"] = json!(true);
+            manifest["degraded_reason"] = json!(reason);
         }
         write_json_atomic(&self.manifest_path, &manifest)?;
         self.finalized.store(true, Ordering::Release);

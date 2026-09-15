@@ -6,19 +6,12 @@ mod telemetry;
 mod timeline;
 
 use std::collections::HashSet;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
-use std::time::Duration;
 
 use serde_json::json;
 use socai_core::runtime::{RuntimeBrowserEvent, SocaiRuntime};
 use tasks::AgentTaskRegistry;
 use tauri::{Emitter, Manager};
 use telemetry::{duration_ms, DesktopTelemetry};
-
-const BROWSER_RECOVERY_GRACE: Duration = Duration::from_secs(15);
 
 async fn interrupt_missing_browser_targets(
     active_targets: HashSet<String>,
@@ -167,7 +160,6 @@ pub fn run() {
                 let mut rx = runtime.subscribe_browser_events();
                 let mut latest_disconnect_reason: Option<String> = None;
                 let mut recoverable_disconnect = false;
-                let browser_event_generation = Arc::new(AtomicU64::new(0));
                 while let Ok(event) = rx.recv().await {
                     match event {
                         RuntimeBrowserEvent::StatusChanged(payload) => {
@@ -180,9 +172,14 @@ pub fn run() {
                                     remote_remaining_seconds,
                                     ..
                                 } => {
-                                    browser_event_generation.fetch_add(1, Ordering::SeqCst);
-                                    latest_disconnect_reason = None;
-                                    recoverable_disconnect = false;
+                                    // Keep transport recovery active until the
+                                    // running task swaps its stable page handle.
+                                    // A Connected event arrives before that new
+                                    // target exists; clearing here would let the
+                                    // following empty inventory abort the task.
+                                    if !recoverable_disconnect {
+                                        latest_disconnect_reason = None;
+                                    }
                                     let profile = if *remote {
                                         "remote"
                                     } else if *managed {
@@ -202,6 +199,9 @@ pub fn run() {
                                     );
                                 }
                                 socai_core::cdp::StatusPayload::Disconnected { reason } => {
+                                    if reason == "user_disconnected" {
+                                        recoverable_disconnect = false;
+                                    }
                                     if reason != "not_yet_connected" {
                                         latest_disconnect_reason = Some(reason.clone());
                                         telemetry.capture(
@@ -238,17 +238,36 @@ pub fn run() {
                                     "status": if recoverable_disconnect { "recovering" } else { "terminal" },
                                     "kind": interruption_kind,
                                     "reason": reason,
-                                    "grace_seconds": if recoverable_disconnect {
-                                        Some(BROWSER_RECOVERY_GRACE.as_secs())
-                                    } else {
-                                        None
-                                    },
+                                    "grace_seconds": None::<u64>,
                                 }),
                             );
                         }
                         RuntimeBrowserEvent::TargetsChanged(targets) => {
-                            let generation =
-                                browser_event_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                            // Whole-CDP loss invalidates every old target id.
+                            // The per-task recovery hook reconnects, creates a
+                            // new conversation target and rebinds the actual
+                            // PageSession. Do not race it by treating the empty
+                            // inventory as a user-closed tab.
+                            if recoverable_disconnect {
+                                let active_targets: HashSet<&str> = targets
+                                    .iter()
+                                    .map(|target| target.target_id.as_str())
+                                    .collect();
+                                let still_waiting = tasks.list().await.into_iter().any(|task| {
+                                    task.status == "running"
+                                        && task
+                                            .target_id
+                                            .as_deref()
+                                            .is_some_and(|target_id| {
+                                                !active_targets.contains(target_id)
+                                            })
+                                });
+                                if still_waiting {
+                                    continue;
+                                }
+                                recoverable_disconnect = false;
+                                latest_disconnect_reason = None;
+                            }
                             for snapshot in tasks.rebind_missing_targets(&targets).await {
                                 let task_id = snapshot.task_id.clone();
                                 commands::emit_task_event(
@@ -266,35 +285,14 @@ pub fn run() {
                             let interruption_reason = latest_disconnect_reason
                                 .clone()
                                 .unwrap_or_else(|| "chrome tab was closed".into());
-                            if active_targets.is_empty() && recoverable_disconnect {
-                                let generation_counter = browser_event_generation.clone();
-                                let delayed_tasks = tasks.clone();
-                                let delayed_telemetry = telemetry.clone();
-                                let delayed_handle = handle.clone();
-                                tauri::async_runtime::spawn(async move {
-                                    tokio::time::sleep(BROWSER_RECOVERY_GRACE).await;
-                                    if generation_counter.load(Ordering::SeqCst) != generation {
-                                        return;
-                                    }
-                                    interrupt_missing_browser_targets(
-                                        active_targets,
-                                        interruption_reason,
-                                        delayed_tasks,
-                                        delayed_telemetry,
-                                        delayed_handle,
-                                    )
-                                    .await;
-                                });
-                            } else {
-                                interrupt_missing_browser_targets(
-                                    active_targets,
-                                    interruption_reason,
-                                    tasks.clone(),
-                                    telemetry.clone(),
-                                    handle.clone(),
-                                )
-                                .await;
-                            }
+                            interrupt_missing_browser_targets(
+                                active_targets,
+                                interruption_reason,
+                                tasks.clone(),
+                                telemetry.clone(),
+                                handle.clone(),
+                            )
+                            .await;
                         }
                     }
                 }

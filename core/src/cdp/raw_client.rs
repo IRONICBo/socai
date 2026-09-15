@@ -71,6 +71,13 @@ impl RawCdpClient {
         self.execute_for_session(None, method, params).await
     }
 
+    /// Whether the websocket command loop has terminated. This is a typed
+    /// transport-health signal for recovery code; callers do not need to
+    /// recognize the user-facing error strings returned by `execute`.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
     pub async fn execute_for_session(
         &self,
         session_id: Option<&str>,

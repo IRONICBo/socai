@@ -415,6 +415,14 @@ impl Cdp {
         Arc::clone(&self.teardown_lock)
     }
 
+    /// Wait until any connection-loss owner cleanup has completed without
+    /// changing the public connection state. Recovery uses this before
+    /// launching managed Chrome against the same profile directory.
+    pub(crate) async fn wait_for_teardown(&self) {
+        let lock = self.teardown_lock();
+        let _guard = lock.lock().await;
+    }
+
     pub(crate) fn emit(&self, event: BrowserEvent) {
         let _ = self.events.send(event);
     }

@@ -20,12 +20,14 @@ pub mod signature;
 pub mod system_prompt;
 pub mod tool;
 
+pub use self::conversation::{default_sessions_root, Conversation, Run};
 pub use self::file_bash_tools::{
     desktop_agent_tools, local_agent_tools, BashTool, ReadFileTool, ShellTool,
 };
 pub use self::llm::{
     AnthropicBackend, Backend, Block, LLMResponse, Message, MessageContent, MessageRole,
-    OpenAICompatBackend, StopReason, TokenUsage, ToolCall, ToolResultContent, ToolSchema, UsageCost,
+    OpenAICompatBackend, StopReason, TokenUsage, ToolCall, ToolResultContent, ToolSchema,
+    UsageCost,
 };
 pub use self::provider::{
     catalog_model_display_name, catalog_models_for, config_for, configured_default_model_for,
@@ -34,13 +36,13 @@ pub use self::provider::{
     save_api_key, save_default_model, Credential, CredentialKind, ModelCatalogEntry, ModelPricing,
     ModelPricingTier, Provider, ProviderConfig, PROVIDERS,
 };
-pub use self::conversation::{default_sessions_root, Conversation, Run};
 pub use self::r#loop::{run_agent, run_agent_with_events, AgentEvent, AgentOptions, AgentOutcome};
 pub use self::run_logging::{
     default_runs_root, make_run_dir, mark_agent_run_status, AgentRunRecorder, ToolCallRecorder,
 };
 pub use self::run_state::{ArtifactRecord, RunState};
 pub use self::tool::{
-    EchoTool, ProcessedNote, SharedTool, Tool, ToolContext, ToolProgressEvent, ToolProgressPhase,
-    ToolProgressStatus, ToolResult, ToolResultBlock,
+    EchoTool, ProcessedNote, SharedTool, SharedToolFailureRecovery, Tool, ToolContext,
+    ToolFailureRecovery, ToolProgressEvent, ToolProgressPhase, ToolProgressStatus,
+    ToolRecoveryOutcome, ToolResult, ToolResultBlock,
 };

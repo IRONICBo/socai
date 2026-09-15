@@ -3,6 +3,7 @@ use crate::tasks::{app_data_dir, now_ms, AgentTaskRegistry, AgentTaskSnapshot};
 use crate::telemetry::{duration_ms, short_error, DesktopTelemetry};
 use crate::timeline::{agent_event_to_timeline, AgentTaskEventKind, AgentTaskEventPayload};
 use anyhow::Result;
+use async_trait::async_trait;
 use calamine::{Data, DataRef, Reader, SheetType, Xlsx};
 use quick_xml::{events::Event as XmlEvent, Reader as XmlReader};
 use serde_json::{json, Map, Value};
@@ -10,7 +11,8 @@ use socai_core::agent::{
     catalog_models_for, configured_default_model_for, configured_default_provider,
     desktop_agent_tools, load_api_key, make_run_dir, mark_agent_run_status,
     provider_credential_kind, resolve_provider, save_default_model, AgentEvent, Conversation,
-    CredentialKind, ModelCatalogEntry, Provider, TokenUsage,
+    CredentialKind, ModelCatalogEntry, Provider, SharedToolFailureRecovery, TokenUsage,
+    ToolFailureRecovery, ToolRecoveryOutcome,
 };
 use socai_core::runtime::{
     create_llm_provider_for_task, ensure_llm_provider_configured_for,
@@ -20,11 +22,11 @@ use socai_core::runtime::{
 };
 use socai_core::sites::xhs::{XhsHistoryStore, XhsPageRuntime};
 use socai_core::sites::{find_site, SiteSpec};
-use socai_core::telemetry::query_text_enabled;
 use socai_core::telemetry::tool_call::{
     is_site_tool_result, summarize_site_tool_result, summarize_tool_args,
 };
 use socai_core::telemetry::trace::mark_run_trace_status;
+use socai_core::telemetry::{query_text_enabled, redact_secrets};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Write};
@@ -334,6 +336,8 @@ pub struct AgentRunOutcome {
     cache_creation_input_tokens: u64,
     estimated_cost: Option<f64>,
     cost_currency: Option<String>,
+    partial: bool,
+    degraded_reason: Option<String>,
     #[serde(skip)]
     usage: TokenUsage,
 }
@@ -718,6 +722,8 @@ pub async fn agent_task_reply(
             snapshot.cache_creation_input_tokens = None;
             snapshot.estimated_cost = None;
             snapshot.cost_currency = None;
+            snapshot.partial = false;
+            snapshot.degraded_reason = None;
             snapshot.points_used = None;
             snapshot.current_message = Some(message_text.clone());
         })
@@ -804,12 +810,196 @@ async fn run_session_login_preflight(page: &RuntimePageSession) -> Result<(), St
     Ok(())
 }
 
+struct DesktopBrowserRecovery {
+    app: AppHandle,
+    registry: AgentTaskRegistry,
+    telemetry: DesktopTelemetry,
+    runtime: SocaiRuntime,
+    lease: Arc<BrowserLease>,
+    page: Arc<RuntimePageSession>,
+    task_id: String,
+    session_id: String,
+    site_id: &'static str,
+    home_url: &'static str,
+    browser_options: ChromeConnectOptions,
+    browser_tools: HashSet<String>,
+}
+
+impl std::fmt::Debug for DesktopBrowserRecovery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DesktopBrowserRecovery")
+            .field("task_id", &self.task_id)
+            .field("session_id", &self.session_id)
+            .field("site_id", &self.site_id)
+            .field("browser_options", &self.browser_options)
+            .field("browser_tools", &self.browser_tools)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DesktopBrowserRecovery {
+    async fn disconnect_reason(&self) -> Option<String> {
+        let transport_closed = self.page.transport_closed().await;
+        match self.runtime.browser_status().await {
+            BrowserStatus::Disconnected { reason } if reason != "not_yet_connected" => Some(reason),
+            BrowserStatus::Connected { .. } if transport_closed => {
+                Some("the page's CDP transport is closed".into())
+            }
+            BrowserStatus::Connecting { .. } if transport_closed => {
+                Some("the page's CDP transport closed while the browser reconnects".into())
+            }
+            _ => None,
+        }
+    }
+
+    async fn emit_recovery_event(&self, status: &str, text: String) {
+        emit_task_event(&self.app, &self.registry, &self.task_id, "tab", text, None).await;
+        let _ = self.app.emit(
+            "cdp:recovery_changed",
+            json!({
+                "status": status,
+                "task_id": self.task_id,
+            }),
+        );
+    }
+
+    fn capture_recovery(&self, outcome: &str, reason: &str, duration_ms: u64) {
+        self.telemetry.capture(
+            "socai_browser_task_recovery",
+            json!({
+                "task_id": self.task_id,
+                "outcome": outcome,
+                "duration_ms": duration_ms,
+                "error": (!reason.is_empty()).then(|| redacted_short_error(reason)),
+            }),
+        );
+    }
+
+    async fn clear_task_target(&self) {
+        let _ = self
+            .registry
+            .update(&self.task_id, |task| {
+                if matches!(task.status.as_str(), "queued" | "running") {
+                    task.target_id = None;
+                }
+            })
+            .await;
+    }
+}
+
+#[async_trait]
+impl ToolFailureRecovery for DesktopBrowserRecovery {
+    async fn recover_after_tool(&self, tool_name: &str, retry_number: u8) -> ToolRecoveryOutcome {
+        if !self.browser_tools.contains(tool_name) {
+            return ToolRecoveryOutcome::NotNeeded;
+        }
+        let Some(disconnect_reason) = self.disconnect_reason().await else {
+            return ToolRecoveryOutcome::NotNeeded;
+        };
+        if retry_number > 0 {
+            let reason = format!(
+                "browser disconnected again after automatically retrying {tool_name}: {disconnect_reason}"
+            );
+            self.emit_recovery_event(
+                "degraded",
+                "browser disconnected again; summarizing the collected results".into(),
+            )
+            .await;
+            self.clear_task_target().await;
+            self.capture_recovery("degraded", &reason, 0);
+            return ToolRecoveryOutcome::Degraded { reason };
+        }
+        if disconnect_reason == "user_disconnected" {
+            let reason = "browser was disconnected by the user".to_string();
+            self.emit_recovery_event(
+                "degraded",
+                "browser was disconnected; summarizing the collected results".into(),
+            )
+            .await;
+            self.clear_task_target().await;
+            self.capture_recovery("degraded", &reason, 0);
+            return ToolRecoveryOutcome::Degraded { reason };
+        }
+
+        self.emit_recovery_event(
+            "recovering",
+            "browser connection lost; automatically reconnecting".into(),
+        )
+        .await;
+        let started = std::time::Instant::now();
+        let replacement_guard = self
+            .runtime
+            .recover_session_site_page_with_browser_options(
+                &self.lease,
+                &self.session_id,
+                self.site_id,
+                self.home_url,
+                self.browser_options.clone(),
+                &self.page,
+            )
+            .await
+            .map_err(|error| format!("{error:#}"));
+        let recovery = match replacement_guard {
+            Ok(replacement_guard) => {
+                if let Err(error) = run_session_login_preflight(&self.page).await {
+                    replacement_guard.discard().await;
+                    Err(error)
+                } else if bind_task_page(
+                    &self.app,
+                    &self.registry,
+                    &self.task_id,
+                    &self.page,
+                    "recovered task",
+                )
+                .await
+                {
+                    replacement_guard.commit();
+                    Ok(())
+                } else {
+                    replacement_guard.discard().await;
+                    Err("task is no longer active".into())
+                }
+            }
+            Err(error) => Err(error),
+        };
+        let duration_ms = started.elapsed().as_millis() as u64;
+        match recovery {
+            Ok(()) => {
+                self.emit_recovery_event(
+                    "recovered",
+                    "browser connection recovered; retrying the interrupted operation".into(),
+                )
+                .await;
+                self.capture_recovery("completed", "", duration_ms);
+                ToolRecoveryOutcome::Recovered
+            }
+            Err(error) => {
+                let reason =
+                    format!("browser connection lost and automatic recovery failed: {error}");
+                self.clear_task_target().await;
+                self.emit_recovery_event(
+                    "degraded",
+                    "browser recovery failed; summarizing the collected results".into(),
+                )
+                .await;
+                self.capture_recovery("failed", &reason, duration_ms);
+                ToolRecoveryOutcome::Degraded { reason }
+            }
+        }
+    }
+}
+
 fn task_preflight_error(code: &str, detail: impl std::fmt::Display) -> String {
     json!({
         "code": code,
         "detail": detail.to_string(),
     })
     .to_string()
+}
+
+fn redacted_short_error(error: &str) -> String {
+    short_error(&redact_secrets(error))
 }
 
 fn validate_preflight_balance(balance_points: i64) -> Result<(), String> {
@@ -874,7 +1064,14 @@ async fn acquire_session_page(
     runtime: &SocaiRuntime,
     lease: &BrowserLease,
     session_id: &str,
-) -> Result<(Arc<RuntimePageSession>, UnboundPageGuard), PageAdmission> {
+) -> Result<
+    (
+        Arc<RuntimePageSession>,
+        UnboundPageGuard,
+        ChromeConnectOptions,
+    ),
+    PageAdmission,
+> {
     let site = app_site().map_err(|error| {
         PageAdmission::Failed(task_preflight_error("preflight_site", format!("{error:#}")))
     })?;
@@ -893,7 +1090,7 @@ async fn acquire_session_page(
             session_id,
             site.id,
             site.home_url,
-            options,
+            options.clone(),
         )
         .await
         .map_err(|error| match BrowserBusy::find(&error) {
@@ -902,9 +1099,9 @@ async fn acquire_session_page(
         })?;
     let guard = UnboundPageGuard {
         runtime: runtime.clone(),
-        target_id: Some(page.target_id().to_string()),
+        target_id: Some(page.target_id().await),
     };
-    Ok((page, guard))
+    Ok((page, guard, options))
 }
 
 /// Associate a tab with its task as soon as browser admission succeeds. The
@@ -917,7 +1114,7 @@ async fn bind_task_page(
     page: &RuntimePageSession,
     title_label: &str,
 ) -> bool {
-    let target_id = page.target_id().to_string();
+    let target_id = page.target_id().await;
     let page_url = page
         .evaluate_json("location.href")
         .await
@@ -2320,7 +2517,7 @@ async fn run_agent_task_background(
     // Admission is local to this app process: each run holds one task permit
     // and one browser lease for its entire lifetime.
     let mut connect_attempts = 0u32;
-    let (_permit, _lease, _activity, page) = loop {
+    let (_permit, lease, _activity, page, browser_options) = loop {
         let Some(permit) = registry.acquire_run_permit().await else {
             let error = "task runner queue closed".to_string();
             fail_task_before_run(
@@ -2358,7 +2555,7 @@ async fn run_agent_task_background(
         // Held for the whole task — LLM thinking pauses between tool calls
         // included — so the remote idle reaper only fires between tasks.
         let activity = runtime.begin_activity().await;
-        let (page, mut page_guard) =
+        let (page, mut page_guard, browser_options) =
             match acquire_session_page(&runtime, &lease, &session_id).await {
                 Ok(admitted) => admitted,
                 Err(PageAdmission::Busy(busy)) => {
@@ -2427,7 +2624,7 @@ async fn run_agent_task_background(
             .await;
             return;
         }
-        break (permit, lease, activity, page);
+        break (permit, Arc::new(lease), activity, page, browser_options);
     };
 
     if let Some(snapshot) = registry
@@ -2462,6 +2659,9 @@ async fn run_agent_task_background(
     let result = run_agent_task_on_session_page(
         app.clone(),
         task_id.clone(),
+        runtime.clone(),
+        lease,
+        browser_options,
         page,
         &task,
         provider.as_deref(),
@@ -2505,6 +2705,8 @@ async fn run_agent_task_background(
                         Some(outcome.cache_creation_input_tokens);
                     snapshot.estimated_cost = outcome.estimated_cost;
                     snapshot.cost_currency = outcome.cost_currency.clone();
+                    snapshot.partial = outcome.partial;
+                    snapshot.degraded_reason = outcome.degraded_reason.clone();
                     snapshot.points_used = settlement.as_ref().and_then(|settlement| {
                         visible_billed_points(provider.as_deref(), settlement)
                     });
@@ -2524,6 +2726,11 @@ async fn run_agent_task_background(
                             "outcome": "completed",
                             "steps": outcome.steps,
                             "points_used": snapshot.points_used,
+                            "partial": outcome.partial,
+                            "degraded_reason": outcome
+                                .degraded_reason
+                                .as_deref()
+                                .map(redacted_short_error),
                             "duration_ms": duration_ms(snapshot.started_at, snapshot.finished_at),
                         }),
                         Some(&outcome.usage),
@@ -2534,7 +2741,11 @@ async fn run_agent_task_background(
                     &registry,
                     &task_id,
                     "completed",
-                    "task completed".into(),
+                    if outcome.partial {
+                        "task completed with partial results after browser recovery failed".into()
+                    } else {
+                        "task completed".into()
+                    },
                     Some(snapshot),
                 )
                 .await;
@@ -2701,6 +2912,9 @@ fn record_desktop_session(snapshot: &AgentTaskSnapshot, assistant: &str, status:
 async fn run_agent_task_on_session_page(
     app: AppHandle,
     task_id: String,
+    runtime: SocaiRuntime,
+    lease: Arc<BrowserLease>,
+    browser_options: ChromeConnectOptions,
     page: Arc<RuntimePageSession>,
     task: &str,
     provider: Option<&str>,
@@ -2768,6 +2982,23 @@ async fn run_agent_task_on_session_page(
     let outcome = async {
         let agent_tools = site.default_agent_tools.unwrap_or(site.agent_tools);
         let mut tools = agent_tools(page.clone(), llm_provider.clone()).await?;
+        let browser_tools = tools.iter().map(|tool| tool.name().to_string()).collect();
+        let tool_failure_recovery = registry.clone().map(|registry| {
+            Arc::new(DesktopBrowserRecovery {
+                app: app.clone(),
+                registry,
+                telemetry: telemetry.clone(),
+                runtime: runtime.clone(),
+                lease: lease.clone(),
+                page: page.clone(),
+                task_id: task_id.clone(),
+                session_id: session_id.clone(),
+                site_id: site.id,
+                home_url: site.home_url,
+                browser_options: browser_options.clone(),
+                browser_tools,
+            }) as SharedToolFailureRecovery
+        });
         tools.extend(desktop_agent_tools());
         tools.push(Arc::new(PublishArtifactTool::new(
             session_dir.as_deref().map(PathBuf::from),
@@ -2798,6 +3029,7 @@ async fn run_agent_task_on_session_page(
             session_id: Some(session_id),
             background_media_generation,
             billing_task_id: Some(task_id.clone()),
+            tool_failure_recovery,
             ..AgentRunConfig::default()
         };
         let outcome = run_agent_with_tools(task, llm_provider, tools, config, tx).await;
@@ -2814,6 +3046,7 @@ async fn run_agent_task_on_session_page(
         telemetry.upload_run_trace(&outcome.run_dir);
 
         let usage = outcome.usage;
+        let degraded_reason = outcome.degraded_reason;
         let estimated_cost = usage.cost.as_ref().map(|cost| cost.total);
         let cost_currency = usage.cost.as_ref().map(|cost| cost.currency.clone());
         Ok::<AgentRunOutcome, anyhow::Error>(AgentRunOutcome {
@@ -2827,6 +3060,8 @@ async fn run_agent_task_on_session_page(
             cache_creation_input_tokens: usage.cache_creation_input_tokens,
             estimated_cost,
             cost_currency,
+            partial: degraded_reason.is_some(),
+            degraded_reason,
             usage,
         })
     }
@@ -2878,7 +3113,10 @@ fn pump_agent_task_events(
                     props.insert("sequence".into(), json!(sequence));
                     props.insert("duration_ms".into(), json!(tool_duration_ms));
                     props.insert("ok".into(), json!(error.is_none()));
-                    props.insert("error".into(), json!(error.as_deref().map(short_error)));
+                    props.insert(
+                        "error".into(),
+                        json!(error.as_deref().map(redacted_short_error)),
+                    );
                     if is_site_tool_result(name) {
                         props.insert("site".into(), json!(APP_SITE_ID));
                     }

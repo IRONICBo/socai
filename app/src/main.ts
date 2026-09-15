@@ -75,6 +75,8 @@ export interface AgentTaskSnapshot {
   cache_creation_input_tokens: number | null;
   estimated_cost: number | null;
   cost_currency: string | null;
+  partial: boolean;
+  degraded_reason: string | null;
   points_used: number | null;
 }
 
@@ -191,6 +193,8 @@ export interface AgentTaskEventPayload {
   estimated_cost?: number | null;
   cost_currency?: string | null;
   points_used?: number | null;
+  partial?: boolean;
+  degraded_reason?: string | null;
   entities?: TimelineEntity[];
   error?: string | null;
   result_file?: string | null;

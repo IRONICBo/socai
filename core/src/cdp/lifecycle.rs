@@ -75,7 +75,7 @@ impl Cdp {
     pub fn connect(&self) {
         let cdp = self.clone();
         tokio::spawn(async move {
-            run_connect(cdp, None, MAX_ATTEMPTS).await;
+            run_connect(cdp, None, MAX_ATTEMPTS, true).await;
         });
     }
 
@@ -84,7 +84,7 @@ impl Cdp {
     pub fn connect_once(&self) {
         let cdp = self.clone();
         tokio::spawn(async move {
-            run_connect(cdp, None, 1).await;
+            run_connect(cdp, None, 1, true).await;
         });
     }
 
@@ -95,7 +95,17 @@ impl Cdp {
     pub fn connect_with_options(&self, options: ChromeConnectOptions) {
         let cdp = self.clone();
         tokio::spawn(async move {
-            run_connect(cdp, Some(options), MAX_ATTEMPTS).await;
+            run_connect(cdp, Some(options), MAX_ATTEMPTS, true).await;
+        });
+    }
+
+    /// Reconnect after an observed transport loss, unless an explicit user
+    /// disconnect won the race. Unlike the public connect actions this must
+    /// never resurrect a browser the user just asked to close.
+    pub(crate) fn recover_with_options(&self, options: ChromeConnectOptions) {
+        let cdp = self.clone();
+        tokio::spawn(async move {
+            run_connect(cdp, Some(options), MAX_ATTEMPTS, false).await;
         });
     }
 
@@ -193,7 +203,12 @@ async fn release_owner_now(owner: BrowserOwner) {
     }
 }
 
-async fn run_connect(cdp: Cdp, options: Option<ChromeConnectOptions>, max_attempts: u8) {
+async fn run_connect(
+    cdp: Cdp,
+    options: Option<ChromeConnectOptions>,
+    max_attempts: u8,
+    allow_after_user_disconnect: bool,
+) {
     // Exactly one connect loop at a time. The state check below is a filter,
     // not a claim: two callers (a UI connect button pressed twice, say) can
     // both observe `Disconnected` before either transitions, and both would
@@ -206,8 +221,10 @@ async fn run_connect(cdp: Cdp, options: Option<ChromeConnectOptions>, max_attemp
     {
         let state = cdp.state();
         let guard = state.lock().await;
-        if !guard.is_disconnected() {
-            return;
+        match &*guard {
+            CdpState::Disconnected { reason }
+                if allow_after_user_disconnect || reason != "user_disconnected" => {}
+            _ => return,
         }
     }
 
@@ -219,7 +236,7 @@ async fn run_connect(cdp: Cdp, options: Option<ChromeConnectOptions>, max_attemp
     let deadline = tokio::time::Instant::now() + CONNECT_BUDGET;
     let max_attempts = max_attempts.max(1);
     for attempt in 1..=max_attempts {
-        if !begin_connect_attempt(&cdp, attempt, attempt == 1).await {
+        if !begin_connect_attempt(&cdp, attempt, attempt == 1, allow_after_user_disconnect).await {
             return;
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -585,12 +602,19 @@ async fn on_connection_lost(cdp: Cdp, transport_error: String) {
 /// `Connecting` can be trusted to be *our own* attempt because `run_connect`
 /// holds `Cdp::connect_lock` for the whole loop, so no second loop exists to
 /// have left it there.
-async fn begin_connect_attempt(cdp: &Cdp, attempt: u8, first: bool) -> bool {
+async fn begin_connect_attempt(
+    cdp: &Cdp,
+    attempt: u8,
+    first: bool,
+    allow_after_user_disconnect: bool,
+) -> bool {
     let state = cdp.state();
     let mut guard = state.lock().await;
     let eligible = match *guard {
         CdpState::Connecting { .. } => true,
-        CdpState::Disconnected { .. } => first,
+        CdpState::Disconnected { ref reason } => {
+            first && (allow_after_user_disconnect || reason != "user_disconnected")
+        }
         CdpState::Connected { .. } => false,
     };
     if !eligible {

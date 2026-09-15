@@ -75,6 +75,8 @@ export namespace agentPanel {
   let replyDraft = "";
   let submittingReply = false;
   let replyError = "";
+  const cancellingTaskIds = new Set<string>();
+  const cancellationErrors = new Map<string, string>();
   let tasks: AgentTaskView[] = [];
   let pendingEvents = new Map<string, AgentTaskEventPayload[]>();
   let selectedTaskId: string | null = null;
@@ -912,7 +914,7 @@ export namespace agentPanel {
       isActivityOpen: (turnIndex, defaultOpen) => isActivityOpen(task.task_id, turnIndex, defaultOpen),
       artifactDownloadState: (path) => artifactDownloads.get(artifactDownloadKey(task.task_id, path)),
       artifactPreviewPath: artifactPreview?.taskId === task.task_id ? artifactPreview.path : null,
-      composer: replyComposer(shell, running),
+      composer: replyComposer(shell, task.task_id, running),
     });
     const preview = artifactPreview?.taskId === task.task_id ? artifactPreview : null;
     const previewDownload = preview
@@ -937,6 +939,7 @@ export namespace agentPanel {
       mode: "new",
       value: draft,
       submitting: submittingTask,
+      cancelling: false,
       error: submitError,
       status: shell.status,
       modelReady: !!selected && selected.has_key,
@@ -946,12 +949,14 @@ export namespace agentPanel {
     };
   }
 
-  function replyComposer(shell: ShellState, running: boolean): ComposerProps {
+  function replyComposer(shell: ShellState, taskId: string, running: boolean): ComposerProps {
     return {
       mode: "reply",
+      taskId,
       value: replyDraft,
       submitting: submittingReply,
-      error: replyError,
+      cancelling: cancellingTaskIds.has(taskId),
+      error: cancellationErrors.get(taskId) ?? replyError,
       status: shell.status,
       modelReady: true,
       running,
@@ -995,15 +1000,29 @@ export namespace agentPanel {
     document.querySelectorAll<HTMLButtonElement>("[data-cancel-task]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const taskId = btn.dataset.cancelTask;
-        if (!taskId) return;
-        btn.disabled = true;
+        if (!taskId || cancellingTaskIds.has(taskId)) return;
+        cancellationErrors.delete(taskId);
+        cancellingTaskIds.add(taskId);
+        shell.rerender();
+        requestAnimationFrame(() => {
+          if (selectedTaskId === taskId) document.getElementById("composer-stop")?.focus();
+        });
+        let failed = false;
         try {
           const snapshot = await invoke<AgentTaskSnapshot>("agent_task_cancel", { taskId });
+          cancellationErrors.delete(taskId);
           upsertTask(snapshot);
         } catch (err) {
-          submitError = `${err}`;
+          failed = true;
+          cancellationErrors.set(taskId, `${err}`);
         } finally {
+          cancellingTaskIds.delete(taskId);
           shell.rerender();
+          requestAnimationFrame(() => {
+            if (selectedTaskId !== taskId) return;
+            if (failed) document.getElementById("composer-stop")?.focus();
+            else document.getElementById("composer-input")?.focus();
+          });
         }
       });
     });
@@ -1596,6 +1615,10 @@ export namespace agentPanel {
       const wasActive = statusRank(existing.status) < 2;
       const merged = mergeSnapshot(existing, snapshot);
       Object.assign(existing, merged, { events: mergeEvents(existing.events, pending) });
+      if (statusRank(existing.status) >= 2) {
+        cancellingTaskIds.delete(snapshot.task_id);
+        cancellationErrors.delete(snapshot.task_id);
+      }
       // The answer landing auto-folds the activity: drop the task's explicit
       // fold choices so the default (closed once finished) takes over.
       if (wasActive && statusRank(existing.status) >= 2) {
@@ -1675,6 +1698,8 @@ export namespace agentPanel {
     const idx = sorted.findIndex((task) => task.task_id === taskId);
     tasks = tasks.filter((task) => task.task_id !== taskId);
     pendingEvents.delete(taskId);
+    cancellingTaskIds.delete(taskId);
+    cancellationErrors.delete(taskId);
     streamScroll.delete(taskId);
     artifactLoadGenerations.delete(taskId);
     if (artifactPreview?.taskId === taskId) clearArtifactPreview();
@@ -1723,6 +1748,8 @@ export namespace agentPanel {
         incoming.cache_creation_input_tokens ?? existing.cache_creation_input_tokens,
       estimated_cost: incoming.estimated_cost ?? existing.estimated_cost,
       cost_currency: incoming.cost_currency ?? existing.cost_currency,
+      partial: terminalIncoming ? incoming.partial : incoming.partial || existing.partial,
+      degraded_reason: incoming.degraded_reason ?? existing.degraded_reason,
       points_used: incoming.points_used ?? existing.points_used,
     };
   }

@@ -371,6 +371,7 @@ const messages = {
   "task.viewAria": { en: "task view", zh: "任务视图" },
   "task.noTasks": { en: "no tasks yet.", zh: "暂无任务。" },
   "task.cancel": { en: "cancel", zh: "取消" },
+  "task.stop": { en: "stop task", zh: "终止会话" },
   "task.resume": { en: "continue", zh: "继续" },
   "task.resumePrompt": {
     en: "Continue the interrupted task from its saved progress. Reuse the completed work and saved artifacts, avoid repeating finished work unless necessary, and finish the original request.",
@@ -387,6 +388,7 @@ const messages = {
   "task.you": { en: "you", zh: "你" },
   "task.working": { en: "working…", zh: "运行中…" },
   "task.activityLabel": { en: "activity", zh: "运行过程" },
+  "task.partialResult": { en: "partial result", zh: "部分结果" },
   "task.interruptedAppClosed": {
     en: "the app was closed before this task finished.",
     zh: "应用在任务完成前已关闭。",
