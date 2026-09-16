@@ -221,9 +221,28 @@ const SocaiXhsPageScripts = (() => {
     const bodyText = text(document.body);
     const loading = $$('.loading, .spinner, [class*="loading"]').some((el) => isVisible(el));
     const hasNoResults = /暂无|没有找到|无结果|换个词试试|no result/i.test(bodyText);
+    // Do not scan ordinary note/card text for blocker phrases: searches about
+    // captcha or rate-limit topics are legitimate. Prefer visible blocker UI;
+    // use the full page only when the normal search surface is absent.
+    const blockerUiText = $$([
+      '[class*="captcha" i]', '[class*="verify" i]', '[class*="verification" i]',
+      '[class*="security" i]', '[class*="risk" i]', '[class*="limit" i]',
+      '[class*="exception" i]', '[class*="error-page" i]',
+    ].join(', ')).filter(isVisible).map(text).join(' ');
+    const fallbackBlockerText = !input && cards.length === 0
+      ? `${document.title || ''} ${bodyText}`
+      : '';
+    const blockerText = `${location.href} ${blockerUiText} ${fallbackBlockerText}`;
+    const rateLimited = /300013|访问过于频繁|访问频繁|请求过于频繁|too many requests|rate[ -]?limit/i.test(blockerText);
+    const securityVerification = /安全验证|风险验证|异常访问|unusual traffic|security verification|captcha/i.test(blockerText);
+    // Exactly the classic results list. `includes('/search_result')` would
+    // also match `/search_result_ai` — the AI-search page some submits get
+    // hijacked onto (its ranking differs and the filter panel is missing) —
+    // and `/search_result/<id>` detail routes.
+    const isResultsList = url.pathname.replace(/\/+$/, '') === '/search_result';
     return {
       ok: true,
-      page_state: url.pathname.includes('/search_result') ? 'search_results' : 'unknown',
+      page_state: isResultsList ? 'search_results' : 'unknown',
       url: location.href,
       url_keyword: url.searchParams.get('keyword') || '',
       input_keyword: input ? String(input.value || input.textContent || '').trim() : '',
@@ -231,6 +250,8 @@ const SocaiXhsPageScripts = (() => {
       loading,
       has_no_results: hasNoResults,
       login_required: loginWallVisible(),
+      rate_limited: rateLimited,
+      security_verification: securityVerification,
     };
   }
 

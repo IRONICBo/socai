@@ -223,6 +223,31 @@ impl<'a> XhsPageRuntime<'a> {
             anyhow::bail!("query is required");
         }
 
+        // Never submit from a leftover SPA state — most commonly the previous
+        // search's results page (several searches in one step, or search
+        // after search across steps). From there the transition wait can
+        // validate against the stale page (the box already shows the new
+        // query while the old grid still has cards), and a search session
+        // that never leaves the SPA accumulates renderer state that field
+        // traces show degrading into multi-minute searches and dead tabs.
+        // One cheap navigation resets both; tabs that aren't on XHS at all
+        // are handled by login_gate's own navigation below.
+        let current = self.current_url().await?;
+        if current.contains("xiaohongshu.com") && !is_xhs_home_url(&current) {
+            let state = self.expect_object("searchState", None).await?;
+            if let Some(reason) = search_blocker_reason(&state) {
+                return Ok(json!({
+                    "ok": false,
+                    "query": keyword,
+                    "count": 0,
+                    "cards": [],
+                    "reason": reason,
+                    "state": state,
+                }));
+            }
+            self.page.navigate(XHS_HOME_URL).await?;
+        }
+
         // Pre-flight login gate: if logged out, bail immediately with
         // `login_required` instead of paying the full input→Enter→click→wait
         // retry cycle (which would grind for ~30s behind the wall). Same
@@ -270,7 +295,13 @@ impl<'a> XhsPageRuntime<'a> {
             "url": self.current_url().await?,
             "count": cards.len(),
             "cards": cards,
-            "reason": if ok { "" } else { submit.get("error").and_then(Value::as_str).unwrap_or("search_submit_failed") },
+            "reason": if ok { "" } else {
+                submit
+                    .get("reason")
+                    .or_else(|| submit.get("error"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("search_submit_failed")
+            },
         });
         if !ok {
             self.attach_page_failure_diagnostic(&mut result).await;
@@ -348,33 +379,45 @@ impl<'a> XhsPageRuntime<'a> {
             }));
         }
 
-        // Typing opens the homepage suggestion panel and can re-render (or
-        // only then mount) the submit affordance. Do not reuse `loc.submit`,
-        // which was measured while the input was still empty: the stale/null
-        // coordinate was the cause of intermittent searches that visibly had
-        // the requested keyword but stayed on /explore. Re-read the live DOM
-        // after Enter has failed, then click the current control.
-        let current_loc = self.expect_object("searchInput", None).await?;
-        if let Some(submit) = current_loc.get("submit") {
-            let x = number(submit, "x");
-            let y = number(submit, "y");
-            if x > 0.0 && y > 0.0 {
-                self.page.click(x, y).await?;
-                state = self
-                    .wait_for_search_transition(
-                        query,
-                        wait_seconds.max(SEARCH_TRANSITION_TIMEOUT_S),
-                    )
-                    .await?;
-                if search_transition_ok(&state, query) {
-                    return Ok(json!({
-                        "ok": true,
-                        "strategy": "click_refreshed_search_button",
-                        "state": state,
-                        "url": self.current_url().await?,
-                    }));
+        // Skip the button when the submit was hijacked onto the AI-search
+        // route — the button coordinates belong to the page we just left,
+        // so the click would land on arbitrary AI-page UI.
+        if !on_ai_search_route(&state) {
+            // Typing can re-render (or only then mount) the submit affordance,
+            // so re-read the live DOM rather than reusing the coordinates
+            // measured before the input contained the requested query.
+            let current_loc = self.expect_object("searchInput", None).await?;
+            if let Some(submit) = current_loc.get("submit") {
+                let x = number(submit, "x");
+                let y = number(submit, "y");
+                if x > 0.0 && y > 0.0 {
+                    self.page.click(x, y).await?;
+                    state = self
+                        .wait_for_search_transition(
+                            query,
+                            wait_seconds.max(SEARCH_TRANSITION_TIMEOUT_S),
+                        )
+                        .await?;
+                    if search_transition_ok(&state, query) {
+                        return Ok(json!({
+                            "ok": true,
+                            "strategy": "click_refreshed_search_button",
+                            "state": state,
+                            "url": self.current_url().await?,
+                        }));
+                    }
                 }
             }
+        }
+
+        if let Some(reason) = search_blocker_reason(&state) {
+            return Ok(json!({
+                "ok": false,
+                "strategy": "search_blocked",
+                "reason": reason,
+                "state": state,
+                "url": self.current_url().await?,
+            }));
         }
 
         // The current homepage composer can accept the requested keyword but
@@ -400,6 +443,16 @@ impl<'a> XhsPageRuntime<'a> {
                             wait_seconds.max(SEARCH_TRANSITION_TIMEOUT_S),
                         )
                         .await?;
+                    if let Some(reason) = search_blocker_reason(&state) {
+                        return Ok(json!({
+                            "ok": false,
+                            "strategy": "search_blocked",
+                            "reason": reason,
+                            "manual_state": manual_state,
+                            "state": state,
+                            "url": self.current_url().await?,
+                        }));
+                    }
                     if search_transition_ok(&state, query) {
                         return Ok(json!({
                             "ok": true,
@@ -445,7 +498,16 @@ impl<'a> XhsPageRuntime<'a> {
         let mut latest = Value::Object(Map::new());
         while Instant::now() < deadline {
             latest = self.expect_object("searchState", None).await?;
+            if search_blocker_reason(&latest).is_some() {
+                return Ok(latest);
+            }
             if search_transition_ok(&latest, query) {
+                return Ok(latest);
+            }
+            // `/search_result_ai` is terminal for this attempt: the hijacked
+            // route never becomes the classic list, so don't burn the rest
+            // of the window polling it.
+            if on_ai_search_route(&latest) {
                 return Ok(latest);
             }
             sleep_ms(150).await;
@@ -2061,6 +2123,9 @@ fn apply_video_poster_fallback(video: &mut Value, fallback_url: &str) {
 }
 
 fn search_transition_ok(state: &Value, query: &str) -> bool {
+    if search_blocker_reason(state).is_some() {
+        return false;
+    }
     if state
         .get("page_state")
         .and_then(Value::as_str)
@@ -2085,11 +2150,12 @@ fn search_transition_ok(state: &Value, query: &str) -> bool {
     if !keyword.is_empty() && !visible_keyword.is_empty() && visible_keyword != keyword {
         return false;
     }
-    if !keyword.is_empty()
-        && visible_keyword.is_empty()
-        && !url_keyword.is_empty()
-        && url_keyword != keyword
-    {
+    // The URL keyword says which query the mounted results actually belong
+    // to, so a mismatch fails the transition even when the input already
+    // shows the new query: right after Enter on a previous search's results
+    // page the box holds the new text while the route still carries the old
+    // keyword — accepting that state returns the previous query's cards.
+    if !keyword.is_empty() && !url_keyword.is_empty() && url_keyword != keyword {
         return false;
     }
     if state.get("card_count").and_then(Value::as_i64).unwrap_or(0) > 0 {
@@ -2138,6 +2204,40 @@ fn normalize_image_url(value: &str) -> String {
         return String::new();
     }
     trimmed.replacen("http://", "https://", 1)
+}
+
+/// True when a `searchState` readback shows the tab on the AI-search route
+/// (`/search_result_ai`) rather than the classic results list.
+fn on_ai_search_route(state: &Value) -> bool {
+    state
+        .get("url")
+        .and_then(Value::as_str)
+        .is_some_and(|url| url.contains("/search_result_ai"))
+}
+
+fn search_blocker_reason(state: &Value) -> Option<&'static str> {
+    if state.get("security_verification").and_then(Value::as_bool) == Some(true) {
+        return Some("security_verification");
+    }
+    if state.get("rate_limited").and_then(Value::as_bool) == Some(true) {
+        return Some("rate_limited");
+    }
+    None
+}
+
+/// True when `url` is the XHS home feed itself — `/explore`, or the bare
+/// origin that redirects there. A note detail route (`/explore/<id>`) is not
+/// home.
+fn is_xhs_home_url(url: &str) -> bool {
+    let Some((_, rest)) = url.split_once("xiaohongshu.com") else {
+        return false;
+    };
+    let path = rest
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/');
+    path.is_empty() || path == "/explore"
 }
 
 /// Note id from an opened XHS detail URL (`/explore/<id>`, `/discovery/<id>`,
