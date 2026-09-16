@@ -30,6 +30,7 @@ import {
   taskStatusLabel,
 } from "../lib/i18n";
 import { sendShortcutLabel } from "../lib/shortcuts";
+import type { ComposerVoiceState } from "../lib/voice-input";
 import feishuLogo from "../assets/connectors/feishu.png";
 import chromeRemoteDebuggingImage from "../assets/chrome-remote-debugging.png";
 import chromeAllowDialogImage from "../assets/chrome-allow-dialog.png";
@@ -59,6 +60,8 @@ export interface ComposerProps {
   remoteProfile: boolean;
   /** Existing Chrome has exposed its CDP endpoint after the user opted in. */
   remoteDebuggingReady: boolean;
+  /** Cloud microphone availability and the current recording phase. */
+  voice: ComposerVoiceState;
 }
 
 export interface ConversationProps {
@@ -711,7 +714,20 @@ function renderComposer(c: ComposerProps): string {
   // A remote profile submits while disconnected: the run reconnects (minting
   // a fresh hosted session) on demand.
   const needsConnection = !connected && !c.remoteProfile;
-  const sendDisabled = disabled || !c.value.trim() || needsConnection || !c.modelReady;
+  const sendDisabled = disabled
+    || !c.value.trim()
+    || needsConnection
+    || !c.modelReady
+    || c.voice.phase !== "idle";
+  const voiceDisabled = c.voice.phase === "recording"
+    ? false
+    : disabled
+      || c.voice.phase === "requesting"
+      || c.voice.phase === "transcribing"
+      || !c.voice.available;
+  const voiceTitle = disabled && c.voice.phase === "idle"
+    ? t("voice.unavailable.taskBusy")
+    : c.voice.title;
   const placeholder = c.running
     ? t("task.working")
     : c.mode === "new"
@@ -742,6 +758,11 @@ function renderComposer(c: ComposerProps): string {
         aria-label="${esc(t(c.mode === "new" ? "task.new" : "task.replySend"))}"
         ${sendDisabled ? "disabled" : ""}
       >${glyph}</button>`;
+  const voiceGlyph = c.voice.phase === "recording"
+    ? `<span class="composer__voice-stop" aria-hidden="true"></span>`
+    : c.voice.phase === "requesting" || c.voice.phase === "transcribing"
+      ? `<span class="composer__send-dot" aria-hidden="true"></span>`
+      : `<svg class="composer__voice-glyph" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5.5 10.5a6.5 6.5 0 0 0 13 0"></path><path d="M12 17v4"></path><path d="M9 21h6"></path></svg>`;
   const connectHint = connected
     ? ""
     : c.remoteProfile
@@ -766,11 +787,22 @@ function renderComposer(c: ComposerProps): string {
             placeholder="${esc(placeholder)}"
             ${disabled ? "disabled" : ""}
           >${esc(c.value)}</textarea>
+          <span class="composer__voice-wrap" title="${esc(voiceTitle)}">
+            <button
+              id="composer-voice"
+              type="button"
+              class="composer__voice ${c.voice.phase === "recording" ? "is-recording" : ""}"
+              aria-label="${esc(voiceTitle)}"
+              aria-pressed="${c.voice.phase === "recording" ? "true" : "false"}"
+              ${voiceDisabled ? "disabled" : ""}
+            >${voiceGlyph}</button>
+          </span>
           ${action}
         </div>
       </form>
       ${connectHint}
       ${keyHint}
+      ${c.voice.error ? `<pre class="composer__error" role="alert" aria-live="assertive" aria-atomic="true">${esc(c.voice.error)}</pre>` : ""}
       ${c.error ? `<pre class="composer__error" role="alert" aria-live="assertive" aria-atomic="true">${esc(c.error)}</pre>` : ""}
     </div>
   `;
