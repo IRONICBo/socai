@@ -37,6 +37,9 @@ use crate::agent::memory::{
     compact_messages_for_context, DEFAULT_COMPACT_AFTER_MESSAGES, DEFAULT_KEEP_RECENT_MESSAGES,
 };
 use crate::agent::report::report_with_artifacts;
+use crate::agent::research_workflow::{
+    ResearchPrepareContext, ResearchWorkflow, ResponseDirective, WorkflowIo,
+};
 use crate::agent::run_logging::{make_run_dir, AgentRunRecorder};
 use crate::agent::run_state::RunState;
 use crate::agent::signature::tool_call_signature;
@@ -245,25 +248,64 @@ pub async fn run_agent_with_events(
         },
     );
 
-    let mut step = 0u32;
-    let mut final_text = String::new();
-    let mut usage = TokenUsage::default();
+    let prepared = ResearchWorkflow::prepare(ResearchPrepareContext {
+        task,
+        backend: &backend,
+        seed_messages: &options.seed_messages,
+        enabled_sites: &options.enabled_sites,
+        max_tokens: options.max_tokens,
+        compact_after_messages: options.compact_after_messages,
+        keep_recent_messages: options.keep_recent_messages,
+        run_dir: &run_dir,
+        extra_instructions: &options.extra_instructions,
+        recorder: &run_recorder,
+        trace: &mut run_trace,
+    })
+    .await?;
+    let mut workflow = prepared.workflow;
+    let mut step = prepared.planning_steps;
+    let mut completed = prepared.immediate_text.is_some();
+    let mut final_text = prepared.immediate_text.unwrap_or_default();
+    let mut usage = prepared.usage;
     let mut tool_call_history: BTreeMap<String, Vec<u32>> = BTreeMap::new();
-    let mut completed = false;
     let mut terminal_error: Option<String> = None;
     let mut degraded_reason: Option<String> = None;
+    let mut terminal_finalize_reason: Option<String> = None;
     let mut truncation_retries = 0u32;
-    let mut last_system: String = build_system_prompt(&[], &options.extra_instructions);
+    let mut last_system: String = build_system_prompt(&[], &workflow.system_instructions());
 
-    while step < options.max_steps {
+    macro_rules! workflow_io {
+        () => {
+            WorkflowIo {
+                backend: &backend,
+                messages: &mut messages,
+                run_dir: &run_dir,
+                run_state: &run_state,
+                recorder: &run_recorder,
+                trace: &mut run_trace,
+                usage: &mut usage,
+                events: &events,
+                max_tokens: options.max_tokens,
+                max_steps: options.max_steps,
+                compact_after_messages: options.compact_after_messages,
+                keep_recent_messages: options.keep_recent_messages,
+                anchor_user_index: &mut anchor_user_index,
+                is_follow_up,
+                traced_len: &mut traced_len,
+            }
+        };
+    }
+
+    while !completed && step < options.max_steps {
         step += 1;
         ctx.step = step;
         emit(&events, AgentEvent::Step { step });
         debug!(step, "agent step start");
 
-        let schemas = tool_schemas(&tools, &ctx);
+        let mut schemas = tool_schemas(&tools, &ctx);
+        workflow.before_step(&mut schemas);
         let tool_names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
-        let system = build_system_prompt(&tool_names, &options.extra_instructions);
+        let system = build_system_prompt(&tool_names, &workflow.system_instructions());
         last_system = system.clone();
         if compact_messages_for_context(
             &mut messages,
@@ -322,15 +364,19 @@ pub async fn run_agent_with_events(
                     &msg,
                 );
                 warn!(step, error = %msg, "backend error");
-                emit(
-                    &events,
-                    AgentEvent::ApiError {
-                        step,
-                        message: msg.clone(),
-                    },
-                );
-                final_text = format!("API error: {msg}");
-                terminal_error = Some(msg);
+                if workflow.is_active() {
+                    terminal_finalize_reason = Some(msg);
+                } else {
+                    emit(
+                        &events,
+                        AgentEvent::ApiError {
+                            step,
+                            message: msg.clone(),
+                        },
+                    );
+                    final_text = format!("API error: {msg}");
+                    terminal_error = Some(msg);
+                }
                 break;
             }
         };
@@ -383,15 +429,19 @@ pub async fn run_agent_with_events(
                     "model output was truncated by the max_tokens limit ({}) {} times in a row",
                     options.max_tokens, truncation_retries
                 );
-                emit(
-                    &events,
-                    AgentEvent::ApiError {
-                        step,
-                        message: msg.clone(),
-                    },
-                );
-                final_text = format!("Error: {msg}");
-                terminal_error = Some(msg);
+                if workflow.is_active() {
+                    terminal_finalize_reason = Some(msg);
+                } else {
+                    emit(
+                        &events,
+                        AgentEvent::ApiError {
+                            step,
+                            message: msg.clone(),
+                        },
+                    );
+                    final_text = format!("Error: {msg}");
+                    terminal_error = Some(msg);
+                }
                 break;
             }
             messages.push(Message::user(
@@ -404,6 +454,36 @@ pub async fn run_agent_with_events(
             continue;
         }
         truncation_retries = 0;
+
+        let tool_call_summary: Vec<Value> = response
+            .tool_calls
+            .iter()
+            .map(|tc| json!({"name": tc.name, "input": tc.input}))
+            .collect();
+        run_state.note_assistant_step(step, &visible_texts.join("\n"), &tool_call_summary);
+        let directive = {
+            let mut io = workflow_io!();
+            workflow
+                .inspect_response(&response, &visible_texts, step, &mut io)
+                .await?
+        };
+        match directive {
+            ResponseDirective::UseDefaultLoop => {}
+            ResponseDirective::Continue => continue,
+            ResponseDirective::Complete(text) => {
+                final_text = text;
+                completed = true;
+                break;
+            }
+            ResponseDirective::Fail {
+                final_text: text,
+                error,
+            } => {
+                final_text = text;
+                terminal_error = Some(error);
+                break;
+            }
+        }
 
         // Build the assistant block list manually instead of using
         // LLMResponse::to_assistant_blocks() so we can:
@@ -427,12 +507,6 @@ pub async fn run_agent_with_events(
             final_text = text.clone();
         }
 
-        let tool_call_summary: Vec<Value> = response
-            .tool_calls
-            .iter()
-            .map(|tc| json!({"name": tc.name, "input": tc.input}))
-            .collect();
-        run_state.note_assistant_step(step, &visible_texts.join("\n"), &tool_call_summary);
         if response.tool_calls.is_empty() {
             completed = true;
             break;
@@ -588,6 +662,13 @@ pub async fn run_agent_with_events(
             );
             run_state.note_tool_result(step, name, &effective_input, &summary, duration_s);
             let mut history_content = bound_content_for_history(&result_content);
+            workflow.decorate_tool_result(
+                step,
+                sequence,
+                name,
+                error.as_deref(),
+                &mut history_content,
+            );
             // Break tight loops: when the model fires the *same* call with the
             // same args repeatedly, the bare result won't change its mind. Tell
             // it explicitly to stop and work with what it already has.
@@ -613,8 +694,45 @@ pub async fn run_agent_with_events(
             ctx.active_tool_name.clear();
         }
         messages.push(Message::user_blocks(tool_result_blocks));
+        workflow.finish_tool_step();
         if degraded_reason.is_some() {
             break;
+        }
+    }
+
+    if !completed {
+        if let Some(reason) = terminal_finalize_reason.take() {
+            let outcome = {
+                let mut io = workflow_io!();
+                workflow
+                    .on_terminal_error(&reason, &final_text, step, &mut io)
+                    .await?
+            };
+            if let Some(outcome) = outcome {
+                outcome.apply(&mut final_text, &mut completed, &mut terminal_error);
+            } else {
+                if final_text.trim().is_empty() {
+                    final_text = format!("Error: {reason}");
+                }
+                terminal_error = Some(reason.clone());
+                emit(
+                    &events,
+                    AgentEvent::ApiError {
+                        step,
+                        message: reason,
+                    },
+                );
+            }
+        }
+    }
+
+    if !completed && terminal_error.is_none() && step >= options.max_steps {
+        let outcome = {
+            let mut io = workflow_io!();
+            workflow.on_max_steps(step, &final_text, &mut io).await?
+        };
+        if let Some(outcome) = outcome {
+            outcome.apply(&mut final_text, &mut completed, &mut terminal_error);
         }
     }
 
@@ -861,7 +979,7 @@ const CHAT_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(2), Duration::from
 /// errors, 408/429/5xx) — a multi-minute run should not die on one dropped
 /// packet. Permanent errors (auth, billing, bad request) surface on the
 /// first attempt.
-async fn send_with_retry(
+pub(crate) async fn send_with_retry(
     backend: &Arc<dyn Backend>,
     system: &str,
     messages: &[Message],
@@ -925,7 +1043,7 @@ fn find_tool<'a>(tools: &'a [SharedTool], name: &str) -> Option<&'a SharedTool> 
     tools.iter().find(|t| t.name() == name)
 }
 
-fn emit(events: &broadcast::Sender<AgentEvent>, event: AgentEvent) {
+pub(crate) fn emit(events: &broadcast::Sender<AgentEvent>, event: AgentEvent) {
     let _ = events.send(event);
 }
 
@@ -1074,7 +1192,7 @@ pub(crate) const THINKING_TEXT_PREFIX: &str = "[Thinking] ";
 
 /// Split assistant text blocks into (visible, thinking) by the `[Thinking] `
 /// prefix. Whitespace-only blocks are dropped from both buckets.
-fn split_thinking(text_blocks: &[String]) -> (Vec<String>, Vec<String>) {
+pub(crate) fn split_thinking(text_blocks: &[String]) -> (Vec<String>, Vec<String>) {
     let mut visible: Vec<String> = Vec::new();
     let mut thinking: Vec<String> = Vec::new();
     for block in text_blocks {
@@ -1427,7 +1545,10 @@ fn artifact_matches_kind(path: &str, kind: &str) -> bool {
 /// `ASSISTANT_TEXT_MAX_CHARS` to keep history bounded over many steps. Drops
 /// `[Thinking]`-prefixed text since that's already surfaced as a Reasoning
 /// event.
-fn build_assistant_blocks(response: &LLMResponse, visible_texts: &[String]) -> Vec<Block> {
+pub(crate) fn build_assistant_blocks(
+    response: &LLMResponse,
+    visible_texts: &[String],
+) -> Vec<Block> {
     use crate::agent::compaction::{truncate, ASSISTANT_TEXT_MAX_CHARS};
     let mut blocks: Vec<Block> = Vec::new();
     // Provider-native reasoning goes first, verbatim (never truncated):
