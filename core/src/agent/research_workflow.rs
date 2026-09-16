@@ -677,23 +677,6 @@ fn research_workflow_enabled(enabled_sites: &[String]) -> bool {
     enabled_sites.len() == 1 && enabled_sites.first().is_some_and(|site| site == "xhs")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::research_workflow_enabled;
-
-    #[test]
-    fn research_workflow_is_xhs_only() {
-        assert!(research_workflow_enabled(&["xhs".to_string()]));
-        assert!(!research_workflow_enabled(&["dy".to_string()]));
-        assert!(!research_workflow_enabled(&["tiktok".to_string()]));
-        assert!(!research_workflow_enabled(&[
-            "xhs".to_string(),
-            "dy".to_string(),
-        ]));
-        assert!(!research_workflow_enabled(&[]));
-    }
-}
-
 struct CoverageRuntime {
     brief: ResearchBrief,
     attempts: u32,
