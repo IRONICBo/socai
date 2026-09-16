@@ -1,3 +1,4 @@
+pub mod browser_script;
 pub mod dy;
 pub mod learning;
 pub mod registry;
@@ -5,6 +6,7 @@ pub mod runner;
 pub mod tiktok;
 pub mod xhs;
 
+pub use browser_script::{with_browser_script, BROWSER_SCRIPT_TOOL_NAME};
 pub use learning::{
     available_site_skills, load_site_skill_context, run_site_browser_tool, site_learning_tools,
     site_skills_for_url, site_skills_root, BrowserToolDefinition, SiteKnowledgeNote,

@@ -29,12 +29,105 @@ pub struct PageSession {
     /// shared `Cdp` later could report a different browser during a swap.
     remote_browser: AtomicBool,
     recorder: StdMutex<Option<Arc<SnapshotRecorder>>>,
+    /// Background control tabs are owned by this handle and must be closed if
+    /// a cancelled browser script drops the handle before explicit cleanup.
+    close_on_drop: AtomicBool,
 }
 
 struct PageConnection {
     target_id: String,
     client: RawCdpClient,
     session_id: Option<String>,
+}
+
+/// One immutable page-session generation used by a browser-script evaluation.
+/// Keeping the client/session pair together prevents cancellation cleanup from
+/// targeting a replacement page after CDP recovery rebinds `PageSession`.
+#[derive(Clone)]
+pub(crate) struct PageJavascriptSession {
+    client: RawCdpClient,
+    session_id: Option<String>,
+}
+
+impl PageJavascriptSession {
+    async fn execute(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        self.client
+            .execute_for_session(self.session_id.as_deref(), method, params)
+            .await
+    }
+
+    pub(crate) async fn evaluate_json_in_isolated_world_with_timeout(
+        &self,
+        expression: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<Value> {
+        let frame_tree = self.execute("Page.getFrameTree", json!({})).await?;
+        let frame_id = frame_tree
+            .pointer("/frameTree/frame/id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("Page.getFrameTree missing main frame id"))?;
+        let world = self
+            .execute(
+                "Page.createIsolatedWorld",
+                json!({
+                    "frameId": frame_id,
+                    "worldName": "socai-browser-script",
+                    "grantUniveralAccess": false,
+                }),
+            )
+            .await?;
+        let context_id = world
+            .get("executionContextId")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow!("Page.createIsolatedWorld missing executionContextId"))?;
+        evaluate_json_on_session(
+            &self.client,
+            self.session_id.as_deref(),
+            expression,
+            timeout,
+            Some(context_id),
+        )
+        .await
+    }
+
+    pub(crate) async fn terminate_javascript(&self) -> anyhow::Result<()> {
+        self.execute("Runtime.terminateExecution", json!({}))
+            .await?;
+        Ok(())
+    }
+
+    /// Read the committed top-frame URL without depending on a JavaScript
+    /// execution context. This remains usable while navigation is replacing
+    /// the document and is therefore suitable for browser-script authority
+    /// enforcement.
+    pub(crate) async fn top_frame_url(&self) -> anyhow::Result<String> {
+        let history = self.execute("Page.getNavigationHistory", json!({})).await?;
+        let index = history
+            .get("currentIndex")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("Page.getNavigationHistory missing currentIndex"))?;
+        history
+            .get("entries")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.get(index as usize))
+            .and_then(|entry| entry.get("url"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| anyhow!("Page.getNavigationHistory missing current entry URL"))
+    }
+
+    pub(crate) async fn stop_loading(&self) -> anyhow::Result<()> {
+        self.execute("Page.stopLoading", json!({})).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn navigate(&self, url: &str) -> anyhow::Result<()> {
+        let response = self.execute("Page.navigate", json!({ "url": url })).await?;
+        if let Some(error) = response.get("errorText").and_then(Value::as_str) {
+            anyhow::bail!("navigation to {url} failed: {error}");
+        }
+        Ok(())
+    }
 }
 
 const PAGE_INFO_JS: &str = r#"
@@ -58,6 +151,7 @@ impl PageSession {
         session_id: String,
         owner: Cdp,
         remote_browser: bool,
+        close_on_drop: bool,
     ) -> Self {
         Self {
             owner,
@@ -68,6 +162,7 @@ impl PageSession {
             }),
             remote_browser: AtomicBool::new(remote_browser),
             recorder: StdMutex::new(None),
+            close_on_drop: AtomicBool::new(close_on_drop),
         }
     }
 
@@ -94,7 +189,15 @@ impl PageSession {
     /// without rebuilding the tool registry or losing the agent transcript.
     pub(crate) async fn replace_connection(&self, replacement: PageSession) {
         let replacement_remote = replacement.remote_browser.load(Ordering::Acquire);
-        let replacement_connection = replacement.connection.into_inner();
+        let replacement_connection = {
+            let connection = replacement.connection.read().await;
+            PageConnection {
+                target_id: connection.target_id.clone(),
+                client: connection.client.clone(),
+                session_id: connection.session_id.clone(),
+            }
+        };
+        replacement.close_on_drop.store(false, Ordering::Release);
         let old_target_id = {
             let mut connection = self.connection.write().await;
             let old_target_id = connection.target_id.clone();
@@ -206,6 +309,68 @@ impl PageSession {
         self.evaluate_json_raw(expression).await
     }
 
+    /// Evaluate JavaScript with a caller-selected CDP response timeout. The
+    /// default CDP command timeout remains appropriate for page probes; a
+    /// browser-script control program can legitimately span several awaited
+    /// navigation and extraction operations.
+    pub async fn evaluate_json_with_timeout(
+        &self,
+        expression: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<Value> {
+        self.snapshot_before().await;
+        self.evaluate_json_raw_with_timeout(expression, timeout)
+            .await
+    }
+
+    /// Evaluate in a fresh isolated world for the main frame. DOM nodes remain
+    /// visible, but page scripts cannot replace the JavaScript intrinsics used
+    /// by the browser-script result envelope and size checks.
+    pub async fn evaluate_json_in_isolated_world_with_timeout(
+        &self,
+        expression: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<Value> {
+        self.javascript_session()
+            .await
+            .evaluate_json_in_isolated_world_with_timeout(expression, timeout)
+            .await
+    }
+
+    pub(crate) async fn javascript_session(&self) -> PageJavascriptSession {
+        self.snapshot_before().await;
+        let connection = self.connection.read().await;
+        PageJavascriptSession {
+            client: connection.client.clone(),
+            session_id: connection.session_id.clone(),
+        }
+    }
+
+    /// Stop JavaScript currently running in this target. Used by the local
+    /// browser-script escape hatch when its own shorter timeout expires, so a
+    /// runaway loop cannot leave the controlled tab permanently frozen.
+    pub async fn terminate_javascript(&self) -> anyhow::Result<()> {
+        self.execute("Runtime.terminateExecution", json!({}))
+            .await?;
+        Ok(())
+    }
+
+    /// Create a sibling tab on the same browser connection. Browser-script
+    /// programs use a short-lived blank sibling as their stable JavaScript
+    /// control context, so the program survives navigation in the site tab.
+    pub async fn create_sibling(&self, start_url: &str) -> anyhow::Result<PageSession> {
+        super::pages::PageSessionManager::new(self.owner.clone())
+            .create_page(start_url)
+            .await
+    }
+
+    /// Create a sibling target without focusing it.
+    pub async fn create_background_sibling(&self, start_url: &str) -> anyhow::Result<PageSession> {
+        super::pages::PageSessionManager::new(self.owner.clone())
+            .create_background_page(start_url)
+            .await
+    }
+
     /// Uninstrumented `evaluate_json`. Used internally by the snapshot recorder
     /// so its own DOM reads don't recurse back into capture.
     pub(crate) async fn evaluate_json_raw(&self, expression: &str) -> anyhow::Result<Value> {
@@ -218,30 +383,28 @@ impl PageSession {
         expression: &str,
         timeout: Duration,
     ) -> anyhow::Result<Value> {
-        let wrapped = wrap_expression(expression);
+        self.evaluate_json_raw_with_timeout_in_context(expression, timeout, None)
+            .await
+    }
+
+    async fn evaluate_json_raw_with_timeout_in_context(
+        &self,
+        expression: &str,
+        timeout: Duration,
+        context_id: Option<i64>,
+    ) -> anyhow::Result<Value> {
         let (client, session_id) = {
             let connection = self.connection.read().await;
             (connection.client.clone(), connection.session_id.clone())
         };
-        let resp = client
-            .execute_for_session_with_timeout(
-                session_id.as_deref(),
-                "Runtime.evaluate",
-                json!({
-                    "expression": wrapped,
-                    "awaitPromise": true,
-                    "returnByValue": true,
-                }),
-                timeout,
-            )
-            .await?;
-        if let Some(exception) = resp.get("exceptionDetails") {
-            anyhow::bail!("javascript exception: {}", summarize_exception(exception));
-        }
-        let result = resp
-            .get("result")
-            .ok_or_else(|| anyhow!("Runtime.evaluate missing result"))?;
-        remote_object_value(result)
+        evaluate_json_on_session(
+            &client,
+            session_id.as_deref(),
+            expression,
+            timeout,
+            context_id,
+        )
+        .await
     }
 
     /// Turn on the CDP Accessibility domain. The recorder calls it once when
@@ -639,20 +802,90 @@ return (async () => {{
 
     /// Close the underlying tab. Consumes the session.
     pub async fn close(self) -> anyhow::Result<()> {
-        let connection = self.connection.into_inner();
-        let target_id = connection.target_id;
+        let (target_id, client) = {
+            let connection = self.connection.read().await;
+            (connection.target_id.clone(), connection.client.clone())
+        };
         // Use the browser websocket that created/attached this PageSession, not
         // whatever browser client the runtime currently holds. The runtime may
         // have disconnected/reconnected or switched profile by the time a
         // session is dropped/cancelled; cleanup should still target the browser
         // that owns this target id.
-        let result = connection
-            .client
+        let result = client
             .execute("Target.closeTarget", json!({ "targetId": target_id }))
             .await;
+        result?;
         self.owner.unregister_owned_target(&target_id).await;
-        result.map(|_| ())
+        self.close_on_drop.store(false, Ordering::Release);
+        Ok(())
     }
+}
+
+impl Drop for PageSession {
+    fn drop(&mut self) {
+        if !self.close_on_drop.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok(connection) = self.connection.try_read() else {
+            // The owner still tracks this target; an explicit disconnect can
+            // sweep it if cancellation races a connection replacement.
+            return;
+        };
+        let target_id = connection.target_id.clone();
+        if target_id.is_empty() {
+            return;
+        }
+        let client = connection.client.clone();
+        let owner = self.owner.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            // The owner still tracks this target; an explicit disconnect can
+            // sweep it even when no async runtime is available during drop.
+            return;
+        };
+        handle.spawn(async move {
+            match client
+                .execute("Target.closeTarget", json!({ "targetId": &target_id }))
+                .await
+            {
+                Ok(_) => owner.unregister_owned_target(&target_id).await,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        target_id,
+                        "failed to close dropped page session"
+                    );
+                }
+            }
+        });
+    }
+}
+
+async fn evaluate_json_on_session(
+    client: &RawCdpClient,
+    session_id: Option<&str>,
+    expression: &str,
+    timeout: Duration,
+    context_id: Option<i64>,
+) -> anyhow::Result<Value> {
+    let wrapped = wrap_expression(expression);
+    let mut params = json!({
+        "expression": wrapped,
+        "awaitPromise": true,
+        "returnByValue": true,
+    });
+    if let Some(context_id) = context_id {
+        params["contextId"] = json!(context_id);
+    }
+    let resp = client
+        .execute_for_session_with_timeout(session_id, "Runtime.evaluate", params, timeout)
+        .await?;
+    if let Some(exception) = resp.get("exceptionDetails") {
+        anyhow::bail!("javascript exception: {}", summarize_exception(exception));
+    }
+    let result = resp
+        .get("result")
+        .ok_or_else(|| anyhow!("Runtime.evaluate missing result"))?;
+    remote_object_value(result)
 }
 
 fn url_matches_https_host_suffixes(value: &str, suffixes: &[&str]) -> bool {

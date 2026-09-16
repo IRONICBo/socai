@@ -16,5 +16,6 @@ pub use self::endpoint::{
     resolve_explicit_endpoint, wait_for_existing_chrome_endpoint, Endpoint,
 };
 pub use self::pages::PageSessionManager;
+pub(crate) use self::session::PageJavascriptSession;
 pub use self::session::PageSession;
 pub use self::snapshot::{with_snapshot_recording, SnapshotRecorder};

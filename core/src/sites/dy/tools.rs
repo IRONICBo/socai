@@ -14,6 +14,7 @@ use crate::sites::registry::{
     required_string, ArgKind, BoxFuture, CommandArg, NativeSiteAdapter, SiteCommand, SlowWhen,
 };
 use crate::sites::runner::{get_f64, get_i64, json_result, run_tool_command, ToolCommand};
+use crate::sites::with_browser_script;
 
 /// Bundled default note retained for API compatibility. Runtime site-skill
 /// overrides are loaded from `$SOCAI_HOME/site-skills/dy`.
@@ -46,7 +47,8 @@ pub async fn dy_agent_tools(
     page: Arc<PageSession>,
     llm_provider: Arc<dyn LlmProvider>,
 ) -> anyhow::Result<Vec<Arc<dyn Tool>>> {
-    Ok(dy_tools_with_llm_provider(page, Some(llm_provider)))
+    let tools = dy_tools_with_llm_provider(page.clone(), Some(llm_provider));
+    with_browser_script("dy", page, tools)
 }
 
 pub fn dy_agent_instructions(extra: &str) -> String {
