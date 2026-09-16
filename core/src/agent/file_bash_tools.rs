@@ -546,7 +546,8 @@ impl Tool for ShellTool {
         if !stderr.trim().is_empty() {
             parts.push(format!("[stderr]\n{stderr}"));
         }
-        if !output.status.success() {
+        let succeeded = output.status.success();
+        if !succeeded {
             parts.push(format!("[exit {}]", output.status.code().unwrap_or(-1)));
         }
         let body = if parts.is_empty() {
@@ -554,7 +555,12 @@ impl Tool for ShellTool {
         } else {
             parts.join("\n")
         };
-        Ok(ToolResult::text(truncate_output(&body, SHELL_OUTPUT_LIMIT)))
+        let body = truncate_output(&body, SHELL_OUTPUT_LIMIT);
+        if succeeded {
+            Ok(ToolResult::text(body))
+        } else {
+            Ok(ToolResult::failure(body))
+        }
     }
 }
 
@@ -667,10 +673,12 @@ pub type BashTool = ShellTool;
 /// unrestricted (the user already carries the same privileges in their own
 /// terminal). Append to a site tool set.
 pub fn local_agent_tools() -> Vec<SharedTool> {
-    vec![
+    let mut tools: Vec<SharedTool> = vec![
         std::sync::Arc::new(ReadFileTool::unrestricted()),
         std::sync::Arc::new(ShellTool::unrestricted()),
-    ]
+    ];
+    tools.extend(crate::agent::skills::skill_tools());
+    tools
 }
 
 /// Local tools for the desktop app. Directory access is intentionally
@@ -713,11 +721,13 @@ mod tests {
             .await
             .unwrap();
         assert!(ok.flat_text().contains("hi"));
+        assert!(!ok.failed());
 
         let fail = ShellTool::unrestricted()
             .call(json!({"command": "exit 3"}), &ctx())
             .await
             .unwrap();
         assert!(fail.flat_text().contains("[exit 3]"));
+        assert!(fail.failed());
     }
 }

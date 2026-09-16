@@ -17,6 +17,7 @@ pub mod report;
 pub mod run_logging;
 pub mod run_state;
 pub mod signature;
+pub mod skills;
 pub mod system_prompt;
 pub mod tool;
 
@@ -41,6 +42,7 @@ pub use self::run_logging::{
     default_runs_root, make_run_dir, mark_agent_run_status, AgentRunRecorder, ToolCallRecorder,
 };
 pub use self::run_state::{ArtifactRecord, RunState};
+pub use self::skills::{default_skills_root, skill_tools, ReadSkillTool, RecordSkillLearningTool};
 pub use self::tool::{
     EchoTool, ProcessedNote, SharedTool, SharedToolFailureRecovery, Tool, ToolContext,
     ToolFailureRecovery, ToolProgressEvent, ToolProgressPhase, ToolProgressStatus,
