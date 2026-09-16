@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 
 use crate::sites::registry::{
-    required_string, ArgKind, BoxFuture, CommandArg, SiteCommand, SiteSpec, SlowWhen,
+    required_string, ArgKind, BoxFuture, CommandArg, NativeSiteAdapter, SiteCommand, SlowWhen,
 };
 use crate::sites::runner::{
     get_bool, get_f64, get_i64, get_str, json_result, run_tool_command, trimmed_required, PageHook,
@@ -192,18 +192,12 @@ pub async fn xhs_default_agent_tools(
 }
 
 pub fn xhs_agent_instructions(extra: &str) -> String {
-    let base = XHS_KNOWLEDGE.trim().to_string();
-    let extra = extra.trim();
-    if extra.is_empty() {
-        base
-    } else {
-        format!("{extra}\n\n{base}")
-    }
+    crate::sites::learning::site_agent_instructions("xhs", extra)
 }
 
 /// Registry entry for Xiaohongshu — the only wiring a site needs beyond its
 /// module declaration in `sites/mod.rs`.
-pub static XHS_SITE: SiteSpec = SiteSpec {
+pub static XHS_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
     id: "xhs",
     about: "Xiaohongshu (xiaohongshu.com)",
     home_url: XHS_HOME_URL,

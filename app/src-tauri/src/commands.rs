@@ -21,7 +21,7 @@ use socai_core::runtime::{
     SocaiRuntime,
 };
 use socai_core::sites::xhs::{XhsHistoryStore, XhsPageRuntime};
-use socai_core::sites::{find_site, SiteSpec};
+use socai_core::sites::{find_native_site_adapter, NativeSiteAdapter};
 use socai_core::telemetry::tool_call::{
     is_site_tool_result, summarize_site_tool_result, summarize_tool_args,
 };
@@ -68,8 +68,8 @@ const TAURI_ARTIFACT_RULES: &str = "\n\n## Deliverable files\n\
 /// app grows a site switcher.
 const APP_SITE_ID: &str = "xhs";
 
-fn app_site() -> Result<&'static SiteSpec> {
-    find_site(APP_SITE_ID)
+fn app_site() -> Result<&'static NativeSiteAdapter> {
+    find_native_site_adapter(APP_SITE_ID)
         .ok_or_else(|| anyhow::anyhow!("app default site {APP_SITE_ID} is not registered"))
 }
 

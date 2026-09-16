@@ -8,7 +8,10 @@ use clap::{Arg, ArgAction, ArgMatches};
 use serde_json::{Map, Value};
 use socai_core::cloud as socai_pro;
 use socai_core::config as socai_config;
-use socai_core::sites::{all_sites, find_site, ArgKind, CommandArg, SiteCommand, SiteSpec};
+use socai_core::sites::{
+    all_native_site_adapters, find_native_site_adapter, ArgKind, CommandArg, NativeSiteAdapter,
+    SiteCommand,
+};
 
 fn build_cli() -> clap::Command {
     let mut root = clap::Command::new("socai")
@@ -93,7 +96,7 @@ fn build_cli() -> clap::Command {
                 ),
         )
         .subcommand(clap::Command::new("__daemon").hide(true));
-    for site in all_sites() {
+    for site in all_native_site_adapters() {
         let mut site_cmd = clap::Command::new(site.id)
             .about(site.about)
             .subcommand_required(true)
@@ -203,7 +206,7 @@ fn collect_args(command: &'static SiteCommand, matches: &ArgMatches) -> Result<V
 }
 
 async fn run_site_command(
-    site: &'static SiteSpec,
+    site: &'static NativeSiteAdapter,
     command: &'static SiteCommand,
     matches: &ArgMatches,
 ) -> Result<()> {
@@ -289,7 +292,8 @@ async fn main() -> Result<()> {
         }
         "__daemon" => daemon::run_daemon().await?,
         _ => {
-            let site = find_site(name).ok_or_else(|| anyhow::anyhow!("unknown command: {name}"))?;
+            let site = find_native_site_adapter(name)
+                .ok_or_else(|| anyhow::anyhow!("unknown command: {name}"))?;
             let (command_name, command_matches) = sub_matches
                 .subcommand()
                 .ok_or_else(|| anyhow::anyhow!("missing {name} subcommand"))?;

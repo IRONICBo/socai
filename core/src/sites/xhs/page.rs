@@ -11,8 +11,6 @@ use crate::sites::xhs::entities::{normalize_url, XhsNote, XhsNoteCard};
 
 pub const XHS_HOME_URL: &str = "https://www.xiaohongshu.com/explore";
 
-const PAGE_SCRIPTS_JS: &str = include_str!("page_scripts.js");
-
 /// How long to wait for the search-results page to actually populate cards
 /// after submitting. The wait polls and returns the instant cards appear, so a
 /// generous ceiling only costs time on genuinely slow loads (e.g. over a VPN) —
@@ -35,32 +33,6 @@ pub enum LoginGate {
     LoggedIn,
     Required,
 }
-
-const XHS_PAGE_SCRIPT_FUNCTIONS: &[&str] = &[
-    "note",
-    "noteWithWait",
-    "pageState",
-    "loginState",
-    "searchCards",
-    "searchInput",
-    "selectSearchInput",
-    "setSearchInput",
-    "searchState",
-    "searchFilterTrigger",
-    "searchFilters",
-    "clickCard",
-    "closeNote",
-    "noteOpen",
-    "comments",
-    "commentsWithWait",
-    "commentAreaState",
-    "expandCommentReplies",
-    "scrollFeed",
-    "scrollInNote",
-    "carouselImages",
-    "profileInfo",
-    "profileCards",
-];
 
 /// Single source of truth for the XHS search-filter vocabulary: canonical group
 /// `key`, the group's visible Chinese `title` (used to join against the DOM the
@@ -171,17 +143,7 @@ impl<'a> XhsPageRuntime<'a> {
     /// Inject `page_scripts.js` (the IIFE that defines `SocaiXhsPageScripts`)
     /// and call one of its functions.
     pub async fn run_script(&self, name: &str, arg: Option<&Value>) -> Result<Value> {
-        if !XHS_PAGE_SCRIPT_FUNCTIONS.contains(&name) {
-            anyhow::bail!("Unknown XHS page script: {name}");
-        }
-        let args = match arg {
-            None => String::new(),
-            Some(v) => serde_json::to_string(v)?,
-        };
-        let expr = format!(
-            "{PAGE_SCRIPTS_JS}\n// SOCAI_XHS_CALL: {name}\nreturn SocaiXhsPageScripts.{name}({args});"
-        );
-        self.page.evaluate_json(&expr).await
+        crate::sites::learning::run_site_browser_tool(self.page, "xhs", name, arg).await
     }
 
     pub async fn current_url(&self) -> Result<String> {
@@ -1646,7 +1608,8 @@ impl<'a> XhsPageRuntime<'a> {
 
         if options.include_media {
             let t_enrich = Instant::now();
-            self.enrich_note_media(&mut note, options.max_images).await?;
+            self.enrich_note_media(&mut note, options.max_images)
+                .await?;
             perf.insert(
                 "enrich_ms".into(),
                 json!(t_enrich.elapsed().as_millis() as u64),

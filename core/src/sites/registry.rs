@@ -1,9 +1,9 @@
-//! Site registry — the single wiring point for site capabilities.
+//! Native site-adapter registry.
 //!
-//! Each site module exposes one `pub static <ID>_SITE: SiteSpec` and gets
-//! listed in [`all_sites`]. Everything downstream (CLI subcommands, daemon
-//! dispatch, TUI/desktop agent setup) is derived from the spec, so adding a
-//! site never touches the CLI, daemon, or app shells.
+//! An adapter binds already-compiled Rust tools to CLI, daemon, and app hosts.
+//! It is deliberately not a capability manifest: discovery, domains, notes,
+//! and browser-tool schemas belong to runtime-loaded site learning packages in
+//! [`crate::sites::learning`].
 
 use std::future::Future;
 use std::pin::Pin;
@@ -25,7 +25,7 @@ pub type AgentInstructionsFn = fn(&str) -> String;
 pub type CommandRunFn =
     fn(Arc<PageSession>, Value, bool, Option<ToolProgressSender>) -> BoxFuture<Value>;
 
-pub struct SiteSpec {
+pub struct NativeSiteAdapter {
     /// Short site id — doubles as the CLI subcommand (`socai <id> <tool>`),
     /// the daemon `site` field, and the `enabled_sites` gate value.
     pub id: &'static str,
@@ -36,7 +36,8 @@ pub struct SiteSpec {
     /// a broader command/debug surface in `agent_tools` while exposing a
     /// smaller, product-safe macro surface to interactive users.
     pub default_agent_tools: Option<AgentToolsFn>,
-    /// Agent playbook (knowledge.md) with host-specific preamble prepended.
+    /// Compose the package's optional notes with the host-specific preamble.
+    /// The note resource remains manifest-declared even when it is empty.
     pub agent_instructions: AgentInstructionsFn,
     /// Optional default playbook that matches `default_agent_tools`.
     pub default_agent_instructions: Option<AgentInstructionsFn>,
@@ -96,21 +97,27 @@ impl SlowWhen {
     }
 }
 
-impl SiteSpec {
+impl NativeSiteAdapter {
     pub fn command(&self, name: &str) -> Option<&'static SiteCommand> {
         self.commands.iter().find(|cmd| cmd.name == name)
     }
 }
 
 /// Every registered site. Site order is also CLI help order.
-static SITES: &[&SiteSpec] = &[&crate::sites::xhs::XHS_SITE, &crate::sites::dy::DY_SITE];
+static NATIVE_SITE_ADAPTERS: &[&NativeSiteAdapter] = &[
+    &crate::sites::xhs::XHS_NATIVE_ADAPTER,
+    &crate::sites::dy::DY_NATIVE_ADAPTER,
+];
 
-pub fn all_sites() -> &'static [&'static SiteSpec] {
-    SITES
+pub fn all_native_site_adapters() -> &'static [&'static NativeSiteAdapter] {
+    NATIVE_SITE_ADAPTERS
 }
 
-pub fn find_site(id: &str) -> Option<&'static SiteSpec> {
-    all_sites().iter().copied().find(|site| site.id == id)
+pub fn find_native_site_adapter(id: &str) -> Option<&'static NativeSiteAdapter> {
+    all_native_site_adapters()
+        .iter()
+        .copied()
+        .find(|site| site.id == id)
 }
 
 /// Extract a required non-empty string arg from a command args object.

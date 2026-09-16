@@ -12,5 +12,5 @@ pub use self::tools::{
     author_scan_command, close_open_note, ensure_search_ready, search_command,
     xhs_agent_instructions, xhs_agent_tools, xhs_default_agent_tools,
     xhs_macro_tools_with_llm_provider, xhs_tools, xhs_tools_with_llm_provider, XHS_KNOWLEDGE,
-    XHS_SITE,
+    XHS_NATIVE_ADAPTER,
 };
