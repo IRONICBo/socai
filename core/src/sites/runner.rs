@@ -214,7 +214,11 @@ pub fn json_result(value: &Value) -> ToolResult {
 }
 
 pub fn get_f64(input: &Value, key: &str, default: f64) -> f64 {
-    input.get(key).and_then(Value::as_f64).unwrap_or(default)
+    input
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(default)
 }
 
 pub fn get_i64(input: &Value, key: &str, default: i64) -> i64 {

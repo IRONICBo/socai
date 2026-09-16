@@ -282,7 +282,7 @@ fn run_page_state(
     progress: Option<ToolProgressSender>,
 ) -> BoxFuture<Value> {
     Box::pin(async move {
-        let wait_seconds = get_f64(&args, "wait_seconds", 330.0);
+        let wait_seconds = get_f64(&args, "wait_seconds", 330.0).clamp(1.0, 330.0);
         run_tool_command(
             ToolCommand {
                 site_id: "dy",
@@ -340,12 +340,14 @@ impl Tool for GetVideosTool {
                     "type": "array",
                     "items": { "type": "string" },
                     "minItems": 1,
+                    "maxItems": 100,
                     "description": "Douyin video ids or full douyin.com video URLs."
                 },
                 "num_comments": {
                     "type": "integer",
                     "default": 8,
-                    "minimum": 0
+                    "minimum": 0,
+                    "maximum": 100
                 },
                 "download_media": { "type": "boolean", "default": false },
                 "ocr": {
@@ -354,7 +356,7 @@ impl Tool for GetVideosTool {
                     "default": false
                 },
                 "transcribe_audio": { "type": "boolean", "default": false },
-                "wait_seconds": { "type": "number", "default": 30, "minimum": 1 }
+                "wait_seconds": { "type": "number", "default": 30, "minimum": 1, "maximum": 330 }
             },
             "required": ["videos"]
         })
@@ -362,8 +364,11 @@ impl Tool for GetVideosTool {
 
     async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let videos = string_list(&input, "videos")?;
-        let wait_seconds = get_f64(&input, "wait_seconds", 30.0);
-        let num_comments = get_i64(&input, "num_comments", 8).max(0) as usize;
+        if videos.len() > 100 {
+            anyhow::bail!("get_videos accepts at most 100 videos per call");
+        }
+        let wait_seconds = get_f64(&input, "wait_seconds", 30.0).clamp(1.0, 330.0);
+        let num_comments = get_i64(&input, "num_comments", 8).clamp(0, 100) as usize;
         let ocr = input.get("ocr").and_then(Value::as_bool).unwrap_or(false);
         let transcribe_audio = input
             .get("transcribe_audio")
@@ -475,9 +480,10 @@ impl Tool for AuthorScanTool {
                 "num": {
                     "type": "integer",
                     "description": "Collect at least this many video cards by scrolling. Omit for the first visible screen.",
-                    "minimum": 1
+                    "minimum": 1,
+                    "maximum": 100
                 },
-                "wait_seconds": { "type": "number", "default": 30, "minimum": 1 }
+                "wait_seconds": { "type": "number", "default": 30, "minimum": 1, "maximum": 330 }
             },
             "required": ["author"]
         })
@@ -489,8 +495,8 @@ impl Tool for AuthorScanTool {
             .get("num")
             .and_then(Value::as_i64)
             .filter(|value| *value > 0)
-            .map(|value| value as usize);
-        let wait_seconds = get_f64(&input, "wait_seconds", 30.0);
+            .map(|value| value.clamp(1, 100) as usize);
+        let wait_seconds = get_f64(&input, "wait_seconds", 30.0).clamp(1.0, 330.0);
         let runtime = DouyinPageRuntime::new(&self.page);
         let result = runtime.read_author(&author, wait_seconds, num).await?;
         Ok(json_result(&result))
@@ -520,12 +526,15 @@ impl Tool for SearchTool {
                     "type": "integer",
                     "description": "Number of video cards to collect by scrolling.",
                     "default": 10,
-                    "minimum": 1
+                    "minimum": 1,
+                    "maximum": 100
                 },
                 "wait_seconds": {
                     "type": "number",
                     "description": "Maximum wait for page/search transitions.",
-                    "default": 330
+                    "default": 330,
+                    "minimum": 1,
+                    "maximum": 330
                 }
             },
             "required": ["query"]
@@ -534,8 +543,8 @@ impl Tool for SearchTool {
 
     async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let query = required_string(&input, "query")?;
-        let wait_seconds = get_f64(&input, "wait_seconds", 330.0);
-        let num_videos = get_i64(&input, "num", 10).max(1) as usize;
+        let wait_seconds = get_f64(&input, "wait_seconds", 330.0).clamp(1.0, 330.0);
+        let num_videos = get_i64(&input, "num", 10).clamp(1, 100) as usize;
         let runtime = DouyinPageRuntime::new(&self.page);
         let value = runtime
             .search_videos(&query, wait_seconds, num_videos)
@@ -567,14 +576,16 @@ impl Tool for PageStateTool {
                 "wait_seconds": {
                     "type": "number",
                     "description": "Maximum wait for the Douyin page to become non-blank.",
-                    "default": 330
+                    "default": 330,
+                    "minimum": 1,
+                    "maximum": 330
                 }
             }
         })
     }
 
     async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
-        let wait_seconds = get_f64(&input, "wait_seconds", 330.0);
+        let wait_seconds = get_f64(&input, "wait_seconds", 330.0).clamp(1.0, 330.0);
         let runtime = DouyinPageRuntime::new(&self.page);
         runtime.ensure_douyin(true, wait_seconds).await?;
         let state = runtime.wait_until_interactive(wait_seconds).await?;
@@ -617,13 +628,19 @@ impl Tool for WaitForLoginTool {
         runtime.ensure_douyin(true, 30.0).await?;
         let deadline = std::time::Instant::now() + Duration::from_secs(WAIT_FOR_LOGIN_SECS);
         loop {
-            let state = runtime.detect_state().await.unwrap_or_else(|error| {
-                json!({
-                    "ok": false,
-                    "reason": "login_state_unavailable",
-                    "error": error.to_string(),
-                })
-            });
+            let state = match runtime.detect_state().await {
+                Ok(state) => state,
+                Err(error) => {
+                    if self.page.transport_closed().await {
+                        return Err(error);
+                    }
+                    json!({
+                        "ok": false,
+                        "reason": "login_state_unavailable",
+                        "error": error.to_string(),
+                    })
+                }
+            };
             if state.get("signed_in").and_then(Value::as_bool) == Some(true) {
                 return Ok(json_result(&json!({
                     "logged_in": true,

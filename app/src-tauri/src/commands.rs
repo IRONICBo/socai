@@ -21,7 +21,7 @@ use socai_core::runtime::{
     SocaiRuntime,
 };
 use socai_core::sites::xhs::{XhsHistoryStore, XhsPageRuntime};
-use socai_core::sites::{find_native_site_adapter, site_learning_tools, NativeSiteAdapter};
+use socai_core::sites::{find_native_site_adapter, NativeSiteAdapter};
 use socai_core::telemetry::tool_call::{
     is_site_tool_result, summarize_site_tool_result, summarize_tool_args,
 };
@@ -2999,7 +2999,6 @@ async fn run_agent_task_on_session_page(
                 browser_tools,
             }) as SharedToolFailureRecovery
         });
-        tools.extend(site_learning_tools(page.clone()));
         tools.extend(desktop_agent_tools());
         tools.push(Arc::new(PublishArtifactTool::new(
             session_dir.as_deref().map(PathBuf::from),

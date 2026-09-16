@@ -12,6 +12,8 @@ use crate::sites::dy::entities::{
 pub const DOUYIN_HOME_URL: &str = "https://www.douyin.com/";
 
 const SEARCH_TRANSITION_TIMEOUT_S: f64 = 20.0;
+const MAX_PAGE_WAIT_SECONDS: f64 = 330.0;
+const MAX_COLLECTED_ITEMS: usize = 100;
 
 pub struct DouyinPageRuntime<'a> {
     page: &'a PageSession,
@@ -57,7 +59,7 @@ impl<'a> DouyinPageRuntime<'a> {
     }
 
     pub async fn wait_until_interactive(&self, timeout_seconds: f64) -> Result<Value> {
-        let deadline = Instant::now() + Duration::from_secs_f64(timeout_seconds.max(0.5));
+        let deadline = Instant::now() + bounded_wait_duration(timeout_seconds);
         let mut latest = json!({
             "ok": false,
             "blank_or_throttled": true,
@@ -66,13 +68,18 @@ impl<'a> DouyinPageRuntime<'a> {
         while Instant::now() < deadline {
             latest = match self.detect_state().await {
                 Ok(state) => state,
-                Err(err) => json!({
-                    "ok": false,
-                    "blank_or_throttled": true,
-                    "reason": "detect_state_failed",
-                    "error": err.to_string(),
-                    "url": self.current_url().await.unwrap_or_default(),
-                }),
+                Err(err) => {
+                    if self.page.transport_closed().await {
+                        return Err(err);
+                    }
+                    json!({
+                        "ok": false,
+                        "blank_or_throttled": true,
+                        "reason": "detect_state_failed",
+                        "error": err.to_string(),
+                        "url": self.current_url().await.unwrap_or_default(),
+                    })
+                }
             };
             let terminal_gate = latest
                 .get("challenge_required")
@@ -155,7 +162,8 @@ impl<'a> DouyinPageRuntime<'a> {
         let submit = self.submit_search(keyword, wait_seconds).await?;
         let ok = script_ok(&submit);
         let cards = if ok {
-            self.collect_video_cards(num_videos.max(1)).await?
+            self.collect_video_cards(num_videos.clamp(1, MAX_COLLECTED_ITEMS))
+                .await?
         } else {
             Vec::new()
         };
@@ -244,7 +252,10 @@ impl<'a> DouyinPageRuntime<'a> {
             }));
         }
         let comments_error = if num_comments > 0 {
-            match self.collect_comments(num_comments).await {
+            match self
+                .collect_comments(num_comments.min(MAX_COLLECTED_ITEMS))
+                .await
+            {
                 Ok(comments) => {
                     entity.top_comments = comments;
                     None
@@ -278,7 +289,7 @@ impl<'a> DouyinPageRuntime<'a> {
         // The description shell commonly appears several seconds before the
         // author block and player sources hydrate. Keep this bounded, but give
         // the real detail page enough time to complete those fields.
-        let deadline = Instant::now() + Duration::from_secs_f64(wait_seconds.clamp(1.0, 12.0));
+        let deadline = Instant::now() + bounded_duration(wait_seconds, 1.0, 12.0);
         let mut media_ready_since = None;
         loop {
             let latest = self.expect_object("videoDetail", None).await?;
@@ -348,7 +359,9 @@ impl<'a> DouyinPageRuntime<'a> {
             }));
         }
 
-        let target_count = num_videos.unwrap_or(100).max(1);
+        let target_count = num_videos
+            .unwrap_or(MAX_COLLECTED_ITEMS)
+            .clamp(1, MAX_COLLECTED_ITEMS);
         let first_screen_only = num_videos.is_none();
         if first_screen_only {
             self.expect_object("scrollFeed", Some(&json!({ "to_top": true })))
@@ -359,8 +372,7 @@ impl<'a> DouyinPageRuntime<'a> {
         let mut seen = std::collections::HashSet::new();
         let mut stalls = 0usize;
         let mut raw_profile = Value::Null;
-        let content_deadline =
-            Instant::now() + Duration::from_secs_f64(wait_seconds.clamp(5.0, 30.0));
+        let content_deadline = Instant::now() + bounded_duration(wait_seconds, 5.0, 30.0);
         let mut profile_reports_posts = false;
         while cards.len() < target_count {
             raw_profile = self
@@ -428,7 +440,7 @@ impl<'a> DouyinPageRuntime<'a> {
             }));
         }
         if let Some(target_count) = num_videos {
-            cards.truncate(target_count.max(1));
+            cards.truncate(target_count.clamp(1, MAX_COLLECTED_ITEMS));
         }
         profile.video_cards = cards;
         if profile_reports_posts && profile.video_cards.is_empty() {
@@ -557,7 +569,7 @@ impl<'a> DouyinPageRuntime<'a> {
     }
 
     async fn wait_for_search_transition(&self, query: &str, timeout_s: f64) -> Result<Value> {
-        let deadline = Instant::now() + Duration::from_secs_f64(timeout_s.max(0.5));
+        let deadline = Instant::now() + bounded_wait_duration(timeout_s);
         let mut latest = Value::Object(Map::new());
         let mut settled_elsewhere = 0usize;
         while Instant::now() < deadline {
@@ -567,6 +579,9 @@ impl<'a> DouyinPageRuntime<'a> {
             {
                 Ok(state) => state,
                 Err(err) => {
+                    if self.page.transport_closed().await {
+                        return Err(err);
+                    }
                     sleep_ms(200).await;
                     json!({
                         "ok": false,
@@ -702,6 +717,9 @@ impl<'a> DouyinPageRuntime<'a> {
         let current = self.current_url().await.unwrap_or_default();
         let navigated = without_fragment(&current) != without_fragment(target);
         if navigated {
+            self.page
+                .evaluate_json("performance.clearResourceTimings(); return true;")
+                .await?;
             self.soft_navigate(target).await?;
         }
         Ok(NavigationExpectation {
@@ -718,13 +736,16 @@ impl<'a> DouyinPageRuntime<'a> {
         expected_identity: &str,
         navigation: &NavigationExpectation,
     ) -> Result<Value> {
-        let deadline = Instant::now() + Duration::from_secs_f64(timeout_seconds.max(0.5));
+        let deadline = Instant::now() + bounded_wait_duration(timeout_seconds);
         let mut latest = Value::Object(Map::new());
         let mut login_gate_since = None;
         while Instant::now() < deadline {
             latest = match self.expect_object(name, None).await {
                 Ok(state) => state,
                 Err(err) => {
+                    if self.page.transport_closed().await {
+                        return Err(err);
+                    }
                     sleep_ms(200).await;
                     json!({
                         "ok": false,
@@ -849,6 +870,19 @@ fn search_transition_ok(value: &Value) -> bool {
 
 fn without_fragment(value: &str) -> &str {
     value.split('#').next().unwrap_or(value)
+}
+
+fn bounded_wait_duration(seconds: f64) -> Duration {
+    bounded_duration(seconds, 0.5, MAX_PAGE_WAIT_SECONDS)
+}
+
+fn bounded_duration(seconds: f64, minimum: f64, maximum: f64) -> Duration {
+    let seconds = if seconds.is_finite() {
+        seconds.clamp(minimum, maximum)
+    } else {
+        maximum
+    };
+    Duration::from_secs_f64(seconds)
 }
 
 fn number(value: &Value, key: &str) -> f64 {

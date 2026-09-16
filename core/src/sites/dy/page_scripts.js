@@ -91,6 +91,16 @@
           h: rect.h,
         };
       });
+    const hasSearchInput = inputs.some((input) =>
+      /searchbox/i.test(input.role) ||
+      /搜索|search/i.test(`${input.placeholder} ${input.aria_label}`)
+    );
+    const hasPublicContent = hasSearchInput || !!firstVisible([
+      '[data-aweme-id]',
+      '[id^="waterfall_item_"]',
+      'a[href*="/video/"]',
+      'video',
+    ]);
     const blankOrThrottled = document.readyState === 'loading' || !hasUsefulBody();
     return {
       ok: true,
@@ -101,7 +111,7 @@
       body_text_len: bodyText.length,
       signed_in: signedIn,
       blank_or_throttled: blankOrThrottled,
-      login_required: loginBlocked(false),
+      login_required: loginBlocked(hasPublicContent),
       challenge_required: challengeRequired(),
       search_inputs: inputs,
     };
@@ -322,8 +332,10 @@
       const kind = path.includes('media-audio') ? 'audio' : 'video';
       if (videoHost && videoPath) push(url.href, `performance.${entry.initiatorType || 'resource'}`, kind);
     }
-    const resolved = candidates.find((item) => item.kind === 'video');
-    const audio = candidates.find((item) => item.kind === 'audio');
+    const directVideo = candidates.find((item) => item.kind === 'video' && !item.source.startsWith('performance.'));
+    const directAudio = candidates.find((item) => item.kind === 'audio' && !item.source.startsWith('performance.'));
+    const resolved = directVideo || [...candidates].reverse().find((item) => item.kind === 'video');
+    const audio = directAudio || [...candidates].reverse().find((item) => item.kind === 'audio');
     return {
       url: resolved ? resolved.url : '',
       resolved_url: resolved ? resolved.url : '',
