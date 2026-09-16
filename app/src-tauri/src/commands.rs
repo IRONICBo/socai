@@ -2999,7 +2999,6 @@ async fn run_agent_task_on_session_page(
                 browser_tools,
             }) as SharedToolFailureRecovery
         });
-        tools.extend(site_learning_tools(page.clone()));
         tools.extend(desktop_agent_tools());
         tools.push(Arc::new(PublishArtifactTool::new(
             session_dir.as_deref().map(PathBuf::from),
