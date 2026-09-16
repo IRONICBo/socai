@@ -513,7 +513,10 @@ impl ToolContext {
     }
 
     pub(crate) fn record_tool_outcome(&self, tool: &str, input: &Value, succeeded: bool) {
-        if matches!(tool, "read_skill" | "record_skill_learning") {
+        if matches!(
+            tool,
+            "read_skill" | "record_skill_learning" | "browser_script"
+        ) {
             return;
         }
         let operation_signature = recovery_operation_signature(tool, input);

@@ -63,6 +63,21 @@ impl PageSessionManager {
     /// avoids browser-wide CDP target discovery/auto-attach, so unrelated user
     /// tabs are not instrumented.
     pub async fn create_page(&self, start_url: &str) -> anyhow::Result<PageSession> {
+        self.create_page_with_options(start_url, false).await
+    }
+
+    /// Create an owned tab without bringing it to the foreground. This is used
+    /// for short-lived control contexts that must not steal focus from the site
+    /// tab the user is watching.
+    pub async fn create_background_page(&self, start_url: &str) -> anyhow::Result<PageSession> {
+        self.create_page_with_options(start_url, true).await
+    }
+
+    async fn create_page_with_options(
+        &self,
+        start_url: &str,
+        background: bool,
+    ) -> anyhow::Result<PageSession> {
         // Client and browser mode come from one locked read: the page is
         // labelled with the browser it is actually created in, even if the
         // connection is replaced while the target commands below are in flight.
@@ -71,7 +86,7 @@ impl PageSessionManager {
             .browser_client_with_mode()
             .await
             .ok_or_else(|| anyhow::anyhow!("CDP browser websocket is not connected"))?;
-        self.create_page_via_browser_ws(browser_client, remote_browser, start_url)
+        self.create_page_via_browser_ws(browser_client, remote_browser, start_url, background)
             .await
     }
 
@@ -80,12 +95,14 @@ impl PageSessionManager {
         browser_client: crate::cdp::raw_client::RawCdpClient,
         remote_browser: bool,
         start_url: &str,
+        background: bool,
     ) -> anyhow::Result<PageSession> {
+        let mut create_params = json!({ "url": blank_or_start_url(start_url) });
+        if background {
+            create_params["background"] = Value::Bool(true);
+        }
         let created = browser_client
-            .execute(
-                "Target.createTarget",
-                json!({ "url": blank_or_start_url(start_url) }),
-            )
+            .execute("Target.createTarget", create_params)
             .await?;
         let target_id = created
             .get("targetId")
@@ -124,6 +141,7 @@ impl PageSessionManager {
             session_id,
             self.cdp.clone(),
             remote_browser,
+            background,
         );
         target_guard.disarm();
         Ok(page)
