@@ -630,22 +630,12 @@ impl SocaiRuntime {
             StatusPayload::Connected { .. }
                 if browser_status_matches_options(&status, &options) =>
             {
-                // The page command loop can observe websocket closure a moment
-                // before the target poller publishes Disconnected. Normalize
-                // that short race without turning it into a user_disconnect.
-                tokio::time::timeout(Duration::from_secs(5), async {
-                    loop {
-                        if matches!(
-                            self.browser_status().await,
-                            StatusPayload::Disconnected { .. }
-                        ) {
-                            break;
-                        }
-                        sleep(Duration::from_millis(50)).await;
-                    }
-                })
-                .await
-                .map_err(|_| anyhow!("CDP loss was not published within 5s"))?;
+                // A page command can time out while the target poller itself is
+                // still waiting on an older command. Publish the typed loss
+                // directly so recovery is not delayed by that in-flight poll.
+                self.cdp
+                    .mark_transport_unhealthy("CDP command transport became unhealthy")
+                    .await;
                 self.cdp.wait_for_teardown().await;
                 wait_browser_recovered_with_options(self, options.clone()).await?;
             }

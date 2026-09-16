@@ -107,6 +107,7 @@ impl NativeSiteAdapter {
 static NATIVE_SITE_ADAPTERS: &[&NativeSiteAdapter] = &[
     &crate::sites::xhs::XHS_NATIVE_ADAPTER,
     &crate::sites::dy::DY_NATIVE_ADAPTER,
+    &crate::sites::tiktok::TIKTOK_NATIVE_ADAPTER,
 ];
 
 pub fn all_native_site_adapters() -> &'static [&'static NativeSiteAdapter] {

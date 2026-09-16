@@ -109,6 +109,18 @@ impl Cdp {
         });
     }
 
+    /// Publish a command-path transport failure immediately instead of waiting
+    /// for the periodic target poller. The transition is idempotent and will
+    /// not overwrite an explicit user disconnect that already won the race.
+    pub(crate) async fn mark_transport_unhealthy(&self, reason: impl Into<String>) {
+        {
+            let state = self.state();
+            let guard = state.lock().await;
+            abort_monitor_if_connected(&guard);
+        }
+        on_connection_lost(self.clone(), reason.into()).await;
+    }
+
     pub async fn disconnect(&self) {
         // One teardown at a time, held across the release: a second
         // disconnect (the idle reaper racing an app quit, say) must not
