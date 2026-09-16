@@ -219,10 +219,13 @@ impl PageSession {
         timeout: Duration,
     ) -> anyhow::Result<Value> {
         let wrapped = wrap_expression(expression);
-        let resp = self
-            .client
+        let (client, session_id) = {
+            let connection = self.connection.read().await;
+            (connection.client.clone(), connection.session_id.clone())
+        };
+        let resp = client
             .execute_for_session_with_timeout(
-                self.session_id.as_deref(),
+                session_id.as_deref(),
                 "Runtime.evaluate",
                 json!({
                     "expression": wrapped,
