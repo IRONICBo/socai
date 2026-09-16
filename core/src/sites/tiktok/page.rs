@@ -12,6 +12,8 @@ use crate::sites::tiktok::entities::{
 pub const TIKTOK_HOME_URL: &str = "https://www.tiktok.com/";
 
 const TRANSITION_TIMEOUT_S: f64 = 20.0;
+const MAX_PAGE_WAIT_SECONDS: f64 = 330.0;
+const MAX_COLLECTED_ITEMS: usize = 100;
 
 pub struct TikTokPageRuntime<'a> {
     page: &'a PageSession,
@@ -53,7 +55,7 @@ impl<'a> TikTokPageRuntime<'a> {
     }
 
     pub async fn wait_until_interactive(&self, timeout_seconds: f64) -> Result<Value> {
-        let deadline = Instant::now() + Duration::from_secs_f64(timeout_seconds.max(0.5));
+        let deadline = Instant::now() + bounded_wait_duration(timeout_seconds);
         let mut latest = json!({
             "ok": false,
             "blank_or_throttled": true,
@@ -62,13 +64,20 @@ impl<'a> TikTokPageRuntime<'a> {
         while Instant::now() < deadline {
             latest = match self.detect_state().await {
                 Ok(state) => state,
-                Err(err) => json!({
-                    "ok": false,
-                    "blank_or_throttled": true,
-                    "reason": "detect_state_failed",
-                    "error": err.to_string(),
-                    "url": self.current_url().await.unwrap_or_default(),
-                }),
+                Err(err) => {
+                    if self.page.transport_closed().await {
+                        return Err(
+                            err.context("TikTok CDP transport closed while waiting for page")
+                        );
+                    }
+                    json!({
+                        "ok": false,
+                        "blank_or_throttled": true,
+                        "reason": "detect_state_failed",
+                        "error": err.to_string(),
+                        "url": self.current_url().await.unwrap_or_default(),
+                    })
+                }
             };
             if state_terminal(&latest)
                 || !latest
@@ -97,6 +106,9 @@ impl<'a> TikTokPageRuntime<'a> {
         let keyword = query.trim();
         if keyword.is_empty() {
             anyhow::bail!("query is required");
+        }
+        if keyword.chars().count() > 512 {
+            anyhow::bail!("query must contain at most 512 characters");
         }
         let target = format!(
             "https://www.tiktok.com/search?q={}",
@@ -130,7 +142,9 @@ impl<'a> TikTokPageRuntime<'a> {
                 "cards": [],
             }));
         }
-        let cards = self.collect_video_cards(num_videos.max(1)).await?;
+        let cards = self
+            .collect_video_cards(num_videos.clamp(1, MAX_COLLECTED_ITEMS))
+            .await?;
         Ok(json!({
             "ok": true,
             "query": keyword,
@@ -294,7 +308,10 @@ impl<'a> TikTokPageRuntime<'a> {
             }));
         }
         let comments_error = if num_comments > 0 && !landed_on_player {
-            match self.collect_comments(num_comments).await {
+            match self
+                .collect_comments(num_comments.min(MAX_COLLECTED_ITEMS))
+                .await
+            {
                 Ok(comments) => {
                     entity.top_comments = comments;
                     None
@@ -418,7 +435,7 @@ impl<'a> TikTokPageRuntime<'a> {
     }
 
     async fn wait_for_video_detail(&self, wait_seconds: f64) -> Result<Value> {
-        let deadline = Instant::now() + Duration::from_secs_f64(wait_seconds.clamp(1.0, 12.0));
+        let deadline = Instant::now() + bounded_duration(wait_seconds, 1.0, 12.0);
         loop {
             let latest = self.expect_object("videoDetail", None).await?;
             let has_author = latest
@@ -472,7 +489,9 @@ impl<'a> TikTokPageRuntime<'a> {
             }));
         }
 
-        let target_count = num_videos.unwrap_or(100).max(1);
+        let target_count = num_videos
+            .unwrap_or(MAX_COLLECTED_ITEMS)
+            .clamp(1, MAX_COLLECTED_ITEMS);
         let first_screen_only = num_videos.is_none();
         if first_screen_only {
             self.expect_object("scrollFeed", Some(&json!({ "to_top": true })))
@@ -536,7 +555,7 @@ impl<'a> TikTokPageRuntime<'a> {
             }));
         }
         if let Some(target_count) = num_videos {
-            cards.truncate(target_count.max(1));
+            cards.truncate(target_count.clamp(1, MAX_COLLECTED_ITEMS));
         }
         profile.video_cards = cards;
         if num_videos.is_some() && profile.video_cards.is_empty() {
@@ -556,7 +575,7 @@ impl<'a> TikTokPageRuntime<'a> {
         timeout_seconds: f64,
         navigation: &NavigationExpectation,
     ) -> Result<Value> {
-        let deadline = Instant::now() + Duration::from_secs_f64(timeout_seconds.max(0.5));
+        let deadline = Instant::now() + bounded_wait_duration(timeout_seconds);
         let mut latest = Value::Object(Map::new());
         let mut login_gate_since = None;
         while Instant::now() < deadline {
@@ -566,6 +585,11 @@ impl<'a> TikTokPageRuntime<'a> {
             {
                 Ok(state) => state,
                 Err(err) => {
+                    if self.page.transport_closed().await {
+                        return Err(
+                            err.context("TikTok CDP transport closed during search navigation")
+                        );
+                    }
                     sleep_ms(200).await;
                     json!({
                         "ok": false,
@@ -730,6 +754,10 @@ impl<'a> TikTokPageRuntime<'a> {
         let current = self.current_url().await.unwrap_or_default();
         let navigated = without_fragment(&current) != without_fragment(target);
         if navigated {
+            let _ = self
+                .page
+                .evaluate_json("performance.clearResourceTimings(); return true;")
+                .await;
             self.soft_navigate(target).await?;
         }
         Ok(NavigationExpectation {
@@ -757,13 +785,18 @@ impl<'a> TikTokPageRuntime<'a> {
         expected_identity: &str,
         navigation: &NavigationExpectation,
     ) -> Result<Value> {
-        let deadline = Instant::now() + Duration::from_secs_f64(timeout_seconds.max(0.5));
+        let deadline = Instant::now() + bounded_wait_duration(timeout_seconds);
         let mut latest = Value::Object(Map::new());
         let mut login_gate_since = None;
         while Instant::now() < deadline {
             latest = match self.expect_object(name, None).await {
                 Ok(state) => state,
                 Err(err) => {
+                    if self.page.transport_closed().await {
+                        return Err(
+                            err.context("TikTok CDP transport closed during page navigation")
+                        );
+                    }
                     sleep_ms(200).await;
                     json!({
                         "ok": false,
@@ -951,6 +984,19 @@ fn navigation_committed(navigation: &NavigationExpectation, current: &str) -> bo
 
 fn without_fragment(value: &str) -> &str {
     value.split('#').next().unwrap_or(value)
+}
+
+fn bounded_wait_duration(seconds: f64) -> Duration {
+    bounded_duration(seconds, 0.5, MAX_PAGE_WAIT_SECONDS)
+}
+
+fn bounded_duration(seconds: f64, minimum: f64, maximum: f64) -> Duration {
+    let seconds = if seconds.is_finite() {
+        seconds.clamp(minimum, maximum)
+    } else {
+        maximum
+    };
+    Duration::from_secs_f64(seconds)
 }
 
 fn state_terminal(value: &Value) -> bool {

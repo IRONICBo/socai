@@ -309,8 +309,11 @@
       '[data-e2e="video-desc"]',
     ]);
     const detailText = text(detailNode) || metaContent('og:description');
-    const canonicalVideoLink = videoId && document.querySelector(`a[href*="/video/${videoId}"]`);
-    const hasDetail = !!stateVideo || (hasVideo && (detailText.length > 0 || !!canonicalVideoLink));
+    const metadataVideoId = videoIdFromUrl(metaContent('og:url'));
+    const structuredAuthor = breadcrumbAuthor();
+    const identityHydrated = !!stateVideo || metadataVideoId === videoId || !!structuredAuthor.handle;
+    const hasDetail = identityHydrated &&
+      (!!stateVideo || (hasVideo && (detailText.length > 0 || !!structuredAuthor.handle)));
     const unavailableNode = firstVisible([
       '[data-e2e="video-unavailable"]',
       '[data-e2e="browse-video-error"]',
@@ -332,6 +335,7 @@
       challenge_required: challengeRequired(),
       unavailable: /video currently unavailable|couldn't find this video|video has been removed|not available in your country|视频不可用|已删除/i.test(unavailableText),
       has_video: hasVideo,
+      identity_hydrated: identityHydrated,
     };
   }
 
@@ -608,6 +612,14 @@
 
   function searchState(arg) {
     const query = String(arg && arg.query || '').trim();
+    const searchInput = firstVisible([
+      'input[data-e2e="search-user-input"]',
+      'input[type="search"]',
+      'input[placeholder*="Search" i]',
+      'input[aria-label*="Search" i]',
+    ]);
+    const visibleQuery = String(searchInput && searchInput.value || '').trim();
+    const queryHydrated = !query || visibleQuery.localeCompare(query, undefined, { sensitivity: 'accent' }) === 0;
     const cards = videoCards({ limit: 3 });
     const bodyText = text(document.body);
     const emptyState = firstVisible([
@@ -641,7 +653,8 @@
       title: document.title || '',
       ready_state: document.readyState,
       query,
-      query_visible: query ? bodyText.toLowerCase().includes(query.toLowerCase()) || decodeURIComponent(location.href).toLowerCase().includes(query.toLowerCase()) : false,
+      query_visible: queryHydrated,
+      visible_query: visibleQuery,
       card_count: cards.length,
       blank_or_throttled: document.readyState === 'loading' || !hasUsefulBody(),
       login_required: loginBlocked(cards.length > 0),

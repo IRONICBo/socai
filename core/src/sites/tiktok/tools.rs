@@ -23,6 +23,8 @@ pub const TIKTOK_KNOWLEDGE: &str = include_str!("knowledge.md");
 
 const MAX_VIDEO_DOWNLOAD_BYTES: usize = 128 * 1024 * 1024;
 const MAX_POSTER_DOWNLOAD_BYTES: usize = 20 * 1024 * 1024;
+const MAX_TOOL_ITEMS: i64 = 100;
+const MAX_TOOL_WAIT_SECONDS: f64 = 330.0;
 const TIKTOK_MEDIA_HOST_SUFFIXES: &[&str] = &[
     "tiktokcdn.com",
     "tiktokcdn-us.com",
@@ -287,7 +289,7 @@ fn run_page_state(
     debug_snapshot: bool,
     progress: Option<ToolProgressSender>,
 ) -> BoxFuture<Value> {
-    let wait_seconds = get_f64(&args, "wait_seconds", 30.0);
+    let wait_seconds = get_f64(&args, "wait_seconds", 30.0).clamp(1.0, MAX_TOOL_WAIT_SECONDS);
     run_registered_command(
         page,
         args,
@@ -352,9 +354,9 @@ impl Tool for SearchTool {
         json!({
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "Search query" },
-                "num": { "type": "integer", "default": 10, "minimum": 1 },
-                "wait_seconds": { "type": "number", "default": 30, "minimum": 1 }
+                "query": { "type": "string", "maxLength": 512, "description": "Search query" },
+                "num": { "type": "integer", "default": 10, "minimum": 1, "maximum": 100 },
+                "wait_seconds": { "type": "number", "default": 30, "minimum": 1, "maximum": 330 }
             },
             "required": ["query"]
         })
@@ -362,8 +364,11 @@ impl Tool for SearchTool {
 
     async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let query = required_string(&input, "query")?;
-        let num = get_i64(&input, "num", 10).max(1) as usize;
-        let wait_seconds = get_f64(&input, "wait_seconds", 30.0);
+        if query.chars().count() > 512 {
+            anyhow::bail!("query must contain at most 512 characters");
+        }
+        let num = get_i64(&input, "num", 10).clamp(1, MAX_TOOL_ITEMS) as usize;
+        let wait_seconds = get_f64(&input, "wait_seconds", 30.0).clamp(1.0, MAX_TOOL_WAIT_SECONDS);
         let result = TikTokPageRuntime::new(&self.page)
             .search_videos(&query, wait_seconds, num)
             .await?;
@@ -397,11 +402,12 @@ impl Tool for GetVideosTool {
             "properties": {
                 "videos": {
                     "type": "array",
-                    "items": { "type": "string" },
+                    "items": { "type": "string", "maxLength": 2048 },
                     "minItems": 1,
+                    "maxItems": 100,
                     "description": "TikTok video ids, canonical URLs, player URLs, or short links."
                 },
-                "num_comments": { "type": "integer", "default": 8, "minimum": 0 },
+                "num_comments": { "type": "integer", "default": 8, "minimum": 0, "maximum": 100 },
                 "download_media": { "type": "boolean", "default": false },
                 "ocr": {
                     "type": "boolean",
@@ -409,7 +415,7 @@ impl Tool for GetVideosTool {
                     "default": false
                 },
                 "transcribe_audio": { "type": "boolean", "default": false },
-                "wait_seconds": { "type": "number", "default": 30, "minimum": 1 }
+                "wait_seconds": { "type": "number", "default": 30, "minimum": 1, "maximum": 330 }
             },
             "required": ["videos"]
         })
@@ -417,8 +423,11 @@ impl Tool for GetVideosTool {
 
     async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let videos = string_list(&input, "videos")?;
-        let wait_seconds = get_f64(&input, "wait_seconds", 30.0);
-        let num_comments = get_i64(&input, "num_comments", 8).max(0) as usize;
+        if videos.len() > MAX_TOOL_ITEMS as usize {
+            anyhow::bail!("get_videos accepts at most {MAX_TOOL_ITEMS} videos per call");
+        }
+        let wait_seconds = get_f64(&input, "wait_seconds", 30.0).clamp(1.0, MAX_TOOL_WAIT_SECONDS);
+        let num_comments = get_i64(&input, "num_comments", 8).clamp(0, MAX_TOOL_ITEMS) as usize;
         let ocr = input.get("ocr").and_then(Value::as_bool).unwrap_or(false);
         let transcribe_audio = input
             .get("transcribe_audio")
@@ -525,13 +534,14 @@ impl Tool for AuthorScanTool {
         json!({
             "type": "object",
             "properties": {
-                "author": { "type": "string", "description": "TikTok @handle or profile URL." },
+                "author": { "type": "string", "maxLength": 2048, "description": "TikTok @handle or profile URL." },
                 "num": {
                     "type": "integer",
                     "description": "Collect at least this many video cards by scrolling. Omit for the first visible screen.",
-                    "minimum": 1
+                    "minimum": 1,
+                    "maximum": 100
                 },
-                "wait_seconds": { "type": "number", "default": 30, "minimum": 1 }
+                "wait_seconds": { "type": "number", "default": 30, "minimum": 1, "maximum": 330 }
             },
             "required": ["author"]
         })
@@ -539,12 +549,15 @@ impl Tool for AuthorScanTool {
 
     async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let author = required_string(&input, "author")?;
+        if author.chars().count() > 2048 {
+            anyhow::bail!("author must contain at most 2048 characters");
+        }
         let num = input
             .get("num")
             .and_then(Value::as_i64)
             .filter(|value| *value > 0)
-            .map(|value| value as usize);
-        let wait_seconds = get_f64(&input, "wait_seconds", 30.0);
+            .map(|value| value.clamp(1, MAX_TOOL_ITEMS) as usize);
+        let wait_seconds = get_f64(&input, "wait_seconds", 30.0).clamp(1.0, MAX_TOOL_WAIT_SECONDS);
         let result = TikTokPageRuntime::new(&self.page)
             .read_author(&author, wait_seconds, num)
             .await?;
@@ -570,13 +583,13 @@ impl Tool for PageStateTool {
         json!({
             "type": "object",
             "properties": {
-                "wait_seconds": { "type": "number", "default": 30, "minimum": 1 }
+                "wait_seconds": { "type": "number", "default": 30, "minimum": 1, "maximum": 330 }
             }
         })
     }
 
     async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
-        let wait_seconds = get_f64(&input, "wait_seconds", 30.0);
+        let wait_seconds = get_f64(&input, "wait_seconds", 30.0).clamp(1.0, MAX_TOOL_WAIT_SECONDS);
         let runtime = TikTokPageRuntime::new(&self.page);
         runtime.ensure_tiktok(true).await?;
         let result = runtime.wait_until_interactive(wait_seconds).await?;
@@ -598,6 +611,9 @@ fn string_list(value: &Value, key: &str) -> anyhow::Result<Vec<String>> {
         .collect();
     if values.is_empty() {
         anyhow::bail!("{key} must contain at least one id or URL");
+    }
+    if values.iter().any(|value| value.chars().count() > 2048) {
+        anyhow::bail!("{key} entries must contain at most 2048 characters");
     }
     Ok(values)
 }

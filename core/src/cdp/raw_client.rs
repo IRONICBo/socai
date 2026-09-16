@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -23,6 +25,7 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 pub struct RawCdpClient {
     tx: mpsc::Sender<CommandRequest>,
+    unhealthy: Arc<AtomicBool>,
 }
 
 struct CommandRequest {
@@ -64,7 +67,10 @@ impl RawCdpClient {
             .with_context(|| format!("failed to connect CDP websocket: {ws_url}"))?;
         let (tx, rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
         tokio::spawn(run_connection(ws, rx));
-        Ok(Self { tx })
+        Ok(Self {
+            tx,
+            unhealthy: Arc::new(AtomicBool::new(false)),
+        })
     }
 
     pub async fn execute(&self, method: impl Into<String>, params: Value) -> Result<Value> {
@@ -75,7 +81,7 @@ impl RawCdpClient {
     /// transport-health signal for recovery code; callers do not need to
     /// recognize the user-facing error strings returned by `execute`.
     pub(crate) fn is_closed(&self) -> bool {
-        self.tx.is_closed()
+        self.tx.is_closed() || self.unhealthy.load(Ordering::Acquire)
     }
 
     pub async fn execute_for_session(
@@ -96,21 +102,32 @@ impl RawCdpClient {
         timeout: Duration,
     ) -> Result<Value> {
         let method = method.into();
+        if self.unhealthy.load(Ordering::Acquire) {
+            anyhow::bail!("CDP transport is unhealthy after a command timeout: {method}");
+        }
         let (resp_tx, resp_rx) = oneshot::channel();
-        self.tx
-            .send(CommandRequest {
-                method: method.clone(),
-                params,
-                session_id: session_id.map(ToOwned::to_owned),
-                resp: resp_tx,
-            })
-            .await
-            .map_err(|_| anyhow!("CDP session is closed"))?;
-
-        let response = tokio::time::timeout(timeout, resp_rx)
-            .await
-            .map_err(|_| anyhow!("CDP command timed out: {method}"))?
-            .map_err(|_| anyhow!("CDP session closed while waiting for: {method}"))?;
+        let response = match tokio::time::timeout(timeout, async {
+            self.tx
+                .send(CommandRequest {
+                    method: method.clone(),
+                    params,
+                    session_id: session_id.map(ToOwned::to_owned),
+                    resp: resp_tx,
+                })
+                .await
+                .map_err(|_| anyhow!("CDP session is closed"))?;
+            resp_rx
+                .await
+                .map_err(|_| anyhow!("CDP session closed while waiting for: {method}"))
+        })
+        .await
+        {
+            Ok(response) => response?,
+            Err(_) => {
+                self.unhealthy.store(true, Ordering::Release);
+                return Err(anyhow!("CDP command timed out: {method}"));
+            }
+        };
         response.map_err(|err| anyhow!("CDP command failed ({method}): {err}"))
     }
 }
