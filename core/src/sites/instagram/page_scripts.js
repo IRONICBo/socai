@@ -71,6 +71,13 @@
     }
   }
 
+  function activePostIdentity() {
+    const live = postIdentity(location.href);
+    if (!live) return null;
+    const metadata = postIdentity(metaContent('og:url'));
+    return metadata && metadata.shortcode === live.shortcode ? metadata : live;
+  }
+
   function profileUsername(raw) {
     try {
       const parts = new URL(raw, location.href).pathname.split('/').filter(Boolean);
@@ -486,31 +493,69 @@
 
   function postMedia() {
     const output = [];
-    const seen = new Set();
+    const seen = new Map();
     const main = document.querySelector('main') || document;
-    const activeIdentity = postIdentity(location.href);
-    const ogImage = metaContent('og:image');
-    if (ogImage) {
-      seen.add(ogImage);
-      output.push({ type: 'image', url: ogImage, poster_url: '', alt: metaContent('og:title') });
+    const activeIdentity = activePostIdentity();
+    const containers = Array.from(main.querySelectorAll('article, [role="dialog"]'));
+    const container = containers.find((candidate) => Array.from(candidate.querySelectorAll(
+      'a[href*="/p/"], a[href*="/reel/"]',
+    )).some((link) => {
+      const identity = postIdentity(link.href || link.getAttribute('href'));
+      return identity && activeIdentity && identity.shortcode === activeIdentity.shortcode;
+    })) || (containers.length === 1 ? containers[0] : null);
+    function mediaKey(raw) {
+      try {
+        const url = new URL(raw);
+        return `${url.hostname}${url.pathname}`;
+      } catch (_) {
+        return '';
+      }
     }
-    for (const media of main.querySelectorAll('img[src], video')) {
-      const alt = cleanText(media.alt || '', 3000);
-      if (media.tagName === 'IMG' && /(profile picture|头像|foto del perfil|photo de profil)/i.test(alt)) continue;
-      const linkedPost = media.closest('a[href*="/p/"], a[href*="/reel/"]');
-      const linkedIdentity = linkedPost && postIdentity(linkedPost.href);
-      if (linkedIdentity && activeIdentity && linkedIdentity.shortcode !== activeIdentity.shortcode) continue;
-      const rawUrl = media.tagName === 'VIDEO'
-        ? (media.currentSrc || media.src || '')
-        : (media.currentSrc || media.src || '');
+    function append(type, rawUrl, rawPoster, alt) {
       const url = /^https:\/\//i.test(rawUrl) ? rawUrl : '';
-      const rawPoster = media.tagName === 'VIDEO' ? media.poster || '' : '';
       const poster = /^https:\/\//i.test(rawPoster) ? rawPoster : '';
-      const key = url || poster;
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      output.push({ type: media.tagName === 'VIDEO' ? 'video' : 'image', url, poster_url: poster, alt });
-      if (output.length >= 20) break;
+      const keys = [mediaKey(url), mediaKey(poster)].filter(Boolean);
+      if (!keys.length) return;
+      const duplicate = keys.map((key) => seen.get(key)).find((index) => index !== undefined);
+      const item = { type, url, poster_url: poster, alt: cleanText(alt || '', 3000) };
+      if (duplicate !== undefined) {
+        if (type === 'video' && output[duplicate].type === 'image') {
+          output[duplicate] = item;
+          keys.forEach((key) => seen.set(key, duplicate));
+        }
+        return;
+      }
+      const index = output.push(item) - 1;
+      keys.forEach((key) => seen.set(key, index));
+    }
+    if (container) {
+      for (const media of container.querySelectorAll('video, img[src]')) {
+        const alt = cleanText(media.alt || '', 3000);
+        if (media.tagName === 'IMG' && /(profile picture|头像|foto del perfil|photo de profil)/i.test(alt)) continue;
+        if (media.tagName === 'IMG' && (/\.gif(?:\?|$)/i.test(media.src) || /\/t51\.\d+-19\//i.test(media.src))) continue;
+        if (media.closest('a[href]') && !media.closest('a[href*="/p/"], a[href*="/reel/"]')) continue;
+        const linkedPost = media.closest('a[href*="/p/"], a[href*="/reel/"]');
+        const linkedIdentity = linkedPost && postIdentity(linkedPost.href);
+        if (linkedIdentity && activeIdentity && linkedIdentity.shortcode !== activeIdentity.shortcode) continue;
+        const rawUrl = media.currentSrc || media.src || '';
+        const rawPoster = media.tagName === 'VIDEO' ? media.poster || '' : '';
+        append(media.tagName === 'VIDEO' ? 'video' : 'image', rawUrl, rawPoster, alt);
+        if (output.length >= 20) break;
+      }
+    }
+    const ogImage = metaContent('og:image');
+    const metadataIdentity = postIdentity(metaContent('og:url'));
+    if (ogImage && output.length < 20 && metadataIdentity && activeIdentity &&
+      metadataIdentity.shortcode === activeIdentity.shortcode) {
+      append('image', ogImage, '', metaContent('og:title'));
+    }
+    if (activeIdentity && activeIdentity.kind === 'reel' && !output.some((item) => item.type === 'video')) {
+      const cover = output.find((item) => item.type === 'image');
+      if (cover) {
+        cover.type = 'video';
+        cover.poster_url = cover.url;
+        cover.url = '';
+      }
     }
     return output;
   }
@@ -587,8 +632,12 @@
   }
 
   function postDetail() {
-    const canonical = canonicalPageUrl();
-    const identity = postIdentity(canonical || location.href);
+    const identity = activePostIdentity();
+    const candidateUrl = canonicalPageUrl();
+    const candidateIdentity = postIdentity(candidateUrl);
+    const canonical = identity && candidateIdentity && identity.shortcode === candidateIdentity.shortcode
+      ? candidateUrl
+      : instagramUrl(location.href);
     const state = pageState();
     if (!identity) {
       return { ok: false, status: 'not_post', url: location.href, page_state: state };
