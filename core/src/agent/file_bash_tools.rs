@@ -175,6 +175,8 @@ const MAX_TEXT_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_READ_LIMIT: usize = 2000;
 const SHELL_OUTPUT_LIMIT: usize = 16_000;
 const SHELL_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn resolve_path(raw: &str) -> PathBuf {
     let trimmed = raw.trim();
@@ -574,11 +576,31 @@ fn shell_command(command: &str) -> tokio::process::Command {
 #[cfg(windows)]
 fn shell_command(command: &str) -> tokio::process::Command {
     let script = format!(
-        "$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n{command}"
+        "$socaiUtf8 = [System.Text.UTF8Encoding]::new($false)\n\
+         $OutputEncoding = $socaiUtf8\n\
+         try {{\n\
+             [Console]::OutputEncoding = $socaiUtf8\n\
+         }} catch {{\n\
+             $socaiStdout = [System.IO.StreamWriter]::new([Console]::OpenStandardOutput(), $socaiUtf8)\n\
+             $socaiStdout.AutoFlush = $true\n\
+             [Console]::SetOut($socaiStdout)\n\
+             $socaiStderr = [System.IO.StreamWriter]::new([Console]::OpenStandardError(), $socaiUtf8)\n\
+             $socaiStderr.AutoFlush = $true\n\
+             [Console]::SetError($socaiStderr)\n\
+         }}\n\
+         {command}"
     );
     let mut cmd = tokio::process::Command::new(shell_runtime_program());
     cmd.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
         .arg(script);
+    // The desktop binary has no console of its own, so Windows otherwise
+    // allocates a visible console for every PowerShell tool invocation. Match
+    // Codex's non-interactive Windows child-process behavior and keep stdout /
+    // stderr piped through `Command::output` without surfacing a terminal.
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    // `timeout` cancels the output future. Ensure cancellation also terminates
+    // the now-invisible PowerShell process instead of leaving it running.
+    cmd.kill_on_drop(true);
     cmd
 }
 
