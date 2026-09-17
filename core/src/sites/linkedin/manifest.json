@@ -13,24 +13,24 @@
       "returns": { "type": "object", "description": "Current LinkedIn page state." }
     },
     "searchState": {
-      "description": "Verify that LinkedIn reached the requested people or content search route and report its result state.",
+      "description": "Verify that LinkedIn reached the requested people, content, or company search route and report its result state.",
       "path": "page_scripts.js",
       "binding": "window.SocaiLinkedInPageScripts",
       "callable": "searchState",
       "args": {
         "query": { "type": "string", "required": false, "description": "Expected search keywords." },
-        "result_type": { "type": "string", "required": false, "description": "Expected result type: people, content, or all." }
+        "result_type": { "type": "string", "required": false, "description": "Expected result type: people, content, companies, or all." }
       },
       "returns": { "type": "object", "description": "Search route and result state." }
     },
     "searchResults": {
-      "description": "Extract visible LinkedIn people or content search results without opening or contacting them.",
+      "description": "Extract visible LinkedIn people, content, or company search results with canonical identity and preview assets.",
       "path": "page_scripts.js",
       "binding": "window.SocaiLinkedInPageScripts",
       "callable": "searchResults",
       "args": {
         "limit": { "type": "integer", "required": false, "description": "Maximum results to return." },
-        "result_type": { "type": "string", "required": false, "description": "Filter to people, content, or all." },
+        "result_type": { "type": "string", "required": false, "description": "Filter to people, content, companies, or all." },
         "viewport_only": { "type": "boolean", "required": false, "description": "Only include results intersecting the viewport." }
       },
       "returns": { "type": "array", "description": "Visible LinkedIn search results." }
@@ -47,15 +47,51 @@
       "returns": { "type": "object", "description": "Search scroll and result-count state." }
     },
     "profileDetail": {
-      "description": "Extract visible details from the active LinkedIn member profile for research and local greeting drafting.",
+      "description": "Extract visible profile identity, relationship labels, landing-page history, and avatar for research.",
       "path": "page_scripts.js",
       "binding": "window.SocaiLinkedInPageScripts",
       "callable": "profileDetail",
       "args": {},
       "returns": { "type": "object", "description": "Visible LinkedIn profile details or an explicit gate state." }
     },
+    "profileHistory": {
+      "description": "Extract complete visible work or education entries from a LinkedIn profile details route.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiLinkedInPageScripts",
+      "callable": "profileHistory",
+      "args": {},
+      "returns": { "type": "object", "description": "Work or education entries from /in/<id>/details/experience/ or /details/education/." }
+    },
+    "companyDetail": {
+      "description": "Extract the active LinkedIn company landing-page identity, logo, follower count, and employee range.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiLinkedInPageScripts",
+      "callable": "companyDetail",
+      "args": {},
+      "returns": { "type": "object", "description": "Visible LinkedIn company details or an explicit route state." }
+    },
+    "companyPeople": {
+      "description": "Extract profiles visibly listed in the company page's People you may know section without claiming they are employees.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiLinkedInPageScripts",
+      "callable": "companyPeople",
+      "args": {
+        "limit": { "type": "integer", "required": false, "description": "Maximum visible profile suggestions to return." }
+      },
+      "returns": { "type": "object", "description": "Explicit route/gate state, associated-member count, and visible profile suggestions with their source section." }
+    },
+    "relatedPeople": {
+      "description": "Extract profiles from explicitly labelled related-people sections on the active profile or company page.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiLinkedInPageScripts",
+      "callable": "relatedPeople",
+      "args": {
+        "limit": { "type": "integer", "required": false, "description": "Maximum visible related profiles to return." }
+      },
+      "returns": { "type": "object", "description": "Explicit route/gate state and visible related profiles with their source-section label." }
+    },
     "postDetail": {
-      "description": "Extract the active LinkedIn post, its author, canonical identity, and visible engagement metadata.",
+      "description": "Extract the active LinkedIn post, author, canonical identity, previewable media assets, and engagement metadata.",
       "path": "page_scripts.js",
       "binding": "window.SocaiLinkedInPageScripts",
       "callable": "postDetail",
