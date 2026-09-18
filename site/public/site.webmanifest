@@ -1,7 +1,7 @@
 {
   "name": "socai",
   "short_name": "socai",
-  "description": "socai is a Web Agent for RedNote research tasks.",
+  "description": "socai is a local Agent for research across RedNote, Douyin, TikTok, Instagram, and LinkedIn.",
   "start_url": "/",
   "scope": "/",
   "background_color": "#fafaf9",

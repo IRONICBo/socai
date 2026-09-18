@@ -17,10 +17,10 @@ const defaultHtmlLanguage =
 const messages = {
     en: {
         meta: {
-            title: "socai · Web Agent for RedNote research",
+            title: "socai · social media research Agent",
             description:
-                "socai is a Web Agent for RedNote research tasks. connect your chrome session, run focused browser tasks, and download the app for macOS or Windows.",
-            socialImageAlt: "socai app preview with a download prompt",
+                "socai is a local Agent for research across RedNote, Douyin, TikTok, Instagram, and LinkedIn through your signed-in Chrome.",
+            socialImageAlt: "socai social media research Agent preview",
         },
         nav: {
             primaryAria: "primary navigation",
@@ -33,9 +33,9 @@ const messages = {
             releaseLabel: "release version {version}",
         },
         hero: {
-            title: "a Web Agent for RedNote.",
+            title: "a social media research Agent.",
             subtitle:
-                "socai connects to your RedNote account via chrome CDP, and finishes tasks for you by simulating humanlike click and type events",
+                "connect your signed-in chrome and let socai research RedNote, Douyin, TikTok, Instagram, and LinkedIn through real page interactions.",
             actionsAria: "download and source",
             download: "download for macOS",
             downloadWindows: "download for Windows",
@@ -56,9 +56,9 @@ const messages = {
             newTask: "new task",
             recent: "recent",
             history: "view history",
-            recentCoffee: "chengdu pour-over coffee shops",
-            recentCamping: "RedNote camping gear starter guide · read 3 posts",
-            recentWalk: "shanghai weekend city walk routes",
+            recentCoffee: "LinkedIn AI product leaders · 12 profiles",
+            recentCamping: "Instagram vintage shop reels · 8 posts",
+            recentWalk: "TikTok + Douyin city walks · 24 videos",
             completedNow: "completed · 14:02",
             completedEarlier: "completed · 11:38",
             completedYesterday: "completed · yesterday",
@@ -70,18 +70,18 @@ const messages = {
             contact: "contact",
         },
         prompts: [
-            "find good pour-over coffee shops in chengdu. include address, price per person, signature beans, and organize it as a table.",
-            "analyze recent popular shanghai weekend city walk routes on RedNote, grouped by who each route is best for.",
-            "research 20 beginner camping gear posts on RedNote and summarize the mistakes new buyers make most often.",
-            "find 10 high-quality posts about tokyo vintage shops. organize shop name, area, and why people recommend it.",
+            "compare how people discuss sugar-free tea on RedNote, Douyin, and TikTok. cite posts, comments, and replies.",
+            "find high-quality Instagram reels about tokyo vintage shops and summarize why people recommend each shop.",
+            "find LinkedIn people working on AI products at consumer companies and summarize their experience.",
+            "research beginner camping gear across social platforms and organize the mistakes new buyers make most often.",
         ],
     },
     zh: {
         meta: {
-            title: "socai · 小红书调研 Agent",
+            title: "socai · 社交媒体调研 Agent",
             description:
-                "socai 是面向小红书调研任务的 Web Agent。连接你的 chrome 会话，执行聚焦的浏览器任务，支持 macOS 和 Windows。",
-            socialImageAlt: "socai app 下载界面预览",
+                "socai 是面向小红书、抖音、TikTok、Instagram 和 LinkedIn 的本地社交媒体调研 Agent，通过已登录的 Chrome 完成真实页面研究。",
+            socialImageAlt: "socai 社交媒体调研 Agent 界面预览",
         },
         nav: {
             primaryAria: "主导航",
@@ -94,9 +94,9 @@ const messages = {
             releaseLabel: "发布版本 {version}",
         },
         hero: {
-            title: "让 Agent 完成你的小红书任务",
+            title: "用 Agent 调研社交媒体",
             subtitle:
-                "socai 通过 chrome CDP 连接你的小红书账号，模拟真实点击输入，替你完成搜索调研任务。",
+                "连接你已登录的 Chrome，让 socai 通过真实页面交互调研小红书、抖音、TikTok、Instagram 和 LinkedIn。",
             actionsAria: "下载和源码",
             download: "下载 macOS 版",
             downloadWindows: "下载 Windows 版",
@@ -117,9 +117,9 @@ const messages = {
             newTask: "新任务",
             recent: "最近",
             history: "查看历史",
-            recentCoffee: "成都好喝的手冲咖啡馆",
-            recentCamping: "小红书露营装备入门 · 读 3 篇",
-            recentWalk: "上海周末 city walk 路线",
+            recentCoffee: "LinkedIn AI 产品负责人 · 12 份档案",
+            recentCamping: "Instagram 东京中古店 Reels · 8 篇",
+            recentWalk: "TikTok + 抖音 city walk · 24 个视频",
             completedNow: "已完成 · 14:02",
             completedEarlier: "已完成 · 11:38",
             completedYesterday: "已完成 · 昨天",
@@ -131,10 +131,10 @@ const messages = {
             contact: "联系",
         },
         prompts: [
-            "找成都好喝的手冲咖啡馆，每家给出地址、人均、特色豆，整理成表格。",
-            "分析小红书上最近热门的上海周末 city walk 路线，按适合人群分类。",
-            "帮我调研 20 个小红书露营装备入门贴，总结新手最常买错的东西。",
-            "找 10 篇关于东京中古店的高质量笔记，整理店名、区域和推荐理由。",
+            "对比小红书、抖音和 TikTok 上关于无糖茶的讨论，引用具体帖子、评论和回复。",
+            "调研 Instagram 上关于东京中古店的高质量 Reels，总结每家店被推荐的原因。",
+            "在 LinkedIn 搜索消费行业的 AI 产品负责人，并整理他们的相关经历。",
+            "跨平台调研露营入门装备，总结新手最常买错的东西。",
         ],
     },
 };
