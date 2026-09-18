@@ -8,11 +8,11 @@
 
 **English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md)
 
-**A local web agent optimized for Xiaohongshu (RedNote) research**
+**A local social media agent for cross-platform research**
 
-Connect your signed-in Chrome session and let an agent read posts, comments, and media for content research, competitive analysis, and consumer insight work.
+Connect your signed-in Chrome session and let an agent research RedNote, Douyin, TikTok, Instagram, and LinkedIn through real page interactions.
 
-[Website](https://socai.io/?utm_source=github&utm_medium=readme) · [Download](#desktop-app) · [Quick start](#quick-start) · [Command reference](#xiaohongshu-command-reference) · [Development](DEVELOPMENT.md)
+[Website](https://socai.io/?utm_source=github&utm_medium=readme) · [Download](#desktop-app) · [Quick start](#quick-start) · [Platform reference](#supported-platforms) · [Development](DEVELOPMENT.md)
 
 [![release](https://img.shields.io/github/v/release/socai-io/socai?style=flat-square&color=blue&label=release)](https://github.com/socai-io/socai/releases/latest)
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-555?style=flat-square)](#desktop-app)
@@ -28,14 +28,14 @@ Connect your signed-in Chrome session and let an agent read posts, comments, and
 
 ## Overview
 
-socai is built for research tasks that require understanding Xiaohongshu content. It connects to a real browser through the Chrome DevTools Protocol (CDP), reuses an existing login session, and performs searches, opens posts, expands comments, and visits author profiles through page interactions. Results are saved as structured data and local artifacts.
+socai is a local social media agent platform for research across RedNote, Douyin, TikTok, Instagram, and LinkedIn. It connects to a real browser through the Chrome DevTools Protocol (CDP), reuses existing login sessions, and performs searches, opens posts, expands comments and replies, and reads author, profile, or company pages through normal page interactions. Results are saved as structured data and local artifacts.
 
 Typical tasks include:
 
 - tracking emerging topics, emotions, and language within a category
 - reading posts and comment threads to identify needs, concerns, and decision language
-- comparing how brands, products, stores, or campaigns are discussed
-- studying an account's content direction, popular posts, and audience response
+- comparing how brands, products, stores, or campaigns are discussed across platforms
+- studying creators, professionals, companies, content direction, popular posts, and audience response
 - downloading images and videos, then adding OCR and video-transcript evidence
 
 The current product focuses on reading and research. It does not provide publishing, liking, saving, or commenting actions.
@@ -49,7 +49,7 @@ https://github.com/user-attachments/assets/8aebcded-f365-4f12-b9c4-102cc1fa964d
 | Real-browser execution | Connects to your Chrome session and follows page interaction paths without depending on reverse-engineered APIs or high-volume batch requests. |
 | Post and comment reading | Collects titles, bodies, authors, engagement data, comments, and replies. |
 | Multimodal understanding | Downloads post images and videos, runs local image OCR, and supports video speech transcription. |
-| Research filters and sampling | Uses Xiaohongshu page filters for publish time, post type, sorting, search scope, and distance. |
+| Cross-platform research | Uses platform-owned search, profile, post, comment, reply, and lazy-loading workflows across supported sites. |
 | Evidence and artifact retention | Keeps structured results, media manifests, and task deliverables for review and continued analysis. |
 | Three user interfaces | Shares one Rust core across the desktop app, command-line interface, and terminal interface. |
 | Agent-friendly output | Returns structured JSON that Claude Code, Codex, and other agents can call directly. |
@@ -65,7 +65,7 @@ Use the desktop app to enter research tasks without setting up a command-line en
 
 After installation, follow the in-app steps to connect Chrome and enter a task such as:
 
-> Research high-engagement Xiaohongshu posts about sugar-free tea from the past month. Focus on what users care about when choosing a brand, and cite specific posts and comments.
+> Compare how people discuss sugar-free tea on RedNote, Douyin, and Instagram. Identify recurring purchase criteria and cite specific posts, videos, comments, and replies.
 
 The first connection to your existing Chrome requires enabling remote debugging and confirming the browser permission prompt. See the [Connect Chrome guide](https://socai.io/connect).
 
@@ -89,11 +89,15 @@ $installer = Join-Path $env:TEMP 'socai-install.ps1'; Invoke-WebRequest -UseBasi
 
 The installers download and verify the release archive, install socai at `~/.socai/bin/socai` on macOS or `%USERPROFILE%\.socai\bin\socai.exe` on Windows, and configure or explain the PATH update.
 
-Run your first Xiaohongshu search:
+Run a structured platform search:
 
 ```bash
 socai xhs search "beginner camping gear mistakes" --num-notes 10 --num-comments 8 --pretty
+socai dy search "beginner camping gear" --num 20
+socai tiktok search "beginner camping gear" --num 20 --pretty
 ```
+
+Run `socai` without a subcommand to ask the agent for cross-platform research, including Instagram profiles, posts, reels and comments or LinkedIn people, companies, posts and professional experience.
 
 If a prebuilt binary is unavailable for your platform, or you need a source build for development, use Cargo:
 
@@ -120,14 +124,28 @@ socai
 | Interface | Best for | Start with |
 | --- | --- | --- |
 | Desktop app | Natural-language tasks, task history, and artifact preview or download | Install the macOS or Windows app |
-| CLI | Agent calls, scripts, and structured JSON | Run `socai xhs ...` |
+| CLI | Agent calls, scripts, and structured JSON | Run `socai xhs ...`, `socai dy ...`, or `socai tiktok ...` |
 | Terminal interface | Manually running consecutive tasks in a terminal | Run `socai` |
 
 All three interfaces share the same browser connection, site capabilities, and run-record core.
 
-## Xiaohongshu command reference
+## Supported platforms
 
-### Search and read posts
+| Platform | Research capabilities | Access |
+| --- | --- | --- |
+| RedNote (Xiaohongshu) | Search, authors, posts, comments and replies, media download, OCR, and transcription | Agent and structured CLI |
+| Douyin | Search, video details, authors, comments and replies, and media artifacts | Agent and structured CLI |
+| TikTok | Search, video details, author profiles, comments and replies, and video download | Agent and structured CLI |
+| Instagram | Keyword search, profiles, posts, reels, comments and replies, and playable video download | Agent workflows |
+| LinkedIn | People, company, and content search; profiles, experience, relationships, posts, and comments | Agent workflows |
+
+All integrations are read-only. socai does not follow, connect, publish, like, react, comment, reply, or send messages on your behalf.
+
+## Platform command reference
+
+### RedNote (Xiaohongshu)
+
+#### Search and read posts
 
 ```bash
 socai xhs search "content marketing ideas" \
@@ -142,7 +160,7 @@ socai xhs search "content marketing ideas" \
 
 `search` opens result posts and reads their bodies and comments. Add `--preview` to return only result-card metadata such as titles, covers, and engagement counts without opening post details.
 
-### Read an author and their posts
+#### Read an author and their posts
 
 ```bash
 socai xhs author <author_id> --num-notes 10 --num-comments 8
@@ -154,7 +172,7 @@ Return only the author and post-card summaries:
 socai xhs author <author_id> --num-notes 20 --preview
 ```
 
-### Read selected posts again
+#### Read selected posts again
 
 Use the post IDs and `xsec_token` values returned by `search` or `author`:
 
@@ -165,7 +183,7 @@ socai xhs get-notes \
   --num-comments 20
 ```
 
-### Common options
+#### Common options
 
 | Option | Purpose |
 | --- | --- |
@@ -175,7 +193,7 @@ socai xhs get-notes \
 | `--download-media` | Download images and videos from opened posts and record local paths. |
 | `--ocr` | Run local OCR on post images or a video post's cover. |
 | `--transcribe-audio` | Download opened videos and transcribe speech; requires signing in and selecting socai agent. |
-| `--filter <group=option>` | Apply a Xiaohongshu search-page filter; repeat to combine filters. |
+| `--filter <group=option>` | Apply a RedNote search-page filter; repeat to combine filters. |
 | `--pretty` | Pretty-print the final JSON result. |
 | `--debug-snapshot` | Save page DOM, accessibility trees, and screenshots for development diagnostics. |
 
@@ -189,7 +207,7 @@ Available filter groups and UI values:
 | `search_scope` | 不限, 已看过, 未看过, 已关注 |
 | `distance` | 不限, 同城, 附近 |
 
-Filter values mirror the Xiaohongshu web interface and should be passed as shown. Multiple filters can be combined:
+Filter values mirror the RedNote web interface and should be passed as shown. Multiple filters can be combined:
 
 ```bash
 socai xhs search "Shanghai weekend activities" \
@@ -198,13 +216,22 @@ socai xhs search "Shanghai weekend activities" \
   --filter sort=最新
 ```
 
+### Douyin and TikTok
+
+```bash
+socai dy search "coffee" --num 30
+socai tiktok search "coffee" --num 30 --pretty
+```
+
+Use `socai dy --help` or `socai tiktok --help` for video-detail, author, comment, media-download, and diagnostic commands.
+
 ## Browser and login modes
 
 socai supports four Chrome profile modes:
 
 | Mode | Best for | Login behavior |
 | --- | --- | --- |
-| `existing` | Everyday use; the default | Reuses your existing Chrome and Xiaohongshu login |
+| `existing` | Everyday use; the default | Reuses your existing Chrome and supported-platform logins |
 | `managed` | Isolating research from everyday browsing | Uses `~/.socai/chrome-profile`; sign in once |
 | `auto` | Automatic connection selection | Tries the managed profile first, then falls back to existing Chrome |
 | `remote` | Testing a hosted cloud browser | Beta socai pro capability with session limits |
@@ -221,7 +248,7 @@ socai stop
 Set a custom managed profile directory:
 
 ```bash
-socai config set chrome.profile_dir ~/.socai/profiles/xhs-research
+socai config set chrome.profile_dir ~/.socai/profiles/social-research
 ```
 
 Switch back to your existing Chrome:
@@ -272,16 +299,6 @@ socai config set runs.dir (Join-Path $PWD 'socai-runs')
 
 Relative values passed to `runs.dir` are stored as absolute paths from the current directory. `SOCAI_RUNS_DIR` takes precedence when set.
 
-## Douyin search
-
-The CLI also provides basic Douyin search:
-
-```bash
-socai dy search "coffee" --num 30
-```
-
-Xiaohongshu research remains the primary product focus. Run `socai dy --help` for the current Douyin command surface.
-
 ## Extending and developing socai
 
 To add another site or custom capability, follow the [site extension guide](core/src/sites/creation/SKILL.md). It covers requirement confirmation, site capability design, and implementation steps for coding agents such as Claude Code, Codex, and Cursor.
@@ -290,7 +307,7 @@ Local development, build instructions, repository conventions, and the reference
 
 ## Community
 
-<img src="docs/assets/wechat-group-qr.jpg" alt="socai Xiaohongshu research WeChat group QR code" width="280">
+<img src="docs/assets/wechat-group-qr.jpg" alt="socai social media research WeChat group QR code" width="280">
 
 Feedback about product usage, research workflows, and feature ideas is welcome. If socai is useful to you, consider starring the repository to support its continued development.
 
