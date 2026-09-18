@@ -11,6 +11,7 @@ use crate::agent::tool::ToolProgressSender;
 use crate::agent::{Backend as LlmProvider, Tool, ToolContext, ToolResult};
 use crate::cdp::PageSession;
 use crate::media::MediaProcessor;
+use crate::sites::post_archive::persist_site_tool_result;
 use crate::sites::registry::{
     required_string, ArgKind, BoxFuture, CommandArg, NativeSiteAdapter, SiteCommand, SlowWhen,
 };
@@ -362,7 +363,7 @@ impl Tool for SearchTool {
         })
     }
 
-    async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let query = required_string(&input, "query")?;
         if query.chars().count() > 512 {
             anyhow::bail!("query must contain at most 512 characters");
@@ -372,6 +373,7 @@ impl Tool for SearchTool {
         let result = TikTokPageRuntime::new(&self.page)
             .search_videos(&query, wait_seconds, num)
             .await?;
+        persist_site_tool_result(ctx, "tiktok", "search", &result, None);
         Ok(json_result(&result))
     }
 }
@@ -488,12 +490,14 @@ impl Tool for GetVideosTool {
             .iter()
             .filter(|item| item.get("ok").and_then(Value::as_bool) != Some(true))
             .count();
-        Ok(json_result(&json!({
+        let payload = json!({
             "ok": failures == 0,
             "count": results.len(),
             "failures": failures,
             "videos": results,
-        })))
+        });
+        persist_site_tool_result(ctx, "tiktok", "get_videos", &payload, None);
+        Ok(json_result(&payload))
     }
 }
 
@@ -547,7 +551,7 @@ impl Tool for AuthorScanTool {
         })
     }
 
-    async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let author = required_string(&input, "author")?;
         if author.chars().count() > 2048 {
             anyhow::bail!("author must contain at most 2048 characters");
@@ -561,6 +565,7 @@ impl Tool for AuthorScanTool {
         let result = TikTokPageRuntime::new(&self.page)
             .read_author(&author, wait_seconds, num)
             .await?;
+        persist_site_tool_result(ctx, "tiktok", "author_scan", &result, None);
         Ok(json_result(&result))
     }
 }

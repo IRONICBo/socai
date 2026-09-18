@@ -13,7 +13,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -207,6 +207,7 @@ pub struct ToolContext {
     pub enabled_sites: Arc<Mutex<BTreeSet<String>>>,
     progress: Option<ToolProgressSender>,
     counters: Arc<Mutex<Counters>>,
+    run_artifact_counter: Arc<Mutex<u32>>,
     /// Notes the agent has already processed at a given level. Used by
     /// macros like `search` to short-circuit repeated reads of the
     /// same note. Keyed by note id; value is the processed level
@@ -235,7 +236,6 @@ pub struct ToolContext {
 #[derive(Default)]
 struct Counters {
     screenshot: u32,
-    artifact: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,6 +291,7 @@ impl ToolContext {
             enabled_sites: Arc::new(Mutex::new(BTreeSet::new())),
             progress: None,
             counters: Arc::new(Mutex::new(Counters::default())),
+            run_artifact_counter: Arc::new(Mutex::new(0)),
             processed_notes: Arc::new(Mutex::new(BTreeMap::new())),
             search_note_ids: Arc::new(Mutex::new(Vec::new())),
             notes_seen: Arc::new(Mutex::new(Vec::new())),
@@ -581,12 +582,22 @@ impl ToolContext {
 
     /// Next artifact path under `<run_dir>/<subdir>/NNN_<label><suffix>`.
     pub fn next_artifact_path(&self, label: &str, suffix: &str, subdir: &str) -> PathBuf {
-        let mut guard = self.counters.lock().expect("poisoned");
-        guard.artifact += 1;
+        let mut counter = self.run_artifact_counter.lock().expect("poisoned");
+        *counter += 1;
         let label = sanitize_label(label, "artifact");
-        let dir = self.output_dir().join(subdir);
+        let suffix = sanitize_artifact_suffix(suffix);
+        let mut dir = self.run_dir.clone();
+        for component in Path::new(subdir).components() {
+            if let Component::Normal(segment) = component {
+                let segment = sanitize_label(&segment.to_string_lossy(), "artifacts");
+                dir.push(segment);
+            }
+        }
+        if dir == self.run_dir {
+            dir.push("artifacts");
+        }
         let _ = std::fs::create_dir_all(&dir);
-        dir.join(format!("{:03}_{label}{suffix}", guard.artifact))
+        dir.join(format!("{:03}_{label}{suffix}", *counter))
     }
 
     /// Register an existing on-disk artifact with the run-state registry.
@@ -689,6 +700,24 @@ fn sanitize_label(label: &str, fallback: &str) -> String {
         fallback.to_string()
     } else {
         trimmed
+    }
+}
+
+fn sanitize_artifact_suffix(suffix: &str) -> String {
+    let suffix: String = suffix
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if suffix.is_empty() {
+        ".bin".to_string()
+    } else {
+        suffix
     }
 }
 

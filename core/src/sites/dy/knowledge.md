@@ -20,6 +20,16 @@
   cards. The extractor filters obvious live cards and keeps cards with video
   signals; fields absent from the search card, such as comments/shares, are
   returned as empty strings.
+- For a selected work, call `videoDetail` before `comments`. The generic host
+  automatically scrolls the comment panel, expands collapsed replies,
+  deduplicates, and returns the accumulated set up to `limit` (100 by default).
+  Native `get_videos --num-comments` performs the same bounded loop for
+  CLI/agent callers (up to 100 comments).
+- `videoCards` automatically collects lazy-scroll cards up to `limit`.
+  `videoCards`, `videoDetail`, accumulated comments, native search cards, and `get_videos`
+  results are archived as desktop post cards and downloadable JSON artifacts.
+  Cite a saved work with archive id `dy:<video_id>` when `note:` citations are
+  requested by the host.
 - When a tool explicitly returns `recovery.action:"browser_script"`, follow the
   system-level local browser self-repair protocol, save a verified override for
   that exact tool, retry it once, and continue the task. Do not use browser

@@ -10,6 +10,7 @@ use crate::agent::{Backend as LlmProvider, Tool, ToolContext, ToolResult};
 use crate::cdp::PageSession;
 use crate::media::MediaProcessor;
 use crate::sites::dy::DouyinPageRuntime;
+use crate::sites::post_archive::persist_site_tool_result;
 use crate::sites::registry::{
     required_string, ArgKind, BoxFuture, CommandArg, NativeSiteAdapter, SiteCommand, SlowWhen,
 };
@@ -437,6 +438,7 @@ impl Tool for GetVideosTool {
             "failures": failures,
             "videos": results,
         });
+        persist_site_tool_result(ctx, "dy", "get_videos", &payload, None);
         Ok(json_result(&payload))
     }
 }
@@ -491,7 +493,7 @@ impl Tool for AuthorScanTool {
         })
     }
 
-    async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let author = required_string(&input, "author")?;
         let num = input
             .get("num")
@@ -501,6 +503,7 @@ impl Tool for AuthorScanTool {
         let wait_seconds = get_f64(&input, "wait_seconds", 30.0).clamp(1.0, 330.0);
         let runtime = DouyinPageRuntime::new(&self.page);
         let result = runtime.read_author(&author, wait_seconds, num).await?;
+        persist_site_tool_result(ctx, "dy", "author_scan", &result, None);
         Ok(json_result(&result))
     }
 }
@@ -543,7 +546,7 @@ impl Tool for SearchTool {
         })
     }
 
-    async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let query = required_string(&input, "query")?;
         let wait_seconds = get_f64(&input, "wait_seconds", 330.0).clamp(1.0, 330.0);
         let num_videos = get_i64(&input, "num", 10).clamp(1, 100) as usize;
@@ -551,6 +554,7 @@ impl Tool for SearchTool {
         let value = runtime
             .search_videos(&query, wait_seconds, num_videos)
             .await?;
+        persist_site_tool_result(ctx, "dy", "search", &value, None);
         Ok(json_result(&value))
     }
 }

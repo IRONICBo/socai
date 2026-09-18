@@ -1,6 +1,7 @@
 pub mod browser_script;
 pub mod dy;
 pub mod learning;
+pub mod post_archive;
 pub mod registry;
 pub mod runner;
 pub mod tiktok;

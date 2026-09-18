@@ -20,8 +20,8 @@ use socai_core::runtime::{
     BrowserLease, BrowserStatus, ChromeConnectOptions, ChromeProfile, RuntimePageSession,
     SocaiRuntime,
 };
-use socai_core::sites::xhs::{XhsHistoryStore, XhsPageRuntime};
-use socai_core::sites::{find_native_site_adapter, NativeSiteAdapter};
+use socai_core::sites::xhs::XhsHistoryStore;
+use socai_core::sites::{find_native_site_adapter, site_learning_tools, NativeSiteAdapter};
 use socai_core::telemetry::tool_call::{
     is_site_tool_result, summarize_site_tool_result, summarize_tool_args,
 };
@@ -37,7 +37,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 const TAURI_AGENT_PREAMBLE: &str =
     "You are running inside the socai desktop app as a conversational, multi-turn agent. \
-     Besides the Xiaohongshu site tools you have unrestricted local environment tools: \
+     Besides the site and browser tools you have unrestricted local environment tools: \
      `read_file` (read text, or view image/screenshot files) and `shell` (PowerShell on \
      Windows, `sh` on macOS/Linux; use absolute paths to work outside the current run \
      directory). Only access files relevant to the user's request. Maintain continuity \
@@ -49,14 +49,24 @@ const TAURI_AGENT_PREAMBLE: &str =
 // app renders `note:` links (as rich note pills); in the TUI's plain-markdown
 // answer they would be dead links.
 const TAURI_CITATION_RULES: &str = "\n\n## Citing notes in the final answer (required)\n\
-    The app renders note citations as rich note cards. In your final answer, \
-    every time you mention a specific note you read (including cached notes \
+    The app renders social-post citations as rich cards. In your final answer, \
+    every time you mention a specific post you read (including cached posts \
     returned by scans), cite it inline as a markdown link — \
-    [<note title>](note:<note_id>) — using the exact note_id from tool results.\n\
+    [<post title>](note:<note_id>) — using the exact archived note_id.\n\
     Example: 推荐 [湾区遛娃|坐小火车喂羊驼](note:65f0a1b2000000000c030d1e) 的路线。\n\
-    - Link text is the note's title; drop any square brackets inside it.\n\
-    - For notes only seen as preview cards and never read, link their url instead.\n\
-    - Cite each note where it is discussed, not in a separate list at the end.";
+    - Link text is the post's title; drop any square brackets inside it.\n\
+    - For results that are not archived post cards, link their canonical URL instead.\n\
+    - Cite each post where it is discussed, not in a separate list at the end.";
+
+const TAURI_SITE_ROUTING_RULES: &str = "\n\n## Browser routing\n\
+    A new conversation starts on a blank tab. Do not navigate to Xiaohongshu or \
+    any other site until the user's request requires that platform. For LinkedIn, \
+    Instagram, Douyin, or TikTok, use navigate_site, read the returned site skill, \
+    and follow that platform's tools and workflow. The Xiaohongshu playbook applies \
+    only when the requested page is Xiaohongshu. Browser-tool JSON is internal \
+    evidence: never paste raw JSON into the final answer. Present concise findings \
+    with note citations; the desktop renders archived posts as grouped cards. JSON \
+    remains available only as a downloadable evidence artifact.";
 
 const TAURI_ARTIFACT_RULES: &str = "\n\n## Deliverable files\n\
     After you create and verify any file the user should download, call \
@@ -67,6 +77,7 @@ const TAURI_ARTIFACT_RULES: &str = "\n\n## Deliverable files\n\
 /// Site the desktop agent runner drives. Becomes a runtime choice once the
 /// app grows a site switcher.
 const APP_SITE_ID: &str = "xhs";
+const APP_INITIAL_URL: &str = "about:blank";
 
 fn app_site() -> Result<&'static NativeSiteAdapter> {
     find_native_site_adapter(APP_SITE_ID)
@@ -828,25 +839,6 @@ async fn run_task_preflight(provider: Option<&str>, model: Option<&str>) -> Resu
     Ok(())
 }
 
-async fn run_session_login_preflight(page: &RuntimePageSession) -> Result<(), String> {
-    let login_error_code = if page.is_remote_browser() {
-        "preflight_xhs_session"
-    } else {
-        "preflight_xhs_login"
-    };
-    let login = XhsPageRuntime::new(page)
-        .login_gate(true)
-        .await
-        .map_err(|error| task_preflight_error(login_error_code, format!("{error:#}")))?;
-    if login == socai_core::sites::xhs::page::LoginGate::Required {
-        return Err(task_preflight_error(
-            login_error_code,
-            "Xiaohongshu login is required in this conversation's browser session",
-        ));
-    }
-    Ok(())
-}
-
 struct DesktopBrowserRecovery {
     app: AppHandle,
     registry: AgentTaskRegistry,
@@ -860,6 +852,7 @@ struct DesktopBrowserRecovery {
     home_url: &'static str,
     browser_options: ChromeConnectOptions,
     browser_tools: HashSet<String>,
+    last_page_url: tokio::sync::RwLock<String>,
 }
 
 impl std::fmt::Debug for DesktopBrowserRecovery {
@@ -932,6 +925,11 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
             return ToolRecoveryOutcome::NotNeeded;
         }
         let Some(disconnect_reason) = self.disconnect_reason().await else {
+            if let Ok(info) = self.page.page_info().await {
+                if let Some(url) = info.get("url").and_then(Value::as_str) {
+                    *self.last_page_url.write().await = url.to_string();
+                }
+            }
             return ToolRecoveryOutcome::NotNeeded;
         };
         if retry_number > 0 {
@@ -965,13 +963,30 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
         )
         .await;
         let started = std::time::Instant::now();
+        let recovery_url = match tool_name {
+            "read_site_skills" | "run_site_browser_tool" => self.last_page_url.read().await.clone(),
+            _ => self.home_url.to_string(),
+        };
+        if recovery_url.is_empty() {
+            let reason = format!(
+                "browser connection lost while running {tool_name}, and the active page URL is unavailable"
+            );
+            self.clear_task_target().await;
+            self.emit_recovery_event(
+                "degraded",
+                "browser recovery failed; summarizing the collected results".into(),
+            )
+            .await;
+            self.capture_recovery("failed", &reason, started.elapsed().as_millis() as u64);
+            return ToolRecoveryOutcome::Degraded { reason };
+        }
         let replacement_guard = self
             .runtime
             .recover_session_site_page_with_browser_options(
                 &self.lease,
                 &self.session_id,
                 self.site_id,
-                self.home_url,
+                &recovery_url,
                 self.browser_options.clone(),
                 &self.page,
             )
@@ -979,10 +994,7 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
             .map_err(|error| format!("{error:#}"));
         let recovery = match replacement_guard {
             Ok(replacement_guard) => {
-                if let Err(error) = run_session_login_preflight(&self.page).await {
-                    replacement_guard.discard().await;
-                    Err(error)
-                } else if bind_task_page(
+                if bind_task_page(
                     &self.app,
                     &self.registry,
                     &self.task_id,
@@ -1126,7 +1138,7 @@ async fn acquire_session_page(
             lease,
             session_id,
             site.id,
-            site.home_url,
+            APP_INITIAL_URL,
             options.clone(),
         )
         .await
@@ -1321,7 +1333,11 @@ pub async fn agent_task_notes(
             if !by_id.contains_key(&id) {
                 order.push(id.clone());
             }
-            by_id.insert(id, note);
+            if let Some(existing) = by_id.get_mut(&id) {
+                socai_core::sites::post_archive::merge_post_record(existing, &note);
+            } else {
+                by_id.insert(id, note);
+            }
         }
     }
     Ok(order
@@ -2643,24 +2659,6 @@ async fn run_agent_task_background(
             return;
         }
         page_guard.disarm();
-        // Every conversation owns its own tab. Validate login on that exact
-        // page before the task is marked running or sends its first LLM request.
-        if let Err(error) = run_session_login_preflight(&page).await {
-            drop(activity);
-            drop(lease);
-            drop(permit);
-            fail_task_before_run(
-                &app,
-                &registry,
-                &telemetry,
-                &task_id,
-                provider.as_deref(),
-                model.as_deref(),
-                error,
-            )
-            .await;
-            return;
-        }
         break (permit, Arc::new(lease), activity, page, browser_options);
     };
 
@@ -2993,33 +2991,17 @@ async fn run_agent_task_on_session_page(
     let site = app_site()?;
     let session_id =
         session_id.ok_or_else(|| anyhow::anyhow!("task has no conversation session"))?;
-    // The tab was opened and bound to this task during admission. The browser
-    // lease and activity guard that keep it alive are held by the caller.
-    // Login is checked in the conversation's own tab rather than in a shared
-    // site tab, so a run never opens a second target just to look at the gate.
-    // Both outcomes carry a code the UI translates — a hosted browser's shared
-    // login is socai-operated, so its message differs from the local one.
-    let login_error_code = if page.is_remote_browser() {
-        "preflight_xhs_session"
-    } else {
-        "preflight_xhs_login"
-    };
-    let login = XhsPageRuntime::new(&page)
-        .login_gate(true)
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!(task_preflight_error(login_error_code, format!("{error:#}")))
-        })?;
-    if login == socai_core::sites::xhs::page::LoginGate::Required {
-        anyhow::bail!(task_preflight_error(
-            login_error_code,
-            "Xiaohongshu login is required in this conversation's Chrome tab",
-        ));
-    }
     let outcome = async {
         let agent_tools = site.default_agent_tools.unwrap_or(site.agent_tools);
         let mut tools = agent_tools(page.clone(), llm_provider.clone()).await?;
+        tools.extend(site_learning_tools(page.clone()));
         let browser_tools = tools.iter().map(|tool| tool.name().to_string()).collect();
+        let last_page_url = page
+            .page_info()
+            .await
+            .ok()
+            .and_then(|info| info.get("url").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_default();
         let tool_failure_recovery = registry.clone().map(|registry| {
             Arc::new(DesktopBrowserRecovery {
                 app: app.clone(),
@@ -3034,6 +3016,7 @@ async fn run_agent_task_on_session_page(
                 home_url: site.home_url,
                 browser_options: browser_options.clone(),
                 browser_tools,
+                last_page_url: tokio::sync::RwLock::new(last_page_url),
             }) as SharedToolFailureRecovery
         });
         tools.extend(desktop_agent_tools());
@@ -3055,8 +3038,9 @@ async fn run_agent_task_on_session_page(
         let preamble = format!("{TAURI_AGENT_PREAMBLE}\n\n{context_note}");
         let config = AgentRunConfig {
             extra_instructions: format!(
-                "{}{}{}",
+                "{}{}{}{}",
                 agent_instructions(&preamble),
+                TAURI_SITE_ROUTING_RULES,
                 TAURI_CITATION_RULES,
                 TAURI_ARTIFACT_RULES
             ),

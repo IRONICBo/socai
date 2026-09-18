@@ -617,31 +617,83 @@
     };
   }
 
+  function commentLevel(node) {
+    let depth = 0;
+    for (let parent = node.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+      if (parent.matches('ul, ol, [role="list"], [class*="reply"], [class*="Reply"]')) depth += 1;
+    }
+    const left = node.getBoundingClientRect ? Math.round(node.getBoundingClientRect().left / 12) : 0;
+    return depth * 1000 + left;
+  }
+
+  function nestCommentEntries(entries) {
+    const roots = [];
+    const stack = [];
+    for (const entry of entries) {
+      while (stack.length && stack[stack.length - 1].level >= entry.level) stack.pop();
+      if (stack.length) stack[stack.length - 1].item.replies.push(entry.item);
+      else roots.push(entry.item);
+      stack.push(entry);
+    }
+    return roots;
+  }
+
+  function commentTreeCount(items) {
+    return items.reduce((count, item) => count + 1 + commentTreeCount(item.replies || []), 0);
+  }
+
   function comments(arg) {
     const limit = Math.max(0, Number((arg && arg.limit) || 20));
-    const items = [];
+    const entries = [];
     const seen = new Set();
     for (const node of commentNodes()) {
       const item = commentEntity(node);
       const key = item.comment_id || `${item.author}\n${item.text}`;
       if (!item.text || seen.has(key)) continue;
       seen.add(key);
-      items.push(item);
-      if (items.length >= limit) break;
+      entries.push({ item, level: commentLevel(node) });
+      if (entries.length >= limit) break;
     }
-    return items;
+    return nestCommentEntries(entries);
   }
 
-  function scrollComments() {
-    const container = firstVisible([
+  async function scrollComments() {
+    const root = firstVisible([
       '[data-e2e="comment-list"]',
       '[class*="comment-list"]',
       '[class*="commentList"]',
-    ]);
-    const scrollable = container || document.scrollingElement || document.documentElement;
-    const before = comments({ limit: 999 }).length;
-    scrollable.scrollBy({ top: Math.floor(window.innerHeight * 0.75), left: 0, behavior: 'instant' });
-    return { ok: true, before, y: scrollable.scrollTop || window.scrollY };
+    ]) || document;
+    const before = commentTreeCount(comments({ limit: 999 }));
+    const expandPattern = /(?:view|show|load|展开|查看)(?:\s+all|\s+more|更多|全部)?\s*(?:\d+\s*)?(?:repl(?:y|ies)|回复|评论)/i;
+    let clicked = 0;
+    for (const control of root.querySelectorAll('button, [role="button"]')) {
+      if (!visible(control) || control.disabled) continue;
+      const label = `${text(control)} ${control.getAttribute('aria-label') || ''}`.trim();
+      if (!expandPattern.test(label)) continue;
+      control.click();
+      clicked += 1;
+      if (clicked >= 6) break;
+    }
+    let scrollable = root;
+    for (let node = root; node && node !== document.body; node = node.parentElement) {
+      if (node.scrollHeight > node.clientHeight + 8) {
+        scrollable = node;
+        break;
+      }
+    }
+    if (!scrollable || scrollable === document) scrollable = document.scrollingElement || document.documentElement;
+    const beforeY = scrollable.scrollTop || window.scrollY;
+    const step = Math.max(360, Math.floor((scrollable.clientHeight || window.innerHeight) * 0.8));
+    if (typeof scrollable.scrollBy === 'function') {
+      scrollable.scrollBy({ top: step, left: 0, behavior: 'auto' });
+    } else {
+      scrollable.scrollTop = beforeY + step;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const after = commentTreeCount(comments({ limit: 999 }));
+    const y = scrollable.scrollTop || window.scrollY;
+    const atEnd = y + (scrollable.clientHeight || window.innerHeight) >= scrollable.scrollHeight - 8;
+    return { ok: true, before, after, clicked, grew: after > before, y, at_end: clicked === 0 && atEnd };
   }
 
   function authorState() {

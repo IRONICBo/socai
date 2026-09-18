@@ -1565,6 +1565,72 @@ body.has-paper > * { position: relative; z-index: 1; }
 }
 .search-group__row .note-card { flex: 0 0 auto; }
 
+/* Conversation-level post library: grouped by platform + content type rather
+   than by the run that happened to discover a post. */
+.social-materials {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-5);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--line);
+}
+.social-materials__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+  letter-spacing: var(--ls-eyebrow);
+  text-transform: uppercase;
+}
+.social-materials__group {
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  background: var(--surface);
+  overflow: hidden;
+}
+.social-materials__summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: 9px 11px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ink-1);
+  list-style: none;
+}
+.social-materials__summary::-webkit-details-marker { display: none; }
+.social-materials__summary::before {
+  content: "▸";
+  color: var(--fg-faint);
+  margin-right: 2px;
+}
+.social-materials__group[open] .social-materials__summary::before { content: "▾"; }
+.social-materials__summary > :first-child { flex: 1 1 auto; }
+.social-materials__count {
+  min-width: 22px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--fg-soft);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-align: center;
+}
+.social-materials__cards {
+  display: flex;
+  gap: var(--sp-2);
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  padding: 0 11px 11px;
+}
+.social-materials__cards .note-card { flex: 0 0 auto; }
+
 /* ── the answer — flat prose in the flow (no container) ────────────── */
 .conv-answer {
   margin-top: var(--sp-4);
@@ -2406,6 +2472,7 @@ button.note-media__play:hover { background: rgba(10, 10, 10, 0.78); transform: s
 }
 .note-card__meta { display: flex; align-items: center; gap: 7px; font-family: var(--font-mono); font-size: 10px; color: var(--fg-faint); }
 .note-card__meta .note-author { flex: 1 1 auto; min-width: 0; gap: 6px; }
+.note-card__site { flex: 0 0 auto; max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-soft); }
 .note-card__date { flex: 0 0 auto; white-space: nowrap; }
 .note-card__link { flex: 0 0 auto; display: inline-flex; align-items: center; color: var(--fg-soft); text-decoration: none; }
 .note-card__link:hover { color: var(--ink-0); }
