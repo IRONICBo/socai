@@ -21,7 +21,7 @@ use socai_core::runtime::{
     SocaiRuntime,
 };
 use socai_core::sites::xhs::{XhsHistoryStore, XhsPageRuntime};
-use socai_core::sites::{find_native_site_adapter, NativeSiteAdapter};
+use socai_core::sites::{find_native_site_adapter, site_learning_tools, NativeSiteAdapter};
 use socai_core::telemetry::tool_call::{
     is_site_tool_result, summarize_site_tool_result, summarize_tool_args,
 };
@@ -37,7 +37,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 const TAURI_AGENT_PREAMBLE: &str =
     "You are running inside the socai desktop app as a conversational, multi-turn agent. \
-     Besides the Xiaohongshu site tools you have unrestricted local environment tools: \
+     Besides the site and browser tools you have unrestricted local environment tools: \
      `read_file` (read text, or view image/screenshot files) and `shell` (PowerShell on \
      Windows, `sh` on macOS/Linux; use absolute paths to work outside the current run \
      directory). Only access files relevant to the user's request. Maintain continuity \
@@ -3019,6 +3019,7 @@ async fn run_agent_task_on_session_page(
     let outcome = async {
         let agent_tools = site.default_agent_tools.unwrap_or(site.agent_tools);
         let mut tools = agent_tools(page.clone(), llm_provider.clone()).await?;
+        tools.extend(site_learning_tools(page.clone()));
         let browser_tools = tools.iter().map(|tool| tool.name().to_string()).collect();
         let tool_failure_recovery = registry.clone().map(|registry| {
             Arc::new(DesktopBrowserRecovery {
