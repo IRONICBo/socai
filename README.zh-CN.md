@@ -8,11 +8,11 @@
 
 [English](README.md) · **简体中文** · [日本語](README.ja.md) · [한국어](README.ko.md)
 
-**专为小红书内容调研优化的本地 Web Agent**
+**面向多平台内容研究的本地社交媒体 Agent**
 
-连接你已登录的 Chrome，让 Agent 深读帖子、评论和多媒体内容，完成选题、竞品与消费者洞察调研。
+连接你已登录的 Chrome，让 Agent 在小红书、抖音、TikTok、Instagram 和 LinkedIn 上深读内容，完成选题、竞品与消费者洞察调研。
 
-[官网](https://socai.io/?utm_source=github&utm_medium=readme) · [下载桌面端](#桌面端) · [快速开始](#快速开始) · [命令参考](#小红书命令参考) · [开发文档](DEVELOPMENT.md)
+[官网](https://socai.io/?utm_source=github&utm_medium=readme) · [下载桌面端](#桌面端) · [快速开始](#快速开始) · [支持平台](#支持平台) · [开发文档](DEVELOPMENT.md)
 
 [![release](https://img.shields.io/github/v/release/socai-io/socai?style=flat-square&color=blue&label=release)](https://github.com/socai-io/socai/releases/latest)
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-555?style=flat-square)](#桌面端)
@@ -28,14 +28,14 @@
 
 ## 项目简介
 
-socai 面向需要读懂小红书内容的研究任务。它通过 Chrome DevTools Protocol（CDP）连接真实浏览器，复用现有登录状态，以页面点击、输入和滚动完成搜索、帖子阅读、评论展开与作者页查看，并把结果保存为结构化数据和本地素材。
+socai 是面向小红书、抖音、TikTok、Instagram 和 LinkedIn 的本地社交媒体 Agent 平台。它通过 Chrome DevTools Protocol（CDP）连接真实浏览器，复用已有登录状态，以页面点击、输入和滚动完成搜索、帖子与视频阅读、评论及回复展开，以及作者、个人或公司页面查看，并把结果保存为结构化数据和本地素材。
 
 常见任务包括：
 
 - 追踪一个品类近期出现的新话题、情绪和表达方式
 - 深读帖子与评论区，提炼消费者需求、顾虑和决策语言
-- 比较品牌、产品、门店或活动在小红书上的讨论差异
-- 研究账号内容方向、热门帖子和受众反馈
+- 跨平台比较品牌、产品、门店或活动的讨论差异
+- 研究创作者、职场人士、公司、内容方向、热门帖子和受众反馈
 - 下载图片和视频，结合 OCR 与视频语音转写补充多模态证据
 
 当前能力以内容读取和研究为主，暂未提供发布、点赞、收藏或评论等写入操作。
@@ -49,7 +49,7 @@ https://github.com/user-attachments/assets/8aebcded-f365-4f12-b9c4-102cc1fa964d
 | 真实浏览器执行 | 默认连接你正在使用的 Chrome，沿页面交互路径完成任务，减少对逆向接口和批量请求的依赖。 |
 | 帖子与评论深读 | 获取标题、正文、作者、互动信息和评论，可按需要继续展开评论与回复。 |
 | 多模态内容理解 | 支持下载帖子图片和视频、本地图片 OCR，以及视频语音转写。 |
-| 调研筛选与采样 | 支持发布时间、内容类型、排序方式、搜索范围和距离等小红书页面筛选条件。 |
+| 跨平台调研 | 按各平台自身页面能力完成搜索、个人或公司信息读取、帖子与视频深读、评论回复展开和下滑加载。 |
 | 证据与产物留存 | 每次运行保留结构化结果、素材清单和任务产物，便于复核与继续分析。 |
 | 多种使用入口 | 同一套 Rust 内核提供桌面端、命令行和终端交互界面。 |
 | Agent 友好 | 命令输出为结构化 JSON，可直接交给 Claude Code、Codex 等 Agent 调用。 |
@@ -65,7 +65,7 @@ https://github.com/user-attachments/assets/8aebcded-f365-4f12-b9c4-102cc1fa964d
 
 安装后按界面提示连接 Chrome，即可输入任务。例如：
 
-> 调研小红书上最近一个月关于无糖茶的高互动帖子，重点分析用户选择品牌时在意什么，并引用具体帖子和评论作为依据。
+> 对比小红书、抖音和 Instagram 上关于无糖茶的讨论，分析用户选择品牌时反复提到的因素，并引用具体帖子、视频、评论和回复。
 
 首次连接现有 Chrome 时，需要开启远程调试并确认浏览器授权。可参考 [连接 Chrome 指南](https://socai.io/connect)。
 
@@ -89,11 +89,15 @@ $installer = Join-Path $env:TEMP 'socai-install.ps1'; Invoke-WebRequest -UseBasi
 
 安装脚本会下载并校验对应平台的命令行程序，安装到 `~/.socai/bin/socai`（macOS）或 `%USERPROFILE%\.socai\bin\socai.exe`（Windows），并处理或提示 PATH 配置。
 
-安装完成后，可以直接运行一次小红书搜索：
+安装完成后，可以直接运行结构化平台搜索：
 
 ```bash
 socai xhs search "露营装备新手避坑" --num-notes 10 --num-comments 8 --pretty
+socai dy search "露营装备" --num 20
+socai tiktok search "camping gear" --num 20 --pretty
 ```
+
+不带子命令运行 `socai`，可以直接向 Agent 提出跨平台任务，包括读取 Instagram 的个人主页、帖子、Reels 与评论，或搜索 LinkedIn 的人员、公司、帖子与职业经历。
 
 如果当前平台没有预编译版本，或需要从源码调试，可使用 Cargo 安装：
 
@@ -119,14 +123,28 @@ socai
 | 入口 | 适合场景 | 开始方式 |
 | --- | --- | --- |
 | 桌面端 | 直接输入自然语言任务、查看历史、预览或下载产物 | 下载 macOS 或 Windows 安装包 |
-| 命令行 | 交给 Agent 调用、接入脚本、获取结构化 JSON | 安装后运行 `socai xhs ...` |
+| 命令行 | 交给 Agent 调用、接入脚本、获取结构化 JSON | 运行 `socai xhs ...`、`socai dy ...` 或 `socai tiktok ...` |
 | 终端交互界面 | 在终端中手动运行连续任务 | 直接运行 `socai` |
 
 三个入口共享浏览器连接、站点能力和运行记录内核，可根据当前工作方式选择。
 
-## 小红书命令参考
+## 支持平台
 
-### 搜索并深读帖子
+| 平台 | 调研能力 | 使用方式 |
+| --- | --- | --- |
+| 小红书 | 搜索、作者、帖子、评论与回复、素材下载、OCR 和语音转写 | Agent 与结构化命令行 |
+| 抖音 | 搜索、视频详情、作者、评论与回复、素材留存 | Agent 与结构化命令行 |
+| TikTok | 搜索、视频详情、作者主页、评论与回复、视频下载 | Agent 与结构化命令行 |
+| Instagram | 关键词搜索、个人主页、帖子、Reels、评论与回复、视频下载 | Agent 工作流 |
+| LinkedIn | 人员、公司和内容搜索，个人经历、关系线索、帖子与评论 | Agent 工作流 |
+
+所有平台能力均为只读。socai 不会代替用户关注、连接、发布、点赞、互动、评论、回复或发送消息。
+
+## 平台命令参考
+
+### 小红书
+
+#### 搜索并深读帖子
 
 ```bash
 socai xhs search "运营爆款思路" \
@@ -141,7 +159,7 @@ socai xhs search "运营爆款思路" \
 
 `search` 会执行站内搜索，并逐个打开结果读取正文和评论。加上 `--preview` 时，仅返回标题、封面和互动信息等概要，不打开帖子详情。
 
-### 查看作者及其帖子
+#### 查看作者及其帖子
 
 ```bash
 socai xhs author <作者id> --num-notes 10 --num-comments 8
@@ -153,7 +171,7 @@ socai xhs author <作者id> --num-notes 10 --num-comments 8
 socai xhs author <作者id> --num-notes 20 --preview
 ```
 
-### 重新读取指定帖子
+#### 重新读取指定帖子
 
 使用 `search` 或 `author` 返回的帖子 ID 与 `xsec_token`：
 
@@ -164,7 +182,7 @@ socai xhs get-notes \
   --num-comments 20
 ```
 
-### 常用参数
+#### 常用参数
 
 | 参数 | 作用 |
 | --- | --- |
@@ -197,13 +215,22 @@ socai xhs search "上海周末活动" \
   --filter sort=最新
 ```
 
+### 抖音与 TikTok
+
+```bash
+socai dy search "咖啡" --num 30
+socai tiktok search "coffee" --num 30 --pretty
+```
+
+视频详情、作者、评论、素材下载和诊断命令可通过 `socai dy --help` 或 `socai tiktok --help` 查看。
+
 ## 浏览器与登录
 
 socai 提供四种浏览器资料目录模式：
 
 | 模式 | 适合场景 | 登录状态 |
 | --- | --- | --- |
-| `existing` | 日常使用，默认选项 | 复用现有 Chrome 和小红书登录状态 |
+| `existing` | 日常使用，默认选项 | 复用现有 Chrome 及各支持平台的登录状态 |
 | `managed` | 希望与日常浏览器隔离 | 使用 `~/.socai/chrome-profile`，首次需要登录 |
 | `auto` | 希望自动选择连接方式 | 优先启动独立资料目录，失败时连接现有 Chrome |
 | `remote` | 测试托管云浏览器 | socai pro 测试能力，受会话额度限制 |
@@ -220,7 +247,7 @@ socai stop
 如需指定独立资料目录的位置：
 
 ```bash
-socai config set chrome.profile_dir ~/.socai/profiles/xhs-research
+socai config set chrome.profile_dir ~/.socai/profiles/social-research
 ```
 
 切回现有 Chrome：
@@ -273,16 +300,6 @@ socai config set runs.dir (Join-Path $PWD 'socai-runs')
 
 相对路径会按当前目录转换为绝对路径保存。环境变量 `SOCAI_RUNS_DIR` 的优先级更高。
 
-## 抖音搜索
-
-命令行补充提供基础抖音搜索能力：
-
-```bash
-socai dy search "咖啡" --num 30
-```
-
-当前产品重点仍是小红书内容调研，抖音命令的能力范围以 `socai dy --help` 为准。
-
 ## 扩展与开发
 
 如果需要增加新的站点或自定义能力，请参考 [站点扩展指南](core/src/sites/creation/SKILL.md)。该文件包含需求确认、站点能力设计和实现步骤，适合由 Claude Code、Codex、Cursor 等编程 Agent 按流程执行。
@@ -291,7 +308,7 @@ socai dy search "咖啡" --num 30
 
 ## 社区交流
 
-<img src="docs/assets/wechat-group-qr.jpg" alt="socai 小红书使用微信群二维码" width="280">
+<img src="docs/assets/wechat-group-qr.jpg" alt="socai 社交媒体调研微信群二维码" width="280">
 
 欢迎交流使用反馈、调研方法和功能建议。如果 socai 对你有帮助，也欢迎点击右上角的 Star 支持项目持续更新。
 

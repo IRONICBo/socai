@@ -8,11 +8,11 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · **한국어**
 
-**샤오홍슈(레드노트) 리서치에 최적화된 로컬 웹 에이전트**
+**여러 소셜 미디어를 함께 조사하는 로컬 에이전트 플랫폼**
 
-로그인된 Chrome에 연결해 게시물, 댓글, 이미지와 영상을 읽고 콘텐츠 조사, 경쟁 분석, 소비자 인사이트 도출을 지원합니다.
+로그인된 Chrome에 연결해 小红书, 抖音, TikTok, Instagram, LinkedIn의 게시물, 댓글, 이미지, 영상과 프로필을 조사합니다.
 
-[공식 사이트](https://socai.io/?utm_source=github&utm_medium=readme) · [다운로드](#데스크톱-앱) · [빠른-시작](#빠른-시작) · [명령어](#샤오홍슈-명령어) · [개발 문서](DEVELOPMENT.md)
+[공식 사이트](https://socai.io/?utm_source=github&utm_medium=readme) · [다운로드](#데스크톱-앱) · [빠른 시작](#빠른-시작) · [지원 플랫폼](#지원-플랫폼) · [개발 문서](DEVELOPMENT.md)
 
 [![release](https://img.shields.io/github/v/release/socai-io/socai?style=flat-square&color=blue&label=release)](https://github.com/socai-io/socai/releases/latest)
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-555?style=flat-square)](#데스크톱-앱)
@@ -28,14 +28,14 @@
 
 ## 소개
 
-socai는 샤오홍슈 콘텐츠를 깊이 이해해야 하는 리서치 작업을 위해 만들어졌습니다. Chrome DevTools Protocol(CDP)을 통해 실제 브라우저에 연결하고 기존 로그인 상태를 재사용합니다. 페이지에서 검색하고, 게시물을 열고, 댓글을 펼치고, 작성자 페이지를 확인한 뒤 결과를 구조화된 데이터와 로컬 산출물로 저장합니다.
+socai는 小红书, 抖音, TikTok, Instagram, LinkedIn을 지원하는 로컬 소셜 미디어 에이전트 플랫폼입니다. Chrome DevTools Protocol(CDP)을 통해 실제 브라우저에 연결하고 기존 로그인 상태를 재사용합니다. 일반적인 페이지 상호작용으로 검색하고, 게시물과 영상을 열고, 댓글과 답글을 펼치고, 작성자·인물·회사 페이지를 확인한 뒤 결과를 구조화된 데이터와 로컬 산출물로 저장합니다.
 
 주요 활용 사례:
 
 - 특정 카테고리에서 새롭게 나타나는 주제, 감정, 표현 방식 추적
 - 게시물과 댓글에서 소비자 요구, 우려, 구매 결정 언어 도출
-- 브랜드, 제품, 매장 또는 캠페인에 대한 반응 비교
-- 계정의 콘텐츠 방향, 인기 게시물, 독자 반응 분석
+- 여러 플랫폼에서 브랜드, 제품, 매장 또는 캠페인에 대한 반응 비교
+- 크리에이터, 인물, 회사, 콘텐츠 방향, 인기 게시물, 독자 반응 분석
 - 이미지와 영상을 저장하고 OCR 및 영상 음성 전사로 근거 보완
 
 현재 제품은 읽기와 조사에 초점을 두며 게시, 좋아요, 저장, 댓글 작성 기능은 제공하지 않습니다.
@@ -49,7 +49,7 @@ https://github.com/user-attachments/assets/8aebcded-f365-4f12-b9c4-102cc1fa964d
 | 실제 브라우저 실행 | 평소 사용하는 Chrome에 연결해 페이지 상호작용 경로를 따라 작업합니다. |
 | 게시물과 댓글 심층 읽기 | 제목, 본문, 작성자, 반응 수치, 댓글과 답글을 수집합니다. |
 | 멀티모달 이해 | 게시물 이미지와 영상 저장, 로컬 이미지 OCR, 영상 음성 전사를 지원합니다. |
-| 조사 필터와 표본 수집 | 게시 시점, 게시물 유형, 정렬, 검색 범위, 거리 등의 화면 필터를 사용합니다. |
+| 크로스 플랫폼 조사 | 각 사이트의 검색, 프로필, 게시물, 댓글, 답글, 스크롤 로딩 기능을 사용합니다. |
 | 근거와 산출물 보관 | 구조화된 결과, 미디어 목록, 보고서와 표 등의 산출물을 저장합니다. |
 | 여러 사용 방식 | 데스크톱 앱, CLI, 터미널 UI가 동일한 Rust 코어를 공유합니다. |
 | 에이전트 연동 | Claude Code, Codex 등에서 바로 사용할 수 있는 구조화된 JSON을 반환합니다. |
@@ -65,7 +65,7 @@ https://github.com/user-attachments/assets/8aebcded-f365-4f12-b9c4-102cc1fa964d
 
 설치 후 화면 안내에 따라 Chrome을 연결하고 다음과 같은 작업을 입력합니다.
 
-> 최근 한 달간 무가당 차에 관한 반응이 높은 샤오홍슈 게시물을 조사하고, 사용자가 브랜드를 선택할 때 중요하게 보는 요소를 구체적인 게시물과 댓글 인용과 함께 정리해 주세요.
+> 小红书, 抖音, Instagram에서 무가당 차가 어떻게 이야기되는지 비교하고, 반복해서 등장하는 구매 기준을 구체적인 게시물, 영상, 댓글과 답글 인용으로 정리해 주세요.
 
 기존 Chrome에 처음 연결할 때는 원격 디버깅을 활성화하고 브라우저 권한을 확인해야 합니다. [Chrome 연결 안내](https://socai.io/connect)를 참고하세요.
 
@@ -87,11 +87,15 @@ Windows PowerShell:
 $installer = Join-Path $env:TEMP 'socai-install.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/socai-io/socai/releases/latest/download/install.ps1 -OutFile $installer; Unblock-File $installer; & $installer
 ```
 
-첫 번째 검색을 실행합니다.
+구조화된 플랫폼 검색을 실행합니다.
 
 ```bash
 socai xhs search "초보 캠핑 장비" --num-notes 10 --num-comments 8 --pretty
+socai dy search "캠핑 장비" --num 20
+socai tiktok search "camping gear" --num 20 --pretty
 ```
+
+하위 명령 없이 `socai`를 실행하면 Instagram 프로필, 게시물, Reels, 댓글 또는 LinkedIn 인물, 회사, 게시물, 경력을 포함한 크로스 플랫폼 조사를 에이전트에게 요청할 수 있습니다.
 
 현재 플랫폼에 사전 빌드된 바이너리가 없거나 소스 개발이 필요한 경우 Cargo를 사용할 수 있습니다.
 
@@ -117,12 +121,26 @@ socai
 | 방식 | 적합한 작업 | 시작 방법 |
 | --- | --- | --- |
 | 데스크톱 앱 | 자연어 작업, 작업 기록, 산출물 미리 보기와 다운로드 | macOS 또는 Windows 앱 설치 |
-| CLI | 에이전트 호출, 스크립트, 구조화된 JSON | `socai xhs ...` 실행 |
+| CLI | 에이전트 호출, 스크립트, 구조화된 JSON | `socai xhs ...`, `socai dy ...`, `socai tiktok ...` 실행 |
 | 터미널 UI | 터미널에서 연속 작업 수동 실행 | `socai` 실행 |
 
-## 샤오홍슈 명령어
+## 지원 플랫폼
 
-### 게시물 검색과 심층 읽기
+| 플랫폼 | 조사 기능 | 사용 방식 |
+| --- | --- | --- |
+| 小红书 | 검색, 작성자, 게시물, 댓글과 답글, 미디어 저장, OCR, 음성 전사 | 에이전트와 구조화된 CLI |
+| 抖音 | 검색, 영상 상세, 작성자, 댓글과 답글, 미디어 산출물 | 에이전트와 구조화된 CLI |
+| TikTok | 검색, 영상 상세, 작성자 프로필, 댓글과 답글, 영상 저장 | 에이전트와 구조화된 CLI |
+| Instagram | 키워드 검색, 프로필, 게시물, Reels, 댓글과 답글, 영상 저장 | 에이전트 워크플로 |
+| LinkedIn | 인물·회사·콘텐츠 검색, 프로필, 경력, 관계 정보, 게시물, 댓글 | 에이전트 워크플로 |
+
+모든 기능은 읽기 전용입니다. socai는 사용자를 대신해 팔로우, 연결, 게시, 좋아요, 반응, 댓글, 답글 또는 메시지 전송을 수행하지 않습니다.
+
+## 플랫폼 명령어
+
+### 小红书
+
+#### 게시물 검색과 심층 읽기
 
 ```bash
 socai xhs search "콘텐츠 기획" \
@@ -137,7 +155,7 @@ socai xhs search "콘텐츠 기획" \
 
 `search`는 검색 결과를 열어 본문과 댓글을 읽습니다. `--preview`를 추가하면 게시물 상세 화면을 열지 않고 제목, 표지, 반응 수치 등의 요약만 반환합니다.
 
-### 작성자와 게시물 읽기
+#### 작성자와 게시물 읽기
 
 ```bash
 socai xhs author <author_id> --num-notes 10 --num-comments 8
@@ -149,7 +167,7 @@ socai xhs author <author_id> --num-notes 10 --num-comments 8
 socai xhs author <author_id> --num-notes 20 --preview
 ```
 
-### 지정 게시물 다시 읽기
+#### 지정 게시물 다시 읽기
 
 `search` 또는 `author`가 반환한 게시물 ID와 `xsec_token`을 사용합니다.
 
@@ -160,7 +178,7 @@ socai xhs get-notes \
   --num-comments 20
 ```
 
-### 주요 옵션
+#### 주요 옵션
 
 | 옵션 | 설명 |
 | --- | --- |
@@ -170,10 +188,10 @@ socai xhs get-notes \
 | `--download-media` | 열린 게시물의 이미지와 영상을 저장합니다. |
 | `--ocr` | 게시물 이미지 또는 영상 표지에 로컬 OCR을 실행합니다. |
 | `--transcribe-audio` | 열린 영상을 저장하고 음성을 전사합니다. socai agent 로그인과 선택이 필요합니다. |
-| `--filter <group=option>` | 샤오홍슈 검색 필터이며 여러 번 지정할 수 있습니다. |
+| `--filter <group=option>` | 小红书 검색 필터이며 여러 번 지정할 수 있습니다. |
 | `--pretty` | 최종 JSON을 읽기 쉽게 출력합니다. |
 
-필터 값은 샤오홍슈 웹 화면의 중국어 표기를 그대로 사용합니다.
+필터 값은 小红书 웹 화면의 중국어 표기를 그대로 사용합니다.
 
 | 그룹 | 값 |
 | --- | --- |
@@ -183,11 +201,20 @@ socai xhs get-notes \
 | `search_scope` | 不限, 已看过, 未看过, 已关注 |
 | `distance` | 不限, 同城, 附近 |
 
+### 抖音과 TikTok
+
+```bash
+socai dy search "커피" --num 30
+socai tiktok search "coffee" --num 30 --pretty
+```
+
+영상 상세, 작성자, 댓글, 미디어 저장과 진단 명령은 `socai dy --help` 또는 `socai tiktok --help`에서 확인할 수 있습니다.
+
 ## 브라우저와 로그인
 
 | 모드 | 용도 | 동작 |
 | --- | --- | --- |
-| `existing` | 일상적인 사용, 기본값 | 기존 Chrome과 샤오홍슈 로그인 재사용 |
+| `existing` | 일상적인 사용, 기본값 | 기존 Chrome과 지원 플랫폼의 로그인 재사용 |
 | `managed` | 평소 브라우징 환경과 분리 | `~/.socai/chrome-profile` 사용, 최초 한 번 로그인 |
 | `auto` | 연결 방식 자동 선택 | 독립 프로필을 먼저 시도하고 실패하면 기존 Chrome에 연결 |
 | `remote` | 호스팅 브라우저 테스트 | 세션 제한이 있는 socai pro 베타 기능 |
@@ -231,21 +258,13 @@ socai config set chrome.profile remote
 socai config set runs.dir "$(pwd)/socai-runs"
 ```
 
-## Douyin 검색
-
-CLI는 기본적인 Douyin 검색도 제공합니다.
-
-```bash
-socai dy search "커피" --num 30
-```
-
 ## 확장과 개발
 
 새로운 사이트나 기능을 추가하려면 [사이트 확장 안내](core/src/sites/creation/SKILL.md)를 참고하세요. 로컬 개발, 빌드, 저장소 규칙은 [DEVELOPMENT.md](DEVELOPMENT.md)에 있습니다.
 
 ## 커뮤니티
 
-<img src="docs/assets/wechat-group-qr.jpg" alt="socai 샤오홍슈 리서치 WeChat 그룹 QR 코드" width="280">
+<img src="docs/assets/wechat-group-qr.jpg" alt="socai 소셜 미디어 리서치 WeChat 그룹 QR 코드" width="280">
 
 사용 경험, 조사 워크플로, 기능 제안에 대한 피드백을 환영합니다.
 
