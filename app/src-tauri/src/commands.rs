@@ -914,14 +914,9 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
             return ToolRecoveryOutcome::NotNeeded;
         }
         let Some(disconnect_reason) = self.disconnect_reason().await else {
-            if matches!(
-                tool_name,
-                "navigate_site" | "read_site_skills" | "run_site_browser_tool"
-            ) {
-                if let Ok(info) = self.page.page_info().await {
-                    if let Some(url) = info.get("url").and_then(Value::as_str) {
-                        *self.last_page_url.write().await = url.to_string();
-                    }
+            if let Ok(info) = self.page.page_info().await {
+                if let Some(url) = info.get("url").and_then(Value::as_str) {
+                    *self.last_page_url.write().await = url.to_string();
                 }
             }
             return ToolRecoveryOutcome::NotNeeded;
@@ -966,6 +961,11 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
                 "browser connection lost while running {tool_name}, and the active page URL is unavailable"
             );
             self.clear_task_target().await;
+            self.emit_recovery_event(
+                "degraded",
+                "browser recovery failed; summarizing the collected results".into(),
+            )
+            .await;
             self.capture_recovery("failed", &reason, started.elapsed().as_millis() as u64);
             return ToolRecoveryOutcome::Degraded { reason };
         }
