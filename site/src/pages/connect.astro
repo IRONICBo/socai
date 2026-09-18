@@ -48,6 +48,7 @@ const messages = {
             step2Alt: "Chrome remote debugging permission popup mockup",
             dialogText:
                 "socai wants to connect to Chrome to run your task. It only opens its own tabs.",
+            browserTab: "social media research · socai",
             step2Annot: "click Yes",
             step2Hint:
                 'You confirm once per session. After that, socai shows "chrome · connected" at the top.',
@@ -97,6 +98,7 @@ const messages = {
             step2Alt: "Chrome 远程调试授权弹窗示意",
             dialogText:
                 "socai 想要连接到 Chrome 来运行你的任务。它只会打开属于自己的标签页。",
+            browserTab: "社交媒体调研 · socai",
             step2Annot: "点击 Yes",
             step2Hint:
                 "每次会话只需确认一次。确认后 socai 顶部会显示 “chrome · 已连接”。",
@@ -382,8 +384,10 @@ const socialImageAlt = message("meta.socialImageAlt");
                                             aria-hidden="true"
                                             ><i></i><i></i><i></i></span
                                         >
-                                        <span class="bwin__tab"
-                                            >小红书 · xiaohongshu.com</span
+                                        <span
+                                            class="bwin__tab"
+                                            data-i18n="setup.browserTab"
+                                            >{message("setup.browserTab")}</span
                                         >
                                     </div>
                                     <div class="bwin__body bwin__body--dialog">
