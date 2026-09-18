@@ -24,7 +24,7 @@
       "returns": { "type": "object", "description": "Search route and result state." }
     },
     "searchResults": {
-      "description": "Extract visible LinkedIn people, content, or company search results with canonical identity and preview assets.",
+      "description": "Collect LinkedIn people, content, or company search results across lazy-scroll pages up to limit, with canonical identity and preview assets.",
       "path": "page_scripts.js",
       "binding": "window.SocaiLinkedInPageScripts",
       "callable": "searchResults",
@@ -99,14 +99,22 @@
       "returns": { "type": "object", "description": "Visible LinkedIn post details or an explicit gate state." }
     },
     "comments": {
-      "description": "Extract comments currently visible on the active LinkedIn post; never likes, replies, or submits anything.",
+      "description": "Collect comments and expanded replies across the active LinkedIn post up to limit; never likes, replies, or submits anything.",
       "path": "page_scripts.js",
       "binding": "window.SocaiLinkedInPageScripts",
       "callable": "comments",
       "args": {
         "limit": { "type": "integer", "required": false, "description": "Maximum visible comments to return." }
       },
-      "returns": { "type": "array", "description": "Visible LinkedIn comments." }
+      "returns": { "type": "array", "description": "Accumulated, deduplicated LinkedIn comments." }
+    },
+    "scrollComments": {
+      "description": "Load the next bounded batch of LinkedIn comments and collapsed replies using read-only expansion controls.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiLinkedInPageScripts",
+      "callable": "scrollComments",
+      "args": {},
+      "returns": { "type": "object", "description": "Comment growth, expansion, and end-of-list state." }
     }
   }
 }

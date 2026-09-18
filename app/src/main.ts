@@ -118,6 +118,7 @@ export interface NoteMedia {
 
 /** One archived top comment on a note (replies flatten one level). */
 export interface NoteComment {
+  comment_id?: string;
   text: string;
   author?: string;
   likes?: number;
@@ -129,6 +130,8 @@ export interface NoteComment {
 /** A note the agent saw/cited — one canonical object per note (the registry unit). */
 export interface NoteData {
   note_id: string;
+  site?: "xhs" | "linkedin" | "instagram" | "dy" | "tiktok" | string;
+  native_id?: string;
   url?: string;
   title?: string;
   content?: string; // full note body (excerpt is its first ~90 chars)
@@ -142,6 +145,7 @@ export interface NoteData {
   media_dir?: string; // run-relative folder, when src paths are relative
   transcript?: string; // video audio transcript (local or managed ASR)
   saved?: boolean;
+  archived?: boolean;
   // Tolerate extra fields the archive may carry.
   [key: string]: unknown;
 }

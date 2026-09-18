@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -304,7 +305,8 @@ impl Tool for RunSiteBrowserTool {
     fn description(&self) -> &str {
         "Run one browser-context tool declared by a site skill previously returned by \
          read_site_skills or navigate_site. The current page must still match that skill's \
-         domains, and arguments/results are checked against its manifest schema."
+         domains, and arguments/results are checked against its manifest schema. List and \
+         comment extractors automatically scroll, deduplicate, and accumulate up to `limit`."
     }
 
     fn input_schema(&self) -> Value {
@@ -323,16 +325,179 @@ impl Tool for RunSiteBrowserTool {
         true
     }
 
-    async fn call(&self, input: Value, _ctx: &ToolContext) -> Result<ToolResult> {
+    async fn call(&self, input: Value, ctx: &ToolContext) -> Result<ToolResult> {
         let site_id = required_tool_string(&input, "site_id")?;
         let tool_name = required_tool_string(&input, "tool_name")?;
         let args = input.get("args");
         if args.is_some_and(|value| !value.is_object()) {
             anyhow::bail!("run_site_browser_tool `args` must be an object");
         }
-        let result = run_site_browser_tool(&self.page, site_id, tool_name, args).await?;
+        let mut result =
+            run_site_browser_tool_collecting(&self.page, site_id, tool_name, args).await?;
+        crate::sites::post_archive::save_site_media(
+            &self.page,
+            ctx,
+            site_id,
+            tool_name,
+            &mut result,
+        )
+        .await;
+        let page_url = self
+            .page
+            .page_info()
+            .await
+            .ok()
+            .and_then(|info| info.get("url").and_then(Value::as_str).map(str::to_string));
+        crate::sites::post_archive::persist_site_tool_result(
+            ctx,
+            site_id,
+            tool_name,
+            &result,
+            page_url.as_deref(),
+        );
         Ok(ToolResult::text(serde_json::to_string_pretty(&result)?))
     }
+}
+
+/// Collect lazy content lists up to the requested `limit`. The page-level
+/// extractors remain platform-owned; this host loop only alternates extraction
+/// and the platform's declared scroll action while retaining virtualized rows.
+async fn run_site_browser_tool_collecting(
+    page: &PageSession,
+    site_id: &str,
+    tool_name: &str,
+    args: Option<&Value>,
+) -> Result<Value> {
+    let Some(scroll_tool) = pagination_scroll_tool(site_id, tool_name) else {
+        return run_site_browser_tool(page, site_id, tool_name, args).await;
+    };
+    if args
+        .and_then(|value| value.get("viewport_only"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return run_site_browser_tool(page, site_id, tool_name, args).await;
+    }
+
+    let target = args
+        .and_then(|value| value.get("limit"))
+        .and_then(Value::as_u64)
+        .unwrap_or(100)
+        .clamp(1, 100) as usize;
+    let mut collection_args = args.cloned().unwrap_or_else(|| json!({}));
+    collection_args["limit"] = json!(target);
+    if collection_args.get("viewport_only").is_some() {
+        collection_args["viewport_only"] = Value::Bool(false);
+    }
+
+    let mut collected = Vec::new();
+    let mut indexes = BTreeMap::new();
+    let mut stalls = 0usize;
+    let mut at_end = false;
+    for _ in 0..40 {
+        let batch = run_site_browser_tool(page, site_id, tool_name, Some(&collection_args)).await?;
+        let items = batch.as_array().with_context(|| {
+            format!("paginated browser tool {site_id}.{tool_name} did not return an array")
+        })?;
+        let before = collected.len();
+        merge_paginated_items(&mut collected, &mut indexes, items);
+        if collected.len() >= target {
+            break;
+        }
+        stalls = if collected.len() == before {
+            stalls + 1
+        } else {
+            0
+        };
+        if stalls >= 4 || (at_end && stalls >= 2) {
+            break;
+        }
+
+        let scroll = run_site_browser_tool(page, site_id, scroll_tool, None).await?;
+        at_end = scroll
+            .get("at_end")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        tokio::time::sleep(Duration::from_millis(if tool_name == "comments" {
+            700
+        } else {
+            900
+        }))
+        .await;
+    }
+    collected.truncate(target);
+    Ok(Value::Array(collected))
+}
+
+fn pagination_scroll_tool(site_id: &str, tool_name: &str) -> Option<&'static str> {
+    match (site_id, tool_name) {
+        ("linkedin" | "instagram" | "dy" | "tiktok", "comments") => Some("scrollComments"),
+        ("linkedin" | "instagram", "searchResults") => Some("scrollResults"),
+        ("instagram", "profilePosts") => Some("scrollPosts"),
+        ("dy" | "tiktok", "videoCards") => Some("scrollFeed"),
+        _ => None,
+    }
+}
+
+fn merge_paginated_items(
+    collected: &mut Vec<Value>,
+    indexes: &mut BTreeMap<String, usize>,
+    items: &[Value],
+) {
+    for item in items {
+        let key = paginated_item_key(item);
+        if let Some(index) = indexes.get(&key).copied() {
+            // Keep evidence from every viewport. In particular, virtualized
+            // comment rows can expose different reply subsets after a scroll.
+            crate::sites::post_archive::merge_post_record(&mut collected[index], item);
+        } else {
+            indexes.insert(key, collected.len());
+            collected.push(item.clone());
+        }
+    }
+}
+
+fn paginated_item_key(item: &Value) -> String {
+    for field in [
+        "comment_id",
+        "post_id",
+        "video_id",
+        "shortcode",
+        "id",
+        "url",
+    ] {
+        if let Some(value) = item.get(field).and_then(Value::as_str) {
+            if !value.trim().is_empty() {
+                return format!("{field}:{value}");
+            }
+        }
+    }
+    let author = item
+        .get("author")
+        .and_then(|value| match value {
+            Value::String(value) => Some(value.as_str()),
+            Value::Object(value) => value
+                .get("username")
+                .or_else(|| value.get("name"))
+                .and_then(Value::as_str),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let text = item
+        .get("text")
+        .or_else(|| item.get("title"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let time = item
+        .get("published_at")
+        .or_else(|| item.get("published_label"))
+        .or_else(|| item.get("time"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !author.is_empty() || !text.is_empty() {
+        return format!("content:{author}\n{text}\n{time}");
+    }
+    serde_json::to_string(item).unwrap_or_default()
 }
 
 async fn current_site_skill_contexts(page: &PageSession) -> Result<Value> {

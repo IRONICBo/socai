@@ -1,4 +1,4 @@
-//! Embedded rich-note UI (SocaiV2 design, ported from the Claude Design handoff).
+//! Embedded rich social-post UI (SocaiV2 design, ported from the Claude Design handoff).
 //!
 //! A note is a Xiaohongshu post the agent saw/cited. Notes live in a per-run
 //! registry (note_id -> NoteData); the conversation embeds a rich card per
@@ -24,8 +24,84 @@ export function setNoteRegistry(notes: NoteData[] | undefined, runDir: string | 
   }
   RUN_DIR = runDir ?? "";
 }
-function resolveNote(ref: string): NoteData | null {
+/** Merge records carried by a just-finished tool event before the next archive poll. */
+export function mergeNoteRegistry(notes: NoteData[]): void {
+  for (const note of notes) {
+    if (!note || typeof note.note_id !== "string" || !note.note_id) continue;
+    REGISTRY[note.note_id] = mergeNoteData(REGISTRY[note.note_id], note);
+  }
+}
+export function noteDataForRef(ref: string): NoteData | null {
   return REGISTRY[ref] ?? null;
+}
+function resolveNote(ref: string): NoteData | null {
+  return noteDataForRef(ref);
+}
+
+function mergeNoteData(current: NoteData | undefined, incoming: NoteData): NoteData {
+  if (!current) return incoming;
+  const richerText = (before: string | undefined, after: string | undefined): string | undefined => {
+    if (!after?.trim()) return before;
+    if (!before?.trim()) return after;
+    return after.length > before.length ? after : before;
+  };
+  const stats = { ...(current.stats ?? {}) };
+  for (const [key, value] of Object.entries(incoming.stats ?? {})) {
+    const stat = key as keyof NonNullable<NoteData["stats"]>;
+    if (typeof value === "number") stats[stat] = Math.max(stats[stat] ?? 0, value);
+  }
+  const author = { ...(current.author ?? {}) };
+  for (const [key, value] of Object.entries(incoming.author ?? {})) {
+    if (typeof value === "string" && value.trim()) author[key as keyof typeof author] = value;
+  }
+  const mediaScore = (items: NoteMedia[] | undefined): number => (items ?? []).reduce((score, item) => {
+    const local = item.src && !/^https?:/i.test(item.src) ? 4 : 0;
+    return score + 1 + local + (item.poster ? 1 : 0);
+  }, 0);
+  const levelRank = (value: unknown): number => value === "deep" ? 3 : value === "detail" ? 2 : value === "card" || value === "preview" ? 1 : 0;
+  const merged: NoteData = {
+    ...current,
+    ...incoming,
+    note_id: current.note_id,
+    title: richerText(current.title, incoming.title),
+    content: richerText(current.content, incoming.content),
+    excerpt: richerText(current.excerpt, incoming.excerpt),
+    transcript: richerText(current.transcript, incoming.transcript),
+    author,
+    stats,
+    comments: mergeComments(current.comments, incoming.comments),
+    media: mediaScore(incoming.media) >= mediaScore(current.media) ? incoming.media : current.media,
+    saved: Boolean(current.saved || incoming.saved),
+    archived: Boolean(current.archived || incoming.archived),
+  };
+  if (levelRank(current.level) > levelRank(incoming.level)) merged.level = current.level;
+  return merged;
+}
+
+function mergeComments(current: NoteComment[] | undefined, incoming: NoteComment[] | undefined): NoteComment[] | undefined {
+  if (!incoming?.length) return current;
+  const merged = [...(current ?? [])];
+  const keyOf = (comment: NoteComment): string => comment.comment_id
+    ? `id:${comment.comment_id}`
+    : `content:${comment.author ?? ""}\n${comment.text}`;
+  const indexes = new Map(merged.map((comment, index) => [keyOf(comment), index]));
+  for (const comment of incoming) {
+    const key = keyOf(comment);
+    const index = indexes.get(key);
+    if (index === undefined) {
+      indexes.set(key, merged.length);
+      merged.push(comment);
+      continue;
+    }
+    const previous = merged[index];
+    merged[index] = {
+      ...previous,
+      ...comment,
+      likes: Math.max(previous.likes ?? 0, comment.likes ?? 0),
+      replies: mergeComments(previous.replies, comment.replies),
+    };
+  }
+  return merged;
 }
 
 // ── helpers ─────────────────────────────────────────────────────────
@@ -58,6 +134,17 @@ function authorInitial(note: NoteData): string {
   const n = note.author && note.author.name;
   return n ? Array.from(n)[0] : "·";
 }
+function platformName(note: NoteData): string {
+  switch (note.site) {
+    case "linkedin": return "LinkedIn";
+    case "instagram": return "Instagram";
+    case "dy": return "Douyin";
+    case "tiktok": return "TikTok";
+    case "xhs": return "Xiaohongshu";
+    // Archives created before the multi-site card contract are XHS records.
+    default: return "Xiaohongshu";
+  }
+}
 // Resolve a note media path (absolute, or media_dir-relative to run_dir) to a
 // webview-loadable asset URL. Empty when the file isn't available.
 function assetUrl(note: NoteData, path: string | undefined): string {
@@ -80,6 +167,7 @@ const IC = {
   star: () => svg(`<path d="M12 2.76 14.84 8.52 21.2 9.45 16.6 13.93 17.69 20.26 12 17.27 6.31 20.26 7.4 13.93 2.8 9.45 9.16 8.52z" />`),
   comment: () =>
     svg(`<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />`),
+  share: () => svg(`<path d="M8 12.5 16.5 7" /><path d="m13.5 4 3 3-3 3" /><path d="M17 13v4.5a2 2 0 0 1-2 2H6.5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2H10" />`),
   play: () => svg(`<path d="M8 5.2v13.6L19 12z" />`, 1.7, true),
   stack: () => svg(`<rect x="8" y="3.5" width="12.5" height="12.5" rx="1.6" /><path d="M15.5 19.5H4.5a1 1 0 0 1-1-1V7.5" />`, 1.8),
   external: () => svg(`<path d="M14 4.5h5.5V10" /><path d="M19.5 4.5 11 13" /><path d="M18 14.5v4a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1h4" />`),
@@ -273,8 +361,11 @@ function statsRow(note: NoteData): string {
     ["likes", IC.heart(), s.likes],
     ["collects", IC.star(), s.collects],
     ["comments", IC.comment(), s.comments],
+    ["shares", IC.share(), s.shares],
   ];
-  return `<span class="note-stats">${items
+  const visible = items.filter(([, , value]) => value != null);
+  if (visible.length === 0) return "";
+  return `<span class="note-stats">${visible
     .map(([k, icon, v]) => `<span class="note-stat" title="${k}">${icon}${fmtStat(v)}</span>`)
     .join("")}</span>`;
 }
@@ -300,6 +391,7 @@ function coverInner(note: NoteData, idx: number): string {
 function renderCard(note: NoteData, density: "rich" | "compact" = "rich"): string {
   const title = esc(note.title || "");
   const name = esc((note.author && note.author.name) || "");
+  const platform = platformName(note);
   const cover =
     density === "rich"
       ? `<div class="note-card__cover" data-note-cover="${esc(note.note_id)}" data-idx="0">${coverInner(note, 0)}</div>`
@@ -312,10 +404,11 @@ function renderCard(note: NoteData, density: "rich" | "compact" = "rich"): strin
         ${statsRow(note)}
         <div class="note-card__meta">
           <span class="note-author">${avatar(note)}<span class="note-author__name">${name}</span></span>
+          <span class="note-card__site">${esc(platform)}</span>
           <span class="note-card__date">${esc(fmtDate(note.posted_at))}</span>
           ${
             note.url
-              ? `<span class="note-card__link" data-note-external="${esc(note.url)}" title="open on xiaohongshu" role="button" tabindex="0" aria-label="open on xiaohongshu">${IC.external()}</span>`
+              ? `<span class="note-card__link" data-note-external="${esc(note.url)}" title="open on ${esc(platform)}" role="button" tabindex="0" aria-label="open on ${esc(platform)}">${IC.external()}</span>`
               : ""
           }
         </div>
@@ -426,7 +519,7 @@ function viewPanel(note: NoteData): string {
     : "";
   const body = (typeof note.content === "string" && note.content.trim()) || note.excerpt || "";
   const transcript = typeof note.transcript === "string" ? note.transcript.trim() : "";
-  const dateBits = [fmtDate(note.posted_at), note.ip_location || ""].filter(Boolean);
+  const dateBits = [platformName(note), fmtDate(note.posted_at), note.ip_location || ""].filter(Boolean);
   const comments = note.comments || [];
   const commentTotal = note.stats?.comments ?? (comments.length || undefined);
   return `
@@ -463,7 +556,7 @@ function viewPanel(note: NoteData): string {
     </div>`;
 }
 // No X: clicking outside the panel closes (and Esc still works), matching the
-// XHS modal. The top-right corner instead opens the note on xiaohongshu —
+// social-post modal. The top-right corner instead opens the original post —
 // only a note with no archived url keeps a close glyph so the corner isn't dead.
 function viewerHTML(note: NoteData): string {
   const corner = note.url

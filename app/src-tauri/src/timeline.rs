@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use socai_core::agent::{AgentEvent, Conversation, Run, ToolProgressPhase, ToolProgressStatus};
 
 use crate::tasks::{now_ms, AgentTaskSnapshot};
@@ -959,7 +959,7 @@ fn tool_result_event(
             .unwrap_or(true);
     let entities = raw
         .as_ref()
-        .map(|value| normalize_entities(name, value))
+        .map(|value| normalize_entities(name, input, value))
         .unwrap_or_default();
     let error = error.map(str::trim).filter(|err| !err.is_empty());
     // A tool that ran but reported failure (`ok: false`, e.g. a search that
@@ -1111,7 +1111,7 @@ fn raw_tool_result_value(content: &Value) -> Option<Value> {
     }
 }
 
-fn normalize_entities(tool: &str, value: &Value) -> Vec<TimelineEntity> {
+fn normalize_entities(tool: &str, input: &Value, value: &Value) -> Vec<TimelineEntity> {
     // `--preview` yields a `cards` array (-> card grid); the default full scan
     // yields the aggregated bundle (-> xhs_search).
     match tool {
@@ -1173,6 +1173,26 @@ fn normalize_entities(tool: &str, value: &Value) -> Vec<TimelineEntity> {
                 vec![entity("xhs_author_profile", value.clone())]
             } else {
                 Vec::new()
+            }
+        }
+        "run_site_browser_tool" => {
+            let site_id = input
+                .get("site_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let site_tool = input
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let notes =
+                socai_core::sites::post_archive::records_for_site_tool(site_id, site_tool, value)
+                    .into_iter()
+                    .map(|(_, record)| record)
+                    .collect::<Vec<_>>();
+            if notes.is_empty() {
+                Vec::new()
+            } else {
+                vec![entity("social_post_grid", json!({ "notes": notes }))]
             }
         }
         _ => Vec::new(),

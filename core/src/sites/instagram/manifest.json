@@ -33,7 +33,7 @@
       "returns": { "type": "object", "description": "Whether the visible search input accepted the query." }
     },
     "searchResults": {
-      "description": "Extract visible Instagram profile, hashtag, location, post, or reel search candidates without interacting with them.",
+      "description": "Collect Instagram profile, hashtag, location, post, or reel search candidates across lazy-scroll pages up to limit.",
       "path": "page_scripts.js",
       "binding": "window.SocaiInstagramPageScripts",
       "callable": "searchResults",
@@ -63,7 +63,7 @@
       "returns": { "type": "object", "description": "Visible Instagram profile details or an explicit gate state." }
     },
     "profilePosts": {
-      "description": "Extract visible post and reel cards from the active Instagram profile.",
+      "description": "Collect post and reel cards across the active Instagram profile's lazy grid up to limit.",
       "path": "page_scripts.js",
       "binding": "window.SocaiInstagramPageScripts",
       "callable": "profilePosts",
@@ -72,6 +72,14 @@
         "viewport_only": { "type": "boolean", "required": false, "description": "Only include cards intersecting the viewport." }
       },
       "returns": { "type": "array", "description": "Visible Instagram profile posts and reels." }
+    },
+    "scrollPosts": {
+      "description": "Scroll an Instagram profile grid by one bounded step to hydrate more posts and reels.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiInstagramPageScripts",
+      "callable": "scrollPosts",
+      "args": {},
+      "returns": { "type": "object", "description": "Profile-grid scroll, post-count, and end-of-list state." }
     },
     "postDetail": {
       "description": "Extract the active Instagram post or reel, caption, author, media, publication time, and visible engagement metadata.",
@@ -82,14 +90,22 @@
       "returns": { "type": "object", "description": "Visible Instagram post details or an explicit gate state." }
     },
     "comments": {
-      "description": "Extract comments currently visible on the active Instagram post or reel; never likes, replies, or submits anything.",
+      "description": "Collect comments and expanded replies across the active Instagram post or reel up to limit; never likes, replies, or submits anything.",
       "path": "page_scripts.js",
       "binding": "window.SocaiInstagramPageScripts",
       "callable": "comments",
       "args": {
         "limit": { "type": "integer", "required": false, "description": "Maximum visible comments to return." }
       },
-      "returns": { "type": "array", "description": "Visible Instagram comments." }
+      "returns": { "type": "array", "description": "Accumulated, deduplicated Instagram comments." }
+    },
+    "scrollComments": {
+      "description": "Load the next bounded batch of Instagram comments and collapsed replies using read-only expansion controls.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiInstagramPageScripts",
+      "callable": "scrollComments",
+      "args": {},
+      "returns": { "type": "object", "description": "Comment growth, expansion, and end-of-list state." }
     }
   }
 }

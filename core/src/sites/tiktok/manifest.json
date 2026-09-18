@@ -21,7 +21,7 @@
       "returns": { "type": "object", "description": "Search transition and result state." }
     },
     "videoCards": {
-      "description": "Extract visible TikTok video cards from the current result or author grid.",
+      "description": "Collect TikTok video cards across the current lazy result or author grid up to limit.",
       "path": "page_scripts.js",
       "binding": "window.SocaiTikTokPageScripts",
       "callable": "videoCards",
@@ -76,12 +76,12 @@
       "returns": { "type": "object", "description": "Comment activation state and geometry." }
     },
     "comments": {
-      "description": "Extract currently visible TikTok comments and replies.",
+      "description": "Collect TikTok comments and expanded replies across the lazy comment panel up to limit.",
       "path": "page_scripts.js",
       "binding": "window.SocaiTikTokPageScripts",
       "callable": "comments",
       "args": { "limit": { "type": "integer", "required": false, "description": "Maximum comments to return." } },
-      "returns": { "type": "array", "description": "Visible comments." }
+      "returns": { "type": "array", "description": "Accumulated, deduplicated comments." }
     },
     "scrollComments": {
       "description": "Scroll the active TikTok comment panel.",

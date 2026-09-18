@@ -104,8 +104,8 @@ test('content search recovers the canonical activity URL from the semantic card 
   sibling.return = sibling;
   card.__reactFiber$fixture = { sibling };
 
-  const results = loadScripts({ semanticCards: [card] })
-    .searchResults({ result_type: 'content', limit: 5 });
+  const scripts = loadScripts({ semanticCards: [card] });
+  const results = scripts.searchResults({ result_type: 'content', limit: 5 });
 
   assert.equal(results.length, 1);
   assert.equal(results[0].id, activityId);
@@ -115,6 +115,7 @@ test('content search recovers the canonical activity URL from the semantic card 
   );
   assert.equal(results[0].title, 'Rayha Rehman');
   assert.equal(results[0].snippet, 'OpenAI agent safety analysis');
+  assert.equal(typeof scripts.scrollComments, 'function');
 });
 
 test('semantic content search rejects unrelated and nested list items', () => {

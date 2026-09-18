@@ -49,14 +49,24 @@ const TAURI_AGENT_PREAMBLE: &str =
 // app renders `note:` links (as rich note pills); in the TUI's plain-markdown
 // answer they would be dead links.
 const TAURI_CITATION_RULES: &str = "\n\n## Citing notes in the final answer (required)\n\
-    The app renders note citations as rich note cards. In your final answer, \
-    every time you mention a specific note you read (including cached notes \
+    The app renders social-post citations as rich cards. In your final answer, \
+    every time you mention a specific post you read (including cached posts \
     returned by scans), cite it inline as a markdown link — \
-    [<note title>](note:<note_id>) — using the exact note_id from tool results.\n\
+    [<post title>](note:<note_id>) — using the exact archived note_id.\n\
     Example: 推荐 [湾区遛娃|坐小火车喂羊驼](note:65f0a1b2000000000c030d1e) 的路线。\n\
-    - Link text is the note's title; drop any square brackets inside it.\n\
-    - For notes only seen as preview cards and never read, link their url instead.\n\
-    - Cite each note where it is discussed, not in a separate list at the end.";
+    - Link text is the post's title; drop any square brackets inside it.\n\
+    - For results that are not archived post cards, link their canonical URL instead.\n\
+    - Cite each post where it is discussed, not in a separate list at the end.";
+
+const TAURI_SITE_ROUTING_RULES: &str = "\n\n## Browser routing\n\
+    A new conversation starts on a blank tab. Do not navigate to Xiaohongshu or \
+    any other site until the user's request requires that platform. For LinkedIn, \
+    Instagram, Douyin, or TikTok, use navigate_site, read the returned site skill, \
+    and follow that platform's tools and workflow. The Xiaohongshu playbook applies \
+    only when the requested page is Xiaohongshu. Browser-tool JSON is internal \
+    evidence: never paste raw JSON into the final answer. Present concise findings \
+    with note citations; the desktop renders archived posts as grouped cards. JSON \
+    remains available only as a downloadable evidence artifact.";
 
 const TAURI_ARTIFACT_RULES: &str = "\n\n## Deliverable files\n\
     After you create and verify any file the user should download, call \
@@ -67,6 +77,7 @@ const TAURI_ARTIFACT_RULES: &str = "\n\n## Deliverable files\n\
 /// Site the desktop agent runner drives. Becomes a runtime choice once the
 /// app grows a site switcher.
 const APP_SITE_ID: &str = "xhs";
+const APP_INITIAL_URL: &str = "about:blank";
 
 fn app_site() -> Result<&'static NativeSiteAdapter> {
     find_native_site_adapter(APP_SITE_ID)
@@ -1127,7 +1138,7 @@ async fn acquire_session_page(
             lease,
             session_id,
             site.id,
-            site.home_url,
+            APP_INITIAL_URL,
             options.clone(),
         )
         .await
@@ -1322,7 +1333,11 @@ pub async fn agent_task_notes(
             if !by_id.contains_key(&id) {
                 order.push(id.clone());
             }
-            by_id.insert(id, note);
+            if let Some(existing) = by_id.get_mut(&id) {
+                socai_core::sites::post_archive::merge_post_record(existing, &note);
+            } else {
+                by_id.insert(id, note);
+            }
         }
     }
     Ok(order
@@ -3023,8 +3038,9 @@ async fn run_agent_task_on_session_page(
         let preamble = format!("{TAURI_AGENT_PREAMBLE}\n\n{context_note}");
         let config = AgentRunConfig {
             extra_instructions: format!(
-                "{}{}{}",
+                "{}{}{}{}",
                 agent_instructions(&preamble),
+                TAURI_SITE_ROUTING_RULES,
                 TAURI_CITATION_RULES,
                 TAURI_ARTIFACT_RULES
             ),

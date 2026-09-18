@@ -598,6 +598,7 @@
       }
       const imageUrl = kind === 'profile' ? profileImageUrl(card) :
         kind === 'company' ? companyLogoUrl(card) : '';
+      const media = kind === 'post' ? postMedia(card) : [];
       output.push({
         kind,
         id,
@@ -606,6 +607,7 @@
         subtitle,
         snippet,
         image_url: imageUrl,
+        media,
         location: locationText,
         connection_degree: kind === 'profile' ? connectionDegree.replace(/^•\s*/, '') : '',
         followers,
@@ -1193,7 +1195,7 @@
     const root = postRoot();
     if (!root) return [];
     const limit = Math.min(100, Math.max(1, Number(arg && arg.limit || 30)));
-    const output = [];
+    const entries = [];
     const seen = new Set();
     for (const node of commentNodes(root)) {
       const authorLink = firstNode(node, [
@@ -1230,7 +1232,7 @@
       const key = `${authorUrl}|${author}|${published}|${body}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      output.push({
+      const item = {
         comment_id: node.getAttribute('data-id') || node.getAttribute('data-urn') || '',
         author,
         author_id: profileIdFromUrl(authorUrl),
@@ -1238,11 +1240,62 @@
         text: body,
         published_at: published,
         reactions,
-        position: output.length,
-      });
-      if (output.length >= limit) break;
+        replies: [],
+        position: entries.length,
+      };
+      let depth = 0;
+      for (let parent = node.parentElement; parent && parent !== root; parent = parent.parentElement) {
+        if (parent.matches('ul, ol, [role="list"], [class*="nested"], [class*="replies"]')) depth += 1;
+      }
+      const left = node.getBoundingClientRect ? Math.round(node.getBoundingClientRect().left / 12) : 0;
+      entries.push({ item, level: depth * 1000 + left });
+      if (entries.length >= limit) break;
+    }
+    const output = [];
+    const stack = [];
+    for (const entry of entries) {
+      while (stack.length && stack[stack.length - 1].level >= entry.level) stack.pop();
+      if (stack.length) stack[stack.length - 1].item.replies.push(entry.item);
+      else output.push(entry.item);
+      stack.push(entry);
     }
     return output;
+  }
+
+  function commentTreeCount(items) {
+    return items.reduce((count, item) => count + 1 + commentTreeCount(item.replies || []), 0);
+  }
+
+  async function scrollComments() {
+    const root = postRoot();
+    if (!root) return { ok: false, error: 'post_not_hydrated', url: location.href };
+    const before = commentTreeCount(comments({ limit: 100 }));
+    const controls = Array.from(root.querySelectorAll('button, [role="button"]'));
+    const morePattern = /(?:load|show|view)\s+(?:more|previous|all)\s+comments?|more comments?|加载更多评论|查看更多评论/i;
+    const repliesPattern = /(?:load|show|view)\s+(?:more\s+)?(?:\d+\s+)?repl(?:y|ies)|查看(?:全部|更多)?\s*\d*\s*条?回复/i;
+    let clicked = 0;
+    for (const control of controls) {
+      if (!visible(control) || control.disabled) continue;
+      const label = cleanText(`${control.innerText || ''} ${control.getAttribute && control.getAttribute('aria-label') || ''}`, 500);
+      if (!morePattern.test(label) && !repliesPattern.test(label)) continue;
+      control.click();
+      clicked += 1;
+      if (clicked >= 6) break;
+    }
+    const rows = commentNodes(root);
+    const last = rows[rows.length - 1];
+    if (last && last.scrollIntoView) last.scrollIntoView({ block: 'end', behavior: 'auto' });
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    const after = commentTreeCount(comments({ limit: 100 }));
+    return {
+      ok: true,
+      url: location.href,
+      before,
+      after,
+      clicked,
+      grew: after > before,
+      at_end: clicked === 0 && after === before,
+    };
   }
 
   window.SocaiLinkedInPageScripts = Object.freeze({
@@ -1257,5 +1310,6 @@
     relatedPeople,
     postDetail,
     comments,
+    scrollComments,
   });
 })();

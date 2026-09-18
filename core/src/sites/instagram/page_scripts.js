@@ -352,6 +352,27 @@
     };
   }
 
+  function scrollPosts(arg) {
+    if (!profileUsername(location.href) || postIdentity(location.href)) {
+      return { ok: false, status: 'not_profile', url: location.href };
+    }
+    const input = arg || {};
+    const before = window.scrollY;
+    const beforeCount = profilePosts({ limit: 100 }).length;
+    const delta = input.to_top ? -before : input.nudge_up
+      ? -Math.max(240, Math.floor(window.innerHeight * 0.35))
+      : Math.max(520, Math.floor(window.innerHeight * 0.82));
+    window.scrollBy({ top: delta, left: 0, behavior: 'instant' });
+    return {
+      ok: !loginRoute() && !challengeRequired() && !rateLimited(),
+      before,
+      after: window.scrollY,
+      before_count: beforeCount,
+      post_count: profilePosts({ limit: 100 }).length,
+      at_end: window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 8,
+    };
+  }
+
   function parseMetric(raw) {
     const text = cleanText(raw || '', 80).replace(/\s+/g, '');
     const match = text.match(/([\d.,]+)([KMB万亿]?)/i);
@@ -529,7 +550,7 @@
       keys.forEach((key) => seen.set(key, index));
     }
     if (container) {
-      for (const media of container.querySelectorAll('video, img[src]')) {
+      for (const media of container.querySelectorAll('video, video source[src], img[src]')) {
         const alt = cleanText(media.alt || '', 3000);
         if (media.tagName === 'IMG' && /(profile picture|头像|foto del perfil|photo de profil)/i.test(alt)) continue;
         if (media.tagName === 'IMG' && (/\.gif(?:\?|$)/i.test(media.src) || /\/t51\.\d+-19\//i.test(media.src))) continue;
@@ -537,10 +558,39 @@
         const linkedPost = media.closest('a[href*="/p/"], a[href*="/reel/"]');
         const linkedIdentity = linkedPost && postIdentity(linkedPost.href);
         if (linkedIdentity && activeIdentity && linkedIdentity.shortcode !== activeIdentity.shortcode) continue;
-        const rawUrl = media.currentSrc || media.src || '';
-        const rawPoster = media.tagName === 'VIDEO' ? media.poster || '' : '';
-        append(media.tagName === 'VIDEO' ? 'video' : 'image', rawUrl, rawPoster, alt);
+        const video = media.tagName === 'VIDEO' ? media : media.closest('video');
+        const source = video && video.querySelector('source[src]');
+        const rawUrl = media.currentSrc || media.src || video && (video.currentSrc || video.src) || source && source.src || '';
+        const rawPoster = video && video.poster || '';
+        append(video ? 'video' : 'image', rawUrl, rawPoster, alt);
         if (output.length >= 20) break;
+      }
+    }
+    if (!output.some((item) => item.type === 'video')) {
+      const candidates = [metaContent('og:video'), metaContent('og:video:secure_url')];
+      for (const script of document.querySelectorAll('script[type="application/json"], script:not([src])')) {
+        const source = script.textContent || '';
+        if (!source.includes('video_url')) continue;
+        for (const match of source.matchAll(/"video_url"\s*:\s*"((?:\\.|[^"\\])+)"/g)) {
+          try { candidates.push(JSON.parse(`"${match[1]}"`)); } catch (_) {}
+          if (candidates.length >= 20) break;
+        }
+        if (candidates.length >= 20) break;
+      }
+      try {
+        for (const entry of performance.getEntriesByType('resource').slice().reverse()) {
+          const url = String(entry.name || '');
+          if (/^https:\/\//i.test(url) && /(?:\.mp4(?:\?|$)|\/t16\/|cdninstagram\.com\/.*video)/i.test(url)) {
+            candidates.push(url);
+          }
+          if (candidates.length >= 30) break;
+        }
+      } catch (_) {}
+      const poster = output.find((item) => item.type === 'image');
+      for (const candidate of candidates) {
+        if (!/^https:\/\//i.test(candidate || '')) continue;
+        append('video', candidate, poster && poster.url || '', metaContent('og:title'));
+        break;
       }
     }
     const ogImage = metaContent('og:image');
@@ -548,14 +598,6 @@
     if (ogImage && output.length < 20 && metadataIdentity && activeIdentity &&
       metadataIdentity.shortcode === activeIdentity.shortcode) {
       append('image', ogImage, '', metaContent('og:title'));
-    }
-    if (activeIdentity && activeIdentity.kind === 'reel' && !output.some((item) => item.type === 'video')) {
-      const cover = output.find((item) => item.type === 'image');
-      if (cover) {
-        cover.type = 'video';
-        cover.poster_url = cover.url;
-        cover.url = '';
-      }
     }
     return output;
   }
@@ -576,7 +618,7 @@
   }
 
   function commentRows(limit) {
-    const output = [];
+    const flat = [];
     const seen = new Set();
     for (const time of document.querySelectorAll('a[href*="/c/"] time[datetime]')) {
       const commentLink = time.closest('a[href*="/c/"]');
@@ -609,7 +651,12 @@
       const actionText = cleanText(actionRoot, 3000);
       const likes = metricBeforeLabel(actionText, 'likes?|次赞');
       seen.add(id);
-      output.push({
+      let listDepth = 0;
+      for (let parent = row.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+        if (parent.matches('ul, ol, [role="list"]')) listDepth += 1;
+      }
+      const left = row.getBoundingClientRect ? Math.round(row.getBoundingClientRect().left / 12) : 0;
+      flat.push({
         id,
         url,
         author: {
@@ -620,15 +667,68 @@
         published_at: time.dateTime || time.getAttribute('datetime') || '',
         published_label: relative,
         likes,
+        replies: [],
+        __level: listDepth * 1000 + left,
       });
-      if (output.length >= limit) break;
+      if (flat.length >= limit) break;
     }
-    return output;
+    const output = [];
+    const stack = [];
+    for (const item of flat) {
+      while (stack.length && stack[stack.length - 1].__level >= item.__level) stack.pop();
+      if (stack.length) stack[stack.length - 1].replies.push(item);
+      else output.push(item);
+      stack.push(item);
+    }
+    const clean = (item) => {
+      delete item.__level;
+      item.replies.forEach(clean);
+      return item;
+    };
+    return output.map(clean);
+  }
+
+  function commentCount(items) {
+    return items.reduce((count, item) => count + 1 + commentCount(item.replies || []), 0);
   }
 
   function comments(arg) {
     const limit = Math.min(100, Math.max(1, Number(arg && arg.limit || 25)));
     return postIdentity(location.href) ? commentRows(limit) : [];
+  }
+
+  async function scrollComments() {
+    if (!postIdentity(location.href)) {
+      return { ok: false, status: 'not_post', url: location.href };
+    }
+    const before = commentCount(commentRows(100));
+    const root = document.querySelector('[role="dialog"]') || document.querySelector('main') || document;
+    const controls = Array.from(root.querySelectorAll('button, [role="button"]'));
+    const commentsPattern = /(?:view|load)\s+(?:all\s+\d+|more|previous)\s+comments?|查看(?:全部|更多)?\s*\d*\s*条?评论/i;
+    const repliesPattern = /(?:view|load)\s+(?:all\s+)?(?:\d+\s+)?repl(?:y|ies)|查看(?:全部|更多)?\s*\d*\s*条?回复/i;
+    let clicked = 0;
+    for (const control of controls) {
+      if (!visible(control) || control.disabled) continue;
+      const label = cleanText(`${control.innerText || ''} ${control.getAttribute && control.getAttribute('aria-label') || ''}`, 500);
+      if (!commentsPattern.test(label) && !repliesPattern.test(label)) continue;
+      control.click();
+      clicked += 1;
+      if (clicked >= 6) break;
+    }
+    const times = Array.from(root.querySelectorAll('a[href*="/c/"] time[datetime]'));
+    const last = times[times.length - 1];
+    if (last && last.scrollIntoView) last.scrollIntoView({ block: 'end', behavior: 'auto' });
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    const after = commentCount(commentRows(100));
+    return {
+      ok: true,
+      url: location.href,
+      before,
+      after,
+      clicked,
+      grew: after > before,
+      at_end: clicked === 0 && after === before,
+    };
   }
 
   function postDetail() {
@@ -666,7 +766,7 @@
       engagement: {
         likes: engagement.likes,
         comments: engagement.comments,
-        visible_comments: visibleComments.length,
+        visible_comments: commentCount(visibleComments),
       },
       login_gate_present: state.login_gate_present,
     };
@@ -707,9 +807,11 @@
     setSearchQuery,
     searchResults,
     scrollResults,
+    scrollPosts,
     profileDetail,
     profilePosts,
     postDetail,
     comments,
+    scrollComments,
   });
 })();

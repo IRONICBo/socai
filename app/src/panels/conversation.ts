@@ -5,8 +5,8 @@
 //!   · the user's prompt as a right-aligned bubble (one turn per run)
 //!   · the agent's work as a quiet, collapsible activity log that auto-expands
 //!     while the run streams and folds once the answer lands
-//!   · the notes each search surfaced as always-visible card groups (they are
-//!     the conversation's artifacts, never tucked inside the fold)
+//!   · social materials grouped once per conversation by platform and media
+//!     type, with collapsible groups independent from individual turns
 //!   · the answer inline as rich markdown with note citations — no separate
 //!     panel, no "jump to answer" bridge
 //! The same chat composer serves both faces: pinned under the thread in
@@ -16,7 +16,7 @@
 //!
 //! Rendering only; state and bindings live in tasks.ts.
 
-import type { AgentArtifact, AgentTaskEventPayload, AgentTaskSnapshot, Status } from "../main";
+import type { AgentArtifact, AgentTaskEventPayload, AgentTaskSnapshot, NoteData, Status } from "../main";
 import { esc } from "../lib/html";
 import {
   formatStepCount,
@@ -34,7 +34,7 @@ import type { ComposerVoiceState } from "../lib/voice-input";
 import feishuLogo from "../assets/connectors/feishu.png";
 import chromeRemoteDebuggingImage from "../assets/chrome-remote-debugging.png";
 import chromeAllowDialogImage from "../assets/chrome-allow-dialog.png";
-import { renderNoteAnswer, renderNoteCards } from "./notes";
+import { mergeNoteRegistry, noteDataForRef, renderNoteAnswer, renderNoteCards } from "./notes";
 import { artifactFileIcon, downloadIcon, eyeIcon, formatArtifactSize } from "./artifact_preview";
 import type { AgentTaskView } from "./tasks";
 
@@ -97,6 +97,9 @@ interface TurnMetrics {
 
 export function renderConversation(props: ConversationProps): string {
   const { task, running } = props;
+  // Tool-result entities can arrive before notes.json polling. Ingest them
+  // before answer markdown so citations in this same render resolve to cards.
+  ingestNotesFromEvents(task.events);
   return `
     <section class="conversation" aria-label="${esc(t("task.viewAria"))}">
       ${renderHead(task, running)}
@@ -239,7 +242,7 @@ function renderThread(
   const duplicateIndex = finalAnswerEventIndex(task);
   const groups = groupRunEvents(task, duplicateIndex);
   if (groups.length === 0) groups.push([]); // no events (e.g. an early failure) → still show prompt + error
-  return groups
+  const turns = groups
     .map((events, index) => renderTurn(
       task,
       events,
@@ -251,6 +254,7 @@ function renderThread(
       artifactPreviewPath,
     ))
     .join("");
+  return `${turns}${renderSocialMaterials(task)}`;
 }
 
 // One turn is one run's events. Turn 0 has no "started" event (the task's
@@ -523,7 +527,6 @@ function renderActivity(
   isActivityOpen: ConversationProps["isActivityOpen"],
 ): string {
   if (body.length === 0 && !showWorking) return "";
-  const notesHtml = body.map(renderSearchGroupForEvent).join("");
   const open = isActivityOpen(turnIndex, showWorking);
 
   // compact summary signal: steps · duration (sources live in the notes strip)
@@ -560,7 +563,6 @@ function renderActivity(
         ${meta}
       </button>
       ${open ? `<div class="activity activity--transcript">${body.map(renderEventRow).join("")}${workingRow}</div>` : ""}
-      ${notesHtml ? `<div class="activity-notes">${notesHtml}</div>` : ""}
     </div>
   `;
 }
@@ -631,65 +633,8 @@ function toolProgressText(ev: AgentTaskEventPayload): string {
   return `${phase}${count}${title}`;
 }
 
-// ── per-search note previews (always-visible card groups) ────────────
-/** The notes an event surfaced, as a labeled card group ("search · <query>").
- *  Empty when the event carries no resolvable notes. */
-export function renderSearchGroupForEvent(ev: AgentTaskEventPayload): string {
-  const refs = noteRefsFromEvent(ev);
-  if (refs.length === 0) return "";
-  const cards = renderNoteCards(refs, "rich");
-  if (!cards) return "";
-  const isSearch = ev.name === "search";
-  const args = ev.args as { query?: unknown } | null | undefined;
-  const query = isSearch && args && typeof args.query === "string" ? args.query : "";
-  return renderSearchGroup(t(isSearch ? "task.searchLabel" : "task.notesLabel"), query, cards, false);
-}
-
-/** The live strip: notes already on disk that no result row has claimed yet
- *  (tasks.ts polls the archive mid-run and pins this to the last turn). While
- *  a search is still in flight, its query labels the strip — the same header
- *  the finished result's group will carry. */
-export function renderLiveNotesGroup(refs: string[], searchQuery: string | null): string {
-  const cards = renderNoteCards(refs, "rich");
-  if (!cards) return "";
-  if (searchQuery !== null) return renderSearchGroup(t("task.searchLabel"), searchQuery, cards, true);
-  return renderSearchGroup(t("task.notesLabel"), "", cards, true);
-}
-
-/** The query of the search still in flight: the newest search tool_call with
- *  no tool_result/tool_error answering its id. Null when no search is pending
- *  ("" when one is pending but its args carry no readable query). */
-export function pendingSearchQuery(task: AgentTaskView): string | null {
-  const answered = new Set<string>();
-  for (const ev of task.events) {
-    if ((ev.kind === "tool_result" || ev.kind === "tool_error") && ev.id) answered.add(ev.id);
-  }
-  for (let index = task.events.length - 1; index >= 0; index -= 1) {
-    const ev = task.events[index];
-    if (ev.kind !== "tool_call" || ev.name !== "search") continue;
-    if (ev.id && answered.has(ev.id)) return null; // newest search already landed
-    const args = ev.args as { query?: unknown } | null | undefined;
-    return args && typeof args.query === "string" ? args.query : "";
-  }
-  return null;
-}
-
-function renderSearchGroup(label: string, query: string, cardsHtml: string, live: boolean): string {
-  return `
-    <div class="search-group"${live ? " data-live-strip" : ""}>
-      <div class="search-group__label">
-        <span class="search-group__tool">${esc(label)}</span>
-        ${query ? `<span class="search-group__q">${esc(query)}</span>` : ""}
-      </div>
-      <div class="search-group__row">${cardsHtml}</div>
-    </div>
-  `;
-}
-
 // Note refs an event surfaced: the design's `{type:"note", data:{ref}}`
-// entities, plus (for the current bulk `search`/`author_scan` tools) the note
-// ids nested in the xhs_search / card-grid / note entities. Exported for the
-// live strip in tasks.ts, which shows only notes no result row has claimed yet.
+// entities, plus note ids nested in bulk search/card-grid entities.
 export function noteRefsFromEvent(ev: AgentTaskEventPayload): string[] {
   const refs: string[] = [];
   const push = (v: unknown): void => {
@@ -704,13 +649,86 @@ export function noteRefsFromEvent(ev: AgentTaskEventPayload): string[] {
     }
     push(data.note_id);
     for (const n of asArray(data.notes)) {
-      const obj = n as { entity?: { note_id?: unknown }; note_id?: unknown };
+      const obj = n as { entity?: { note_id?: unknown }; note_id?: unknown; site?: unknown };
       push(obj?.entity?.note_id ?? obj?.note_id);
     }
     for (const c of asArray(data.cards)) push((c as { note_id?: unknown })?.note_id);
     for (const c of asArray(data.note_cards)) push((c as { note_id?: unknown })?.note_id);
   }
   return refs;
+}
+
+function ingestNotesFromEvents(events: AgentTaskEventPayload[]): void {
+  const notes: NoteData[] = [];
+  for (const event of events) {
+    for (const entity of event.entities ?? []) {
+      const data = (entity?.data ?? {}) as Record<string, unknown>;
+      for (const item of Array.isArray(data.notes) ? data.notes : []) {
+        const note = item as NoteData;
+        if (typeof note?.note_id === "string" && typeof note?.site === "string") notes.push(note);
+      }
+    }
+  }
+  if (notes.length) mergeNoteRegistry(notes);
+}
+
+/** One conversation-level material library, independent from run/turn layout. */
+export function renderSocialMaterials(task: AgentTaskView): string {
+  ingestNotesFromEvents(task.events);
+  const refs: string[] = [];
+  const add = (ref: string | undefined): void => {
+    if (ref && !refs.includes(ref)) refs.push(ref);
+  };
+  for (const note of task.notes ?? []) add(note.note_id);
+  for (const event of task.events) {
+    if (event.kind === "tool_result") noteRefsFromEvent(event).forEach(add);
+  }
+  if (!refs.length) return `<section class="social-materials" data-social-materials hidden></section>`;
+
+  const groups = new Map<string, { label: string; refs: string[] }>();
+  for (const ref of refs) {
+    const note = noteDataForRef(ref);
+    const site = note?.site || ref.split(":", 1)[0] || "xhs";
+    const platform = materialPlatform(site);
+    const media = note?.media ?? [];
+    const type = media.some((item) => item.kind === "video")
+      ? t("task.materialVideo")
+      : media.length > 0
+        ? t("task.materialImage")
+        : t("task.materialText");
+    const key = `${site}:${type}`;
+    const group = groups.get(key) ?? { label: `${platform} · ${type}`, refs: [] };
+    group.refs.push(ref);
+    groups.set(key, group);
+  }
+  const sections = [...groups.values()].map((group) => `
+    <details class="social-materials__group">
+      <summary class="social-materials__summary">
+        <span>${esc(group.label)}</span>
+        <span class="social-materials__count">${group.refs.length}</span>
+      </summary>
+      <div class="social-materials__cards">${renderNoteCards(group.refs, "rich")}</div>
+    </details>
+  `).join("");
+  return `
+    <section class="social-materials" data-social-materials aria-label="${esc(t("task.materialsAria"))}">
+      <div class="social-materials__head">
+        <span>${esc(t("task.materialsLabel"))}</span>
+        <span>${refs.length}</span>
+      </div>
+      ${sections}
+    </section>
+  `;
+}
+
+function materialPlatform(site: string): string {
+  switch (site.toLowerCase()) {
+    case "linkedin": return "LinkedIn";
+    case "instagram": return "Instagram";
+    case "dy": return "Douyin";
+    case "tiktok": return "TikTok";
+    default: return "Xiaohongshu";
+  }
 }
 
 // ── quiet meta line under an agent message ───────────────────────────

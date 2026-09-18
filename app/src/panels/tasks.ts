@@ -21,15 +21,12 @@ import { bindTextareaAutosize } from "../lib/autosize";
 import { settingsMenu } from "./settings";
 import { renderConfirmDeleteDialog, renderSidebar as renderSidebarMarkup } from "./task_history";
 import {
-  noteRefsFromEvent,
-  pendingSearchQuery,
   answerTextForTurn,
   liveActivityMetricsText,
   renderComposePane,
   renderConversation,
   renderEventRow,
-  renderLiveNotesGroup,
-  renderSearchGroupForEvent,
+  renderSocialMaterials,
 } from "./conversation";
 import type { ArtifactDownloadState, ChromeSetupState, ComposerProps } from "./conversation";
 import { artifactPreviewMime, renderArtifactPreview } from "./artifact_preview";
@@ -398,8 +395,9 @@ export namespace agentPanel {
     }
     try {
       const notes = await invoke<NoteData[]>("agent_task_notes", { taskId: task.task_id });
-      // Within a run records only accumulate; no growth means nothing to do.
-      if (notes.length <= (task.notes?.length ?? 0)) return;
+      // A detail or comment read enriches an existing card without increasing
+      // the archive length, so compare content as well as count.
+      if (JSON.stringify(notes) === JSON.stringify(task.notes ?? [])) return;
       task.notes = notes;
       setNoteRegistry(notes, task.run_dir);
       updateLiveStrip(task);
@@ -414,8 +412,6 @@ export namespace agentPanel {
     if (metrics) metrics.textContent = liveActivityMetricsText(task);
   }
 
-  let liveStripKey = "";
-
   // Per-task scroll memory for the conversation thread. A full render rebuilds
   // the thread DOM (dropping its scroll offset), so a scroll listener records
   // the position here and the post-render bind restores it. No entry, or a
@@ -426,49 +422,14 @@ export namespace agentPanel {
     return stream.scrollTop + stream.clientHeight >= stream.scrollHeight - 8;
   }
 
-  // The last turn's activity-notes container — where streamed note groups and
-  // the live strip land. Created on demand: a turn renders without one until
-  // its first search result arrives.
-  function lastTurnNotesContainer(stream: HTMLDivElement): HTMLDivElement | null {
-    const turn = stream.querySelector<HTMLDivElement>(".thread-inner > .turn:last-child");
-    const wrap = turn?.querySelector<HTMLDivElement>(".activity-wrap");
-    if (!wrap) return null;
-    let notes = wrap.querySelector<HTMLDivElement>(".activity-notes");
-    if (!notes) {
-      wrap.insertAdjacentHTML("beforeend", `<div class="activity-notes"></div>`);
-      notes = wrap.querySelector<HTMLDivElement>(".activity-notes");
-    }
-    return notes;
-  }
-
+  // Keep one conversation-level material library instead of attaching cards
+  // to whichever run/turn happened to discover them.
   function updateLiveStrip(task: AgentTaskView): void {
     const stream = document.querySelector<HTMLDivElement>(`[data-agent-events="${task.task_id}"]`);
     if (!stream) return;
-    const claimed = new Set<string>();
-    for (const ev of task.events) {
-      if (ev.kind !== "tool_result") continue;
-      for (const ref of noteRefsFromEvent(ev)) claimed.add(ref);
-    }
-    const refs = (task.notes ?? []).map((n) => n.note_id).filter((id) => !claimed.has(id));
-    // The in-flight search's query heads the strip (the finished result's
-    // group will carry the same header once it lands).
-    const query = pendingSearchQuery(task);
-    // Keyed per task so switching tasks can't suppress another task's strip.
-    const key = `${task.task_id}|${query ?? "∅"}|${refs.join(",")}`;
-    const existing = stream.querySelector("[data-live-strip]");
-    if (key === liveStripKey && existing) return;
-    liveStripKey = key;
-    // Capture auto-follow BEFORE touching the DOM — removing the old strip or
-    // creating the notes container already shifts scrollHeight, which would
-    // read as "the user scrolled away" and strand the thread mid-scroll.
     const pinned = isPinnedToBottom(stream);
-    existing?.remove();
-    if (refs.length === 0) return;
-    const html = renderLiveNotesGroup(refs, query);
-    if (!html) return;
-    const notes = lastTurnNotesContainer(stream);
-    if (!notes) return;
-    notes.insertAdjacentHTML("beforeend", html);
+    const materials = stream.querySelector<HTMLElement>("[data-social-materials]");
+    if (materials) materials.outerHTML = renderSocialMaterials(task);
     if (pinned) stream.scrollTop = stream.scrollHeight;
   }
 
@@ -1905,13 +1866,6 @@ export namespace agentPanel {
     if (!stream) return;
 
     const pinned = isPinnedToBottom(stream);
-    // A result row claims its notes (its own group renders them), so refresh
-    // the live strip right away instead of waiting for the next poll tick.
-    if (payload.kind === "tool_result") {
-      stream.querySelector("[data-live-strip]")?.remove();
-      liveStripKey = "";
-    }
-
     const turn = stream.querySelector<HTMLDivElement>(".thread-inner > .turn:last-child");
     const activity = turn?.querySelector<HTMLDivElement>(".activity");
     if (activity) {
@@ -1928,11 +1882,6 @@ export namespace agentPanel {
       const working = activity.querySelector(".act-row--working");
       if (working) working.insertAdjacentHTML("beforebegin", renderEventRow(payload));
       else activity.insertAdjacentHTML("beforeend", renderEventRow(payload));
-    }
-
-    if (payload.kind === "tool_result") {
-      const group = renderSearchGroupForEvent(payload);
-      if (group) lastTurnNotesContainer(stream)?.insertAdjacentHTML("beforeend", group);
     }
 
     if (pinned) stream.scrollTop = stream.scrollHeight;

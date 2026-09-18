@@ -21,7 +21,7 @@ Navigate to a route with `navigate_site`, then call `searchState` before trustin
 - Use `companyDetail` only on `/company/<company-id>/` or `/showcase/<company-id>/`. Search results can contain similarly named or affiliated pages; select by canonical company URL, not result position.
 - `companyPeople.people` reads the explicitly labelled “People you may know” module on `/company/<company-id>/people/`. It is a recommendation list and is not an employee roster. To identify company employees, search people by company name, open candidates, then use `profileHistory` and require an explicitly current experience entry whose organization matches the company.
 - Use `relatedPeople.people` only as a graph-expansion clue. Preserve its `source_section`; never describe a recommendation as a follower, connection, colleague, or employee unless an explicit page field proves that relationship.
-- Use `postDetail` and `comments` on `/posts/...` or `/feed/update/urn:li:...` pages.
+- Use `postDetail` and `comments` on `/posts/...` or `/feed/update/urn:li:...` pages. A `comments` call automatically alternates extraction with `scrollComments`, expands collapsed replies, deduplicates, and returns the accumulated set up to `limit` (100 by default); its artifact contains that final set. Expansion is read-only; never click Reply, Like, React, or Submit controls.
 - Keep the returned canonical URL and stable profile/activity id with every note or citation. Never identify a result only by its visible position.
 - Preserve returned `image_url`, `avatar_url`, `logo_url`, and `media` HTTPS URLs in research output so the desktop can display linked previews or include them in Markdown/artifacts. Do not invent or substitute missing media.
 - Visible guest post pages can contain useful post text and comments even when a sign-in overlay is present. Trust `postDetail.ok`; use `pageState.login_gate_present` to disclose that additional content may be hidden.
@@ -32,6 +32,10 @@ Navigate to a route with `navigate_site`, then call `searchState` before trustin
 - Find people at a company: search `companies`, select the canonical company, search `people` with company plus role/location keywords, then verify employment from a current entry returned by `profileHistory`.
 - Build a relationship map: start from one verified profile, call `relatedPeople`, open relevant profiles, and record only explicit connection degree, mutual-connection text, current experience, and source-section edges.
 - Understand a person: combine profile details with their selected posts and visible comments, keeping each statement tied to its profile or activity URL.
+
+## Post assets
+
+`searchResults` automatically scrolls lazy result pages up to `limit`. Its post cards, `postDetail`, and fully accumulated `comments` are archived automatically as desktop cards and JSON artifacts. Open selected posts and call `postDetail` before `comments` so the archive contains the complete post body, author, media, engagement, and loaded comments. Cite a saved post with the exact returned archive id (`linkedin:<post_id>`) when the host requests `note:` citations.
 
 ## Greeting drafts
 

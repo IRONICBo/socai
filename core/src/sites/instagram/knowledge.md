@@ -14,6 +14,7 @@ Use Instagram for read-only profile, post, reel, and comment research. Do not fo
 - Keep each candidate's `kind`, stable `id`, canonical `url`, and `position`; never identify a result only by its screen position.
 - Use `profileDetail` and `profilePosts` on a selected `/<username>/` profile.
 - Use `postDetail` and `comments` on a selected `/p/<shortcode>/`, `/reel/<shortcode>/`, or `/<username>/(p|reel)/<shortcode>/` page.
+- For a requested comment budget, call `postDetail`, then `comments`. The host automatically alternates extraction with `scrollComments`, expands collapsed replies, deduplicates, and returns the accumulated set up to `limit` (100 by default). The expansion action is read-only; never click Like, Reply, Follow, or Submit controls.
 - Prefer candidates that match the user's topic in the returned title/subtitle or media description. Open a candidate before making claims from it.
 
 ## Public content and login overlays
@@ -23,3 +24,7 @@ Public profiles and posts can remain readable while Instagram shows a sign-up or
 ## Pagination and stopping
 
 Use `scrollResults` only after `searchState` confirms a valid search surface and more evidence is needed. Re-run `searchResults`, deduplicate by `kind + id` or canonical URL, and stop when the requested coverage is met. Never scroll indefinitely or attempt to bypass a login, challenge, or rate limit.
+
+## Post assets
+
+Post/reel rows from `searchResults` and `profilePosts` are automatically collected across lazy-scroll pages up to `limit`. Those rows, full `postDetail` data, and the final accumulated comments are archived automatically as desktop cards and JSON artifacts. Preserve returned media URLs. Cite a saved post with its exact archive id (`instagram:<shortcode>`) when the host requests `note:` citations.
