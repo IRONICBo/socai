@@ -9,7 +9,6 @@ readingTime: 5 min read
 alternates:
   - hreflang: zh
     href: /blog/zh/jev-social-media-automation
-footnote: "Written by the socai team. Features described reflect jev-social as of September 2026."
 faq:
   - q: "Which social platforms can Jev operate?"
     a: "jev-social connects Jev to socai's Instagram, TikTok and LinkedIn tools. Jev can choose searches and select specific posts, videos or profiles to inspect next."
@@ -18,8 +17,6 @@ faq:
   - q: "Do I need an Instagram or TikTok developer API key?"
     a: "No. socai uses your local Chrome browser. You just need an OpenRouter key with Jev access and to log in to your social accounts."
 ---
-
-[阅读中文版](/blog/zh/jev-social-media-automation)
 
 [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) is a fast decision model from TypeSafe AI. Give it the current situation and a few options, and it picks what to do next. On social media, those choices might be what to search for, which post to open, or whose profile to check.
 

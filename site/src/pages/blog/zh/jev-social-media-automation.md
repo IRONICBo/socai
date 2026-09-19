@@ -9,7 +9,6 @@ readingTime: 5 分钟阅读
 alternates:
   - hreflang: en
     href: /blog/jev-social-media-automation
-footnote: "socai 团队撰写。本文介绍 jev-social 截至 2026 年 9 月的功能。"
 faq:
   - q: "Jev 可以操作哪些社交平台？"
     a: "jev-social 将 Jev 接入 socai，目前提供 Instagram、TikTok 和 LinkedIn 的搜索与内容读取操作。Jev 可以选择具体帖子、视频或主页继续查看。"
@@ -18,8 +17,6 @@ faq:
   - q: "需要申请 Instagram 或 TikTok 的开发者 API 吗？"
     a: "它通过 socai CLI 操作你本地的 Chrome，无需 API。你需要能调用 Jev 的 OpenRouter Key，然后在本地登录社媒平台就够。"
 ---
-
-[Read in English](/blog/jev-social-media-automation)
 
 [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) 是 TypeSafe AI 推出的一个决策模型，特点是快。把当前情况和几个选项给它，它就能选出下一步做什么。放到社交媒体上，就是搜什么关键词、点开哪条帖子、接着看哪个作者。
 
