@@ -8,13 +8,25 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · **日本語** · [한국어](README.ko.md)
 
-**複数のソーシャルメディアを横断調査するローカルエージェント**
+**ソーシャルメディアを、本当に読むエージェント。**
 
-ログイン済みの Chrome に接続し、小紅書、抖音、TikTok、Instagram、LinkedIn の投稿・コメント・画像・動画・プロフィールを調査します。
+スクレイパーでも、リバースエンジニアリングした API でもない。socai は、すでにログインしている Chrome の中で本物のページを開き、引用できる証拠を持ち帰ります。
 
-[公式サイト](https://socai.io/?utm_source=github&utm_medium=readme) · [ダウンロード](#デスクトップアプリ) · [クイックスタート](#クイックスタート) · [対応プラットフォーム](#対応プラットフォーム) · [開発ドキュメント](DEVELOPMENT.md)
+<p>
+  <img src="site/public/platforms/xiaohongshu.png" height="32" alt="小紅書">
+  &nbsp;&nbsp;
+  <img src="site/public/platforms/tiktok.png" height="32" alt="TikTok / 抖音">
+  &nbsp;&nbsp;
+  <img src="site/public/platforms/instagram.png" height="32" alt="Instagram">
+  &nbsp;&nbsp;
+  <img src="site/public/platforms/linkedin.svg" height="32" alt="LinkedIn">
+</p>
+<p><sub>小紅書 · TikTok / 抖音 · Instagram · LinkedIn</sub></p>
+
+[公式サイト](https://socai.io/?utm_source=github&utm_medium=readme) · [ダウンロード](#デスクトップアプリ) · [Discord](https://discord.gg/CpQdA7bwt8) · [クイックスタート](#クイックスタート) · [開発ドキュメント](DEVELOPMENT.md)
 
 [![release](https://img.shields.io/github/v/release/socai-io/socai?style=flat-square&color=blue&label=release)](https://github.com/socai-io/socai/releases/latest)
+[![discord](https://img.shields.io/badge/discord-join-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/CpQdA7bwt8)
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-555?style=flat-square)](#デスクトップアプリ)
 [![license](https://img.shields.io/badge/license-Apache--2.0-555?style=flat-square)](LICENSE)
 
@@ -28,31 +40,11 @@
 
 ## 概要
 
-socai は、小紅書、抖音、TikTok、Instagram、LinkedIn に対応するローカルのソーシャルメディアエージェント基盤です。Chrome DevTools Protocol（CDP）を通じて実際のブラウザーに接続し、既存のログイン状態を再利用します。検索、投稿や動画の閲覧、コメントと返信の展開、著者・人物・企業ページの確認を通常の画面操作で行い、結果を構造化データとローカル成果物として保存します。
+本物の議論はソーシャルメディア上にある。公開 API では見えない。スクレイパーは凍結されやすい。socai は第三の道を取る：ログイン済みの Chrome を、調査する人と同じように動かす。検索し、投稿を開き、コメントを展開し、プロフィールを読み、画像を OCR し、動画を文字起こしして、証拠を残す。
 
-主な利用例：
-
-- カテゴリー内で新しく生まれた話題、感情、表現の追跡
-- 投稿とコメント欄から、ニーズ、不安、購買判断の言葉を抽出
-- 複数プラットフォームでのブランド、商品、店舗、キャンペーンに対する反応の比較
-- クリエイター、人物、企業、投稿方針、人気投稿、読者反応の分析
-- 画像・動画の保存、OCR、動画音声文字起こしによる証拠の補完
-
-現在は読み取りと調査を中心に提供しており、投稿、いいね、保存、コメントなどの書き込み操作は提供していません。
+読み取り専用。投稿、いいね、フォロー、コメントはしない。
 
 https://github.com/user-attachments/assets/8aebcded-f365-4f12-b9c4-102cc1fa964d
-
-## 主な機能
-
-| 機能 | 内容 |
-| --- | --- |
-| 実ブラウザー操作 | 普段使っている Chrome に接続し、ページ上の操作経路に沿ってタスクを実行します。 |
-| 投稿・コメントの深読 | タイトル、本文、著者、反応数、コメント、返信を取得します。 |
-| マルチモーダル理解 | 投稿画像と動画の保存、ローカル画像 OCR、動画音声文字起こしに対応します。 |
-| クロスプラットフォーム調査 | 各サイト固有の検索、プロフィール、投稿、コメント、返信、スクロール読み込みを利用します。 |
-| 証拠と成果物の保存 | 構造化結果、メディア一覧、レポートや表などを保存し、後から確認できます。 |
-| 複数の操作画面 | デスクトップアプリ、CLI、ターミナル UI が同じ Rust コアを共有します。 |
-| エージェント連携 | Claude Code、Codex などが扱いやすい構造化 JSON を返します。 |
 
 ## クイックスタート
 
@@ -264,9 +256,9 @@ socai config set runs.dir "$(pwd)/socai-runs"
 
 ## コミュニティ
 
-<img src="docs/assets/wechat-group-qr.jpg" alt="socai ソーシャルメディア調査 WeChat グループ QR コード" width="280">
+[Discord に参加](https://discord.gg/CpQdA7bwt8) · または WeChat グループの QR：
 
-利用方法、調査ワークフロー、機能提案に関するフィードバックを歓迎します。
+<img src="docs/assets/wechat-group-qr.jpg" alt="socai ソーシャルメディア調査 WeChat グループ QR コード" width="280">
 
 ## ライセンス
 

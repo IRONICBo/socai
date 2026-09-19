@@ -19,7 +19,7 @@ const messages = {
         meta: {
             title: "socai · social media research Agent",
             description:
-                "socai is a local Agent for research across RedNote, Douyin, TikTok, Instagram, and LinkedIn through your signed-in Chrome.",
+                "A local agent that researches Xiaohongshu, Douyin, TikTok, Instagram, and LinkedIn in your signed-in Chrome — real pages, real comments, evidence you can cite.",
             socialImageAlt: "socai social media research Agent preview",
         },
         nav: {
@@ -33,9 +33,14 @@ const messages = {
             releaseLabel: "release version {version}",
         },
         hero: {
-            title: "a social media research Agent.",
+            title: "an agent that actually reads social media.",
             subtitle:
-                "connect your signed-in chrome and let socai research RedNote, Douyin, TikTok, Instagram, and LinkedIn through real page interactions.",
+                "not a scraper. not a reverse-engineered API. socai drives the Chrome you're already signed into — Xiaohongshu, Douyin, TikTok, Instagram, LinkedIn — and comes back with evidence you can cite.",
+            platformsAria: "supported platforms",
+            platformXiaohongshu: "Xiaohongshu",
+            platformTiktok: "TikTok / Douyin",
+            platformInstagram: "Instagram",
+            platformLinkedin: "LinkedIn",
             actionsAria: "download and source",
             download: "download for macOS",
             downloadWindows: "download for Windows",
@@ -80,7 +85,7 @@ const messages = {
         meta: {
             title: "socai · 社交媒体调研 Agent",
             description:
-                "socai 是面向小红书、抖音、TikTok、Instagram 和 LinkedIn 的本地社交媒体调研 Agent，通过已登录的 Chrome 完成真实页面研究。",
+                "socai 是住在你已登录 Chrome 里的本地社交媒体 Agent。小红书、抖音、TikTok、Instagram、LinkedIn，打开真页面，交回带出处的证据。",
             socialImageAlt: "socai 社交媒体调研 Agent 界面预览",
         },
         nav: {
@@ -94,9 +99,14 @@ const messages = {
             releaseLabel: "发布版本 {version}",
         },
         hero: {
-            title: "用 Agent 调研社交媒体",
+            title: "真的会读社交媒体的 Agent。",
             subtitle:
-                "连接你已登录的 Chrome，让 socai 通过真实页面交互调研小红书、抖音、TikTok、Instagram 和 LinkedIn。",
+                "不是爬虫，也不是逆向接口。socai 住在你已登录的 Chrome 里，打开小红书、抖音、TikTok、Instagram、LinkedIn 的真页面，交回带出处的证据。",
+            platformsAria: "支持的平台",
+            platformXiaohongshu: "小红书",
+            platformTiktok: "抖音 / TikTok",
+            platformInstagram: "Instagram",
+            platformLinkedin: "LinkedIn",
             actionsAria: "下载和源码",
             download: "下载 macOS 版",
             downloadWindows: "下载 Windows 版",
@@ -225,6 +235,56 @@ const socialImageAlt = message("meta.socialImageAlt");
                     <h1 id="hero-title" data-i18n="hero.title">
                         {message("hero.title")}
                     </h1>
+                    <ul
+                        class="hero__platforms"
+                        aria-label={message("hero.platformsAria")}
+                        data-i18n-aria-label="hero.platformsAria"
+                    >
+                        <li>
+                            <img
+                                src="/platforms/xiaohongshu.png"
+                                width="24"
+                                height="24"
+                                alt=""
+                            />
+                            <span data-i18n="hero.platformXiaohongshu"
+                                >{message("hero.platformXiaohongshu")}</span
+                            >
+                        </li>
+                        <li>
+                            <img
+                                src="/platforms/tiktok.png"
+                                width="24"
+                                height="24"
+                                alt=""
+                            />
+                            <span data-i18n="hero.platformTiktok"
+                                >{message("hero.platformTiktok")}</span
+                            >
+                        </li>
+                        <li>
+                            <img
+                                src="/platforms/instagram.png"
+                                width="24"
+                                height="24"
+                                alt=""
+                            />
+                            <span data-i18n="hero.platformInstagram"
+                                >{message("hero.platformInstagram")}</span
+                            >
+                        </li>
+                        <li>
+                            <img
+                                src="/platforms/linkedin.svg"
+                                width="24"
+                                height="24"
+                                alt=""
+                            />
+                            <span data-i18n="hero.platformLinkedin"
+                                >{message("hero.platformLinkedin")}</span
+                            >
+                        </li>
+                    </ul>
                     <p class="hero__subtitle" data-i18n="hero.subtitle">
                         {message("hero.subtitle")}
                     </p>

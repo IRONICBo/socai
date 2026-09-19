@@ -8,13 +8,25 @@
 
 [English](README.md) · **简体中文** · [日本語](README.ja.md) · [한국어](README.ko.md)
 
-**面向多平台内容研究的本地社交媒体 Agent**
+**真的会读社交媒体的 Agent。**
 
-连接你已登录的 Chrome，让 Agent 在小红书、抖音、TikTok、Instagram 和 LinkedIn 上深读内容，完成选题、竞品与消费者洞察调研。
+不是爬虫，也不是逆向接口。socai 住在你已经登录的 Chrome 里，打开真页面，交回带出处的证据。
 
-[官网](https://socai.io/?utm_source=github&utm_medium=readme) · [下载桌面端](#桌面端) · [快速开始](#快速开始) · [支持平台](#支持平台) · [开发文档](DEVELOPMENT.md)
+<p>
+  <img src="site/public/platforms/xiaohongshu.png" height="32" alt="小红书">
+  &nbsp;&nbsp;
+  <img src="site/public/platforms/tiktok.png" height="32" alt="抖音 / TikTok">
+  &nbsp;&nbsp;
+  <img src="site/public/platforms/instagram.png" height="32" alt="Instagram">
+  &nbsp;&nbsp;
+  <img src="site/public/platforms/linkedin.svg" height="32" alt="LinkedIn">
+</p>
+<p><sub>小红书 · 抖音 / TikTok · Instagram · LinkedIn</sub></p>
+
+[官网](https://socai.io/?utm_source=github&utm_medium=readme) · [下载桌面端](#桌面端) · [Discord](https://discord.gg/CpQdA7bwt8) · [快速开始](#快速开始) · [开发文档](DEVELOPMENT.md)
 
 [![release](https://img.shields.io/github/v/release/socai-io/socai?style=flat-square&color=blue&label=release)](https://github.com/socai-io/socai/releases/latest)
+[![discord](https://img.shields.io/badge/discord-join-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/CpQdA7bwt8)
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-555?style=flat-square)](#桌面端)
 [![license](https://img.shields.io/badge/license-Apache--2.0-555?style=flat-square)](LICENSE)
 
@@ -26,33 +38,11 @@
 
 </div>
 
-## 项目简介
+真实讨论发生在社交媒体上。公开 API 看不到，爬虫容易被封。socai 走第三条路：用你已登录的 Chrome，像调研的人一样去搜、点开、翻评论、看主页、OCR 图片、转写视频，并把证据留下来。
 
-socai 是面向小红书、抖音、TikTok、Instagram 和 LinkedIn 的本地社交媒体 Agent 平台。它通过 Chrome DevTools Protocol（CDP）连接真实浏览器，复用已有登录状态，以页面点击、输入和滚动完成搜索、帖子与视频阅读、评论及回复展开，以及作者、个人或公司页面查看，并把结果保存为结构化数据和本地素材。
-
-常见任务包括：
-
-- 追踪一个品类近期出现的新话题、情绪和表达方式
-- 深读帖子与评论区，提炼消费者需求、顾虑和决策语言
-- 跨平台比较品牌、产品、门店或活动的讨论差异
-- 研究创作者、职场人士、公司、内容方向、热门帖子和受众反馈
-- 下载图片和视频，结合 OCR 与视频语音转写补充多模态证据
-
-当前能力以内容读取和研究为主，暂未提供发布、点赞、收藏或评论等写入操作。
+只读。不发布、不点赞、不关注、不评论。
 
 https://github.com/user-attachments/assets/8aebcded-f365-4f12-b9c4-102cc1fa964d
-
-## 核心能力
-
-| 能力 | 说明 |
-| --- | --- |
-| 真实浏览器执行 | 默认连接你正在使用的 Chrome，沿页面交互路径完成任务，减少对逆向接口和批量请求的依赖。 |
-| 帖子与评论深读 | 获取标题、正文、作者、互动信息和评论，可按需要继续展开评论与回复。 |
-| 多模态内容理解 | 支持下载帖子图片和视频、本地图片 OCR，以及视频语音转写。 |
-| 跨平台调研 | 按各平台自身页面能力完成搜索、个人或公司信息读取、帖子与视频深读、评论回复展开和下滑加载。 |
-| 证据与产物留存 | 每次运行保留结构化结果、素材清单和任务产物，便于复核与继续分析。 |
-| 多种使用入口 | 同一套 Rust 内核提供桌面端、命令行和终端交互界面。 |
-| Agent 友好 | 命令输出为结构化 JSON，可直接交给 Claude Code、Codex 等 Agent 调用。 |
 
 ## 快速开始
 
@@ -308,9 +298,11 @@ socai config set runs.dir (Join-Path $PWD 'socai-runs')
 
 ## 社区交流
 
+[加入 Discord](https://discord.gg/CpQdA7bwt8) · 或扫描微信群二维码：
+
 <img src="docs/assets/wechat-group-qr.jpg" alt="socai 社交媒体调研微信群二维码" width="280">
 
-欢迎交流使用反馈、调研方法和功能建议。如果 socai 对你有帮助，也欢迎点击右上角的 Star 支持项目持续更新。
+觉得有用的话，欢迎 Star。
 
 ## 许可证
 

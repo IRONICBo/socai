@@ -8,13 +8,25 @@
 
 **English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md)
 
-**A local social media agent for cross-platform research**
+**A local agent that actually reads social media.**
 
-Connect your signed-in Chrome session and let an agent research RedNote, Douyin, TikTok, Instagram, and LinkedIn through real page interactions.
+Not a scraper. Not a reverse-engineered API. socai lives in the Chrome you already use, opens the real page, and comes back with results you want.
 
-[Website](https://socai.io/?utm_source=github&utm_medium=readme) · [Download](#desktop-app) · [Quick start](#quick-start) · [Platform reference](#supported-platforms) · [Development](DEVELOPMENT.md)
+<p>
+  <img src="site/public/platforms/xiaohongshu.png" height="32" alt="Xiaohongshu">
+  &nbsp;&nbsp;
+  <img src="site/public/platforms/tiktok.png" height="32" alt="TikTok / Douyin">
+  &nbsp;&nbsp;
+  <img src="site/public/platforms/instagram.png" height="32" alt="Instagram">
+  &nbsp;&nbsp;
+  <img src="site/public/platforms/linkedin.svg" height="32" alt="LinkedIn">
+</p>
+<p><sub>Xiaohongshu · TikTok / Douyin · Instagram · LinkedIn</sub></p>
+
+[Website](https://socai.io/?utm_source=github&utm_medium=readme) · [Download](#desktop-app) · [Discord](https://discord.gg/CpQdA7bwt8) · [Quick start](#quick-start) · [Development](DEVELOPMENT.md)
 
 [![release](https://img.shields.io/github/v/release/socai-io/socai?style=flat-square&color=blue&label=release)](https://github.com/socai-io/socai/releases/latest)
+[![discord](https://img.shields.io/badge/discord-join-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/CpQdA7bwt8)
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-555?style=flat-square)](#desktop-app)
 [![license](https://img.shields.io/badge/license-Apache--2.0-555?style=flat-square)](LICENSE)
 
@@ -26,33 +38,11 @@ Connect your signed-in Chrome session and let an agent research RedNote, Douyin,
 
 </div>
 
-## Overview
+Social platforms are where the real conversations happen. Public APIs hide them. Scrapers get you banned. socai takes the third path: it drives your signed-in Chrome the way a researcher would — search, open posts, expand comments, read profiles, OCR images, transcribe video — then keeps the artifacts.
 
-socai is a local social media agent platform for research across RedNote, Douyin, TikTok, Instagram, and LinkedIn. It connects to a real browser through the Chrome DevTools Protocol (CDP), reuses existing login sessions, and performs searches, opens posts, expands comments and replies, and reads author, profile, or company pages through normal page interactions. Results are saved as structured data and local artifacts.
-
-Typical tasks include:
-
-- tracking emerging topics, emotions, and language within a category
-- reading posts and comment threads to identify needs, concerns, and decision language
-- comparing how brands, products, stores, or campaigns are discussed across platforms
-- studying creators, professionals, companies, content direction, popular posts, and audience response
-- downloading images and videos, then adding OCR and video-transcript evidence
-
-The current product focuses on reading and research. It does not provide publishing, liking, saving, or commenting actions.
+Read-only by design. It does not publish, like, follow, or comment.
 
 https://github.com/user-attachments/assets/8aebcded-f365-4f12-b9c4-102cc1fa964d
-
-## Highlights
-
-| Capability | What it provides |
-| --- | --- |
-| Real-browser execution | Connects to your Chrome session and follows page interaction paths without depending on reverse-engineered APIs or high-volume batch requests. |
-| Post and comment reading | Collects titles, bodies, authors, engagement data, comments, and replies. |
-| Multimodal understanding | Downloads post images and videos, runs local image OCR, and supports video speech transcription. |
-| Cross-platform research | Uses platform-owned search, profile, post, comment, reply, and lazy-loading workflows across supported sites. |
-| Evidence and artifact retention | Keeps structured results, media manifests, and task deliverables for review and continued analysis. |
-| Three user interfaces | Shares one Rust core across the desktop app, command-line interface, and terminal interface. |
-| Agent-friendly output | Returns structured JSON that Claude Code, Codex, and other agents can call directly. |
 
 ## Quick start
 
@@ -307,9 +297,11 @@ Local development, build instructions, repository conventions, and the reference
 
 ## Community
 
+[Join the Discord](https://discord.gg/CpQdA7bwt8) · or scan the WeChat group QR:
+
 <img src="docs/assets/wechat-group-qr.jpg" alt="socai social media research WeChat group QR code" width="280">
 
-Feedback about product usage, research workflows, and feature ideas is welcome. If socai is useful to you, consider starring the repository to support its continued development.
+If socai is useful, star the repo.
 
 ## License
 

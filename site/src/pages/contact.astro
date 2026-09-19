@@ -5,6 +5,7 @@ import SiteFooter from "../components/SiteFooter.astro";
 import { message as messageFor } from "../lib/i18n";
 
 const githubIssuesUrl = "https://github.com/socai-io/socai/issues";
+const discordUrl = "https://discord.gg/CpQdA7bwt8";
 const qrImage = "/wechat-group-qr.jpg";
 const currentYear = new Date().getFullYear();
 const siteUrl = "https://socai.io";
@@ -19,8 +20,8 @@ const messages = {
         meta: {
             title: "socai · contact",
             description:
-                "join the socai wechat group to reach us. the wechat group is our primary channel.",
-            socialImageAlt: "socai contact — join the wechat group",
+                "join the socai discord or wechat group. discord is the public community; wechat is the chinese group.",
+            socialImageAlt: "socai contact — discord and wechat group",
         },
         nav: {
             primaryAria: "primary navigation",
@@ -36,6 +37,8 @@ const messages = {
             eyebrow: "contact",
             qrAlt: "socai wechat group qr code",
             altHead: "other ways",
+            discordLabel: "Discord",
+            discordDesc: "the public community for chat, feedback, and ideas",
             githubLabel: "GitHub Issues",
             githubDesc: "report a bug or request a feature",
         },
@@ -50,8 +53,8 @@ const messages = {
         meta: {
             title: "socai · 联系我们",
             description:
-                "加入 socai 微信群，和我们交流。微信群是我们主要的交流渠道。",
-            socialImageAlt: "socai 联系我们 — 加入微信群",
+                "加入 socai Discord 或微信群。Discord 是公开社区，微信群面向中文讨论。",
+            socialImageAlt: "socai 联系我们 — Discord 与微信群",
         },
         nav: {
             primaryAria: "主导航",
@@ -67,6 +70,8 @@ const messages = {
             eyebrow: "联系我们",
             qrAlt: "socai 社交媒体调研微信群二维码",
             altHead: "其他方式",
+            discordLabel: "Discord",
+            discordDesc: "公开社区，讨论使用问题和功能想法",
             githubLabel: "GitHub Issues",
             githubDesc: "提交 bug 或功能请求",
         },
@@ -186,6 +191,23 @@ const socialImageAlt = message("meta.socialImageAlt");
                             >{message("contact.altHead")}</span
                         >
                         <div class="contact-alt__list">
+                            <a class="contact-alt__row" href={discordUrl}>
+                                <span>
+                                    <span
+                                        class="contact-alt__label"
+                                        data-i18n="contact.discordLabel"
+                                        >{message("contact.discordLabel")}</span
+                                    >
+                                    <span
+                                        class="contact-alt__desc"
+                                        data-i18n="contact.discordDesc"
+                                        >{message("contact.discordDesc")}</span
+                                    >
+                                </span>
+                                <span class="contact-alt__value"
+                                    >discord.gg/CpQdA7bwt8 ↗</span
+                                >
+                            </a>
                             <a class="contact-alt__row" href={githubIssuesUrl}>
                                 <span>
                                     <span

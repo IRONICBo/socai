@@ -8,13 +8,25 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · **한국어**
 
-**여러 소셜 미디어를 함께 조사하는 로컬 에이전트 플랫폼**
+**소셜 미디어를 실제로 읽는 에이전트.**
 
-로그인된 Chrome에 연결해 小红书, 抖音, TikTok, Instagram, LinkedIn의 게시물, 댓글, 이미지, 영상과 프로필을 조사합니다.
+스크래퍼도, 리버스 엔지니어링 API도 아닙니다. socai는 이미 로그인한 Chrome 안에서 실제 페이지를 열고, 인용할 수 있는 근거를 가져옵니다.
 
-[공식 사이트](https://socai.io/?utm_source=github&utm_medium=readme) · [다운로드](#데스크톱-앱) · [빠른 시작](#빠른-시작) · [지원 플랫폼](#지원-플랫폼) · [개발 문서](DEVELOPMENT.md)
+<p>
+  <img src="site/public/platforms/xiaohongshu.png" height="32" alt="小红书">
+  &nbsp;&nbsp;
+  <img src="site/public/platforms/tiktok.png" height="32" alt="TikTok / 抖音">
+  &nbsp;&nbsp;
+  <img src="site/public/platforms/instagram.png" height="32" alt="Instagram">
+  &nbsp;&nbsp;
+  <img src="site/public/platforms/linkedin.svg" height="32" alt="LinkedIn">
+</p>
+<p><sub>小红书 · TikTok / 抖音 · Instagram · LinkedIn</sub></p>
+
+[공식 사이트](https://socai.io/?utm_source=github&utm_medium=readme) · [다운로드](#데스크톱-앱) · [Discord](https://discord.gg/CpQdA7bwt8) · [빠른 시작](#빠른-시작) · [개발 문서](DEVELOPMENT.md)
 
 [![release](https://img.shields.io/github/v/release/socai-io/socai?style=flat-square&color=blue&label=release)](https://github.com/socai-io/socai/releases/latest)
+[![discord](https://img.shields.io/badge/discord-join-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/CpQdA7bwt8)
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-555?style=flat-square)](#데스크톱-앱)
 [![license](https://img.shields.io/badge/license-Apache--2.0-555?style=flat-square)](LICENSE)
 
@@ -28,31 +40,11 @@
 
 ## 소개
 
-socai는 小红书, 抖音, TikTok, Instagram, LinkedIn을 지원하는 로컬 소셜 미디어 에이전트 플랫폼입니다. Chrome DevTools Protocol(CDP)을 통해 실제 브라우저에 연결하고 기존 로그인 상태를 재사용합니다. 일반적인 페이지 상호작용으로 검색하고, 게시물과 영상을 열고, 댓글과 답글을 펼치고, 작성자·인물·회사 페이지를 확인한 뒤 결과를 구조화된 데이터와 로컬 산출물로 저장합니다.
+진짜 대화는 소셜 미디어에 있습니다. 공개 API는 그걸 가리고, 스크래퍼는 계정 정지를 부릅니다. socai는 세 번째 길입니다: 로그인한 Chrome을 조사하듯 움직입니다. 검색하고, 게시물을 열고, 댓글을 펼치고, 프로필을 읽고, 이미지를 OCR하고, 영상을 전사한 뒤 근거를 남깁니다.
 
-주요 활용 사례:
-
-- 특정 카테고리에서 새롭게 나타나는 주제, 감정, 표현 방식 추적
-- 게시물과 댓글에서 소비자 요구, 우려, 구매 결정 언어 도출
-- 여러 플랫폼에서 브랜드, 제품, 매장 또는 캠페인에 대한 반응 비교
-- 크리에이터, 인물, 회사, 콘텐츠 방향, 인기 게시물, 독자 반응 분석
-- 이미지와 영상을 저장하고 OCR 및 영상 음성 전사로 근거 보완
-
-현재 제품은 읽기와 조사에 초점을 두며 게시, 좋아요, 저장, 댓글 작성 기능은 제공하지 않습니다.
+읽기 전용입니다. 게시, 좋아요, 팔로우, 댓글 작성은 하지 않습니다.
 
 https://github.com/user-attachments/assets/8aebcded-f365-4f12-b9c4-102cc1fa964d
-
-## 주요 기능
-
-| 기능 | 설명 |
-| --- | --- |
-| 실제 브라우저 실행 | 평소 사용하는 Chrome에 연결해 페이지 상호작용 경로를 따라 작업합니다. |
-| 게시물과 댓글 심층 읽기 | 제목, 본문, 작성자, 반응 수치, 댓글과 답글을 수집합니다. |
-| 멀티모달 이해 | 게시물 이미지와 영상 저장, 로컬 이미지 OCR, 영상 음성 전사를 지원합니다. |
-| 크로스 플랫폼 조사 | 각 사이트의 검색, 프로필, 게시물, 댓글, 답글, 스크롤 로딩 기능을 사용합니다. |
-| 근거와 산출물 보관 | 구조화된 결과, 미디어 목록, 보고서와 표 등의 산출물을 저장합니다. |
-| 여러 사용 방식 | 데스크톱 앱, CLI, 터미널 UI가 동일한 Rust 코어를 공유합니다. |
-| 에이전트 연동 | Claude Code, Codex 등에서 바로 사용할 수 있는 구조화된 JSON을 반환합니다. |
 
 ## 빠른 시작
 
@@ -264,9 +256,9 @@ socai config set runs.dir "$(pwd)/socai-runs"
 
 ## 커뮤니티
 
-<img src="docs/assets/wechat-group-qr.jpg" alt="socai 소셜 미디어 리서치 WeChat 그룹 QR 코드" width="280">
+[Discord 참여](https://discord.gg/CpQdA7bwt8) · 또는 WeChat 그룹 QR:
 
-사용 경험, 조사 워크플로, 기능 제안에 대한 피드백을 환영합니다.
+<img src="docs/assets/wechat-group-qr.jpg" alt="socai 소셜 미디어 리서치 WeChat 그룹 QR 코드" width="280">
 
 ## 라이선스
 
