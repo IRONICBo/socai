@@ -1097,7 +1097,7 @@ impl Tool for BrowserScriptTool {
                     "ok": false,
                     "reason": "override_not_allowed",
                     "error": format!("{tool} is not an overridable {} tool", self.runtime.site),
-                    "allowed_tools": self.allowed_tools,
+                    "allowed_tools": *self.allowed_tools,
                 })));
             }
             match self
