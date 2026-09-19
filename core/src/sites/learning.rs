@@ -362,7 +362,7 @@ impl Tool for RunSiteBrowserTool {
 /// Collect lazy content lists up to the requested `limit`. The page-level
 /// extractors remain platform-owned; this host loop only alternates extraction
 /// and the platform's declared scroll action while retaining virtualized rows.
-async fn run_site_browser_tool_collecting(
+pub async fn run_site_browser_tool_collecting(
     page: &PageSession,
     site_id: &str,
     tool_name: &str,

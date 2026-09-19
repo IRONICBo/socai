@@ -251,7 +251,7 @@ GitHub `latest.json` URLs. It verifies:
   Windows `socai update` is intentionally not enabled until we add a detached
   updater that can safely replace a running `socai.exe`.
 - Source/Cargo installs are updated from the checkout with `cargo install --path
-  cli --force`.
+  cli --force --locked`.
 
 ## Website follow-up
 

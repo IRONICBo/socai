@@ -85,17 +85,19 @@ $installer = Join-Path $env:TEMP 'socai-install.ps1'; Invoke-WebRequest -UseBasi
 socai xhs search "露营装备新手避坑" --num-notes 10 --num-comments 8 --pretty
 socai dy search "露营装备" --num 20
 socai tiktok search "camping gear" --num 20 --pretty
+socai instagram search "camping gear" --num 20 --pretty
+socai linkedin search "product designer" --type people --num 20 --pretty
 ```
 
-不带子命令运行 `socai`，可以直接向 Agent 提出跨平台任务，包括读取 Instagram 的个人主页、帖子、Reels 与评论，或搜索 LinkedIn 的人员、公司、帖子与职业经历。
+不带子命令运行 `socai`，可以直接向 Agent 提出同样覆盖这些平台的跨平台任务。
 
 如果当前平台没有预编译版本，或需要从源码调试，可使用 Cargo 安装：
 
 ```bash
 git clone https://github.com/socai-io/socai.git
 cd socai
-cargo install --path cli --force
-cargo install --path asr --force
+cargo install --path cli --force --locked
+cargo install --path asr --force --locked
 ```
 
 第二条命令会把本地 Whisper helper 安装到 `socai` 同一目录；非付费或离线转写使用内置模型时需要该组件。
@@ -113,7 +115,7 @@ socai
 | 入口 | 适合场景 | 开始方式 |
 | --- | --- | --- |
 | 桌面端 | 直接输入自然语言任务、查看历史、预览或下载产物 | 下载 macOS 或 Windows 安装包 |
-| 命令行 | 交给 Agent 调用、接入脚本、获取结构化 JSON | 运行 `socai xhs ...`、`socai dy ...` 或 `socai tiktok ...` |
+| 命令行 | 交给 Agent 调用、接入脚本、获取结构化 JSON | 运行 `socai xhs ...`、`socai dy ...`、`socai tiktok ...`、`socai instagram ...` 或 `socai linkedin ...` |
 | 终端交互界面 | 在终端中手动运行连续任务 | 直接运行 `socai` |
 
 三个入口共享浏览器连接、站点能力和运行记录内核，可根据当前工作方式选择。
@@ -125,8 +127,8 @@ socai
 | 小红书 | 搜索、作者、帖子、评论与回复、素材下载、OCR 和语音转写 | Agent 与结构化命令行 |
 | 抖音 | 搜索、视频详情、作者、评论与回复、素材留存 | Agent 与结构化命令行 |
 | TikTok | 搜索、视频详情、作者主页、评论与回复、视频下载 | Agent 与结构化命令行 |
-| Instagram | 关键词搜索、个人主页、帖子、Reels、评论与回复、视频下载 | Agent 工作流 |
-| LinkedIn | 人员、公司和内容搜索，个人经历、关系线索、帖子与评论 | Agent 工作流 |
+| Instagram | 关键词搜索、个人主页、帖子、Reels、评论与回复、视频下载 | Agent 与结构化命令行 |
+| LinkedIn | 人员、公司和内容搜索，个人经历、关系线索、帖子与评论 | Agent 与结构化命令行 |
 
 所有平台能力均为只读。socai 不会代替用户关注、连接、发布、点赞、互动、评论、回复或发送消息。
 
@@ -213,6 +215,28 @@ socai tiktok search "coffee" --num 30 --pretty
 ```
 
 视频详情、作者、评论、素材下载和诊断命令可通过 `socai dy --help` 或 `socai tiktok --help` 查看。
+
+### Instagram
+
+```bash
+socai instagram search "coffee" --num 20 --pretty
+socai instagram profile nike --num 12
+socai instagram get-posts --post https://www.instagram.com/p/<shortcode>/ --num-comments 8
+```
+
+个人主页、帖子 / Reels、评论和诊断命令可通过 `socai instagram --help` 查看。
+
+### LinkedIn
+
+```bash
+socai linkedin search "product designer" --type people --num 20 --pretty
+socai linkedin profile https://www.linkedin.com/in/<id>/
+socai linkedin history <id> --section experience
+socai linkedin company <company-id>
+socai linkedin get-posts --post https://www.linkedin.com/posts/<id> --num-comments 8
+```
+
+公司、关系线索、帖子、评论和诊断命令可通过 `socai linkedin --help` 查看。
 
 ## 浏览器与登录
 

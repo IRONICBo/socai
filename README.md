@@ -85,17 +85,19 @@ Run a structured platform search:
 socai xhs search "beginner camping gear mistakes" --num-notes 10 --num-comments 8 --pretty
 socai dy search "beginner camping gear" --num 20
 socai tiktok search "beginner camping gear" --num 20 --pretty
+socai instagram search "beginner camping gear" --num 20 --pretty
+socai linkedin search "product designer" --type people --num 20 --pretty
 ```
 
-Run `socai` without a subcommand to ask the agent for cross-platform research, including Instagram profiles, posts, reels and comments or LinkedIn people, companies, posts and professional experience.
+Run `socai` without a subcommand to ask the agent for cross-platform research across the same platforms.
 
 If a prebuilt binary is unavailable for your platform, or you need a source build for development, use Cargo:
 
 ```bash
 git clone https://github.com/socai-io/socai.git
 cd socai
-cargo install --path cli --force
-cargo install --path asr --force
+cargo install --path cli --force --locked
+cargo install --path asr --force --locked
 ```
 
 The second command installs the local Whisper helper next to `socai`; it is
@@ -114,7 +116,7 @@ socai
 | Interface | Best for | Start with |
 | --- | --- | --- |
 | Desktop app | Natural-language tasks, task history, and artifact preview or download | Install the macOS or Windows app |
-| CLI | Agent calls, scripts, and structured JSON | Run `socai xhs ...`, `socai dy ...`, or `socai tiktok ...` |
+| CLI | Agent calls, scripts, and structured JSON | Run `socai xhs ...`, `socai dy ...`, `socai tiktok ...`, `socai instagram ...`, or `socai linkedin ...` |
 | Terminal interface | Manually running consecutive tasks in a terminal | Run `socai` |
 
 All three interfaces share the same browser connection, site capabilities, and run-record core.
@@ -126,8 +128,8 @@ All three interfaces share the same browser connection, site capabilities, and r
 | RedNote (Xiaohongshu) | Search, authors, posts, comments and replies, media download, OCR, and transcription | Agent and structured CLI |
 | Douyin | Search, video details, authors, comments and replies, and media artifacts | Agent and structured CLI |
 | TikTok | Search, video details, author profiles, comments and replies, and video download | Agent and structured CLI |
-| Instagram | Keyword search, profiles, posts, reels, comments and replies, and playable video download | Agent workflows |
-| LinkedIn | People, company, and content search; profiles, experience, relationships, posts, and comments | Agent workflows |
+| Instagram | Keyword search, profiles, posts, reels, comments and replies, and playable video download | Agent and structured CLI |
+| LinkedIn | People, company, and content search; profiles, experience, relationships, posts, and comments | Agent and structured CLI |
 
 All integrations are read-only. socai does not follow, connect, publish, like, react, comment, reply, or send messages on your behalf.
 
@@ -214,6 +216,28 @@ socai tiktok search "coffee" --num 30 --pretty
 ```
 
 Use `socai dy --help` or `socai tiktok --help` for video-detail, author, comment, media-download, and diagnostic commands.
+
+### Instagram
+
+```bash
+socai instagram search "coffee" --num 20 --pretty
+socai instagram profile nike --num 12
+socai instagram get-posts --post https://www.instagram.com/p/<shortcode>/ --num-comments 8
+```
+
+Use `socai instagram --help` for profile, post/Reel, comment, and diagnostic commands.
+
+### LinkedIn
+
+```bash
+socai linkedin search "product designer" --type people --num 20 --pretty
+socai linkedin profile https://www.linkedin.com/in/<id>/
+socai linkedin history <id> --section experience
+socai linkedin company <company-id>
+socai linkedin get-posts --post https://www.linkedin.com/posts/<id> --num-comments 8
+```
+
+Use `socai linkedin --help` for company, relationship, post, comment, and diagnostic commands.
 
 ## Browser and login modes
 

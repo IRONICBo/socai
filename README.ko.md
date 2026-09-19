@@ -85,17 +85,19 @@ $installer = Join-Path $env:TEMP 'socai-install.ps1'; Invoke-WebRequest -UseBasi
 socai xhs search "초보 캠핑 장비" --num-notes 10 --num-comments 8 --pretty
 socai dy search "캠핑 장비" --num 20
 socai tiktok search "camping gear" --num 20 --pretty
+socai instagram search "camping gear" --num 20 --pretty
+socai linkedin search "product designer" --type people --num 20 --pretty
 ```
 
-하위 명령 없이 `socai`를 실행하면 Instagram 프로필, 게시물, Reels, 댓글 또는 LinkedIn 인물, 회사, 게시물, 경력을 포함한 크로스 플랫폼 조사를 에이전트에게 요청할 수 있습니다.
+하위 명령 없이 `socai`를 실행하면 같은 플랫폼을 대상으로 크로스 플랫폼 조사를 에이전트에게 요청할 수 있습니다.
 
 현재 플랫폼에 사전 빌드된 바이너리가 없거나 소스 개발이 필요한 경우 Cargo를 사용할 수 있습니다.
 
 ```bash
 git clone https://github.com/socai-io/socai.git
 cd socai
-cargo install --path cli --force
-cargo install --path asr --force
+cargo install --path cli --force --locked
+cargo install --path asr --force --locked
 ```
 
 두 번째 명령은 로컬 Whisper helper를 `socai`와 같은 위치에 설치합니다. 비유료 또는 오프라인 음성 변환에서 내장 모델을 사용할 때 필요합니다.
@@ -113,7 +115,7 @@ socai
 | 방식 | 적합한 작업 | 시작 방법 |
 | --- | --- | --- |
 | 데스크톱 앱 | 자연어 작업, 작업 기록, 산출물 미리 보기와 다운로드 | macOS 또는 Windows 앱 설치 |
-| CLI | 에이전트 호출, 스크립트, 구조화된 JSON | `socai xhs ...`, `socai dy ...`, `socai tiktok ...` 실행 |
+| CLI | 에이전트 호출, 스크립트, 구조화된 JSON | `socai xhs ...`, `socai dy ...`, `socai tiktok ...`, `socai instagram ...`, `socai linkedin ...` 실행 |
 | 터미널 UI | 터미널에서 연속 작업 수동 실행 | `socai` 실행 |
 
 ## 지원 플랫폼
@@ -123,8 +125,8 @@ socai
 | 小红书 | 검색, 작성자, 게시물, 댓글과 답글, 미디어 저장, OCR, 음성 전사 | 에이전트와 구조화된 CLI |
 | 抖音 | 검색, 영상 상세, 작성자, 댓글과 답글, 미디어 산출물 | 에이전트와 구조화된 CLI |
 | TikTok | 검색, 영상 상세, 작성자 프로필, 댓글과 답글, 영상 저장 | 에이전트와 구조화된 CLI |
-| Instagram | 키워드 검색, 프로필, 게시물, Reels, 댓글과 답글, 영상 저장 | 에이전트 워크플로 |
-| LinkedIn | 인물·회사·콘텐츠 검색, 프로필, 경력, 관계 정보, 게시물, 댓글 | 에이전트 워크플로 |
+| Instagram | 키워드 검색, 프로필, 게시물, Reels, 댓글과 답글, 영상 저장 | 에이전트와 구조화된 CLI |
+| LinkedIn | 인물·회사·콘텐츠 검색, 프로필, 경력, 관계 정보, 게시물, 댓글 | 에이전트와 구조화된 CLI |
 
 모든 기능은 읽기 전용입니다. socai는 사용자를 대신해 팔로우, 연결, 게시, 좋아요, 반응, 댓글, 답글 또는 메시지 전송을 수행하지 않습니다.
 
@@ -201,6 +203,28 @@ socai tiktok search "coffee" --num 30 --pretty
 ```
 
 영상 상세, 작성자, 댓글, 미디어 저장과 진단 명령은 `socai dy --help` 또는 `socai tiktok --help`에서 확인할 수 있습니다.
+
+### Instagram
+
+```bash
+socai instagram search "coffee" --num 20 --pretty
+socai instagram profile nike --num 12
+socai instagram get-posts --post https://www.instagram.com/p/<shortcode>/ --num-comments 8
+```
+
+프로필, 게시물 / Reels, 댓글, 진단 명령은 `socai instagram --help`에서 확인할 수 있습니다.
+
+### LinkedIn
+
+```bash
+socai linkedin search "product designer" --type people --num 20 --pretty
+socai linkedin profile https://www.linkedin.com/in/<id>/
+socai linkedin history <id> --section experience
+socai linkedin company <company-id>
+socai linkedin get-posts --post https://www.linkedin.com/posts/<id> --num-comments 8
+```
+
+회사, 관계 정보, 게시물, 댓글, 진단 명령은 `socai linkedin --help`에서 확인할 수 있습니다.
 
 ## 브라우저와 로그인
 

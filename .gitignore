@@ -23,6 +23,9 @@ site/dist/
 site/.astro/
 site/.vercel/
 
+# Local scratch (client research folders, one-off notes)
+local/
+
 # Rust workspace
 target/
 

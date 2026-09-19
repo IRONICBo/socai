@@ -85,17 +85,19 @@ $installer = Join-Path $env:TEMP 'socai-install.ps1'; Invoke-WebRequest -UseBasi
 socai xhs search "初心者向けキャンプ用品" --num-notes 10 --num-comments 8 --pretty
 socai dy search "キャンプ用品" --num 20
 socai tiktok search "camping gear" --num 20 --pretty
+socai instagram search "camping gear" --num 20 --pretty
+socai linkedin search "product designer" --type people --num 20 --pretty
 ```
 
-サブコマンドなしで `socai` を実行すると、Instagram のプロフィール、投稿、Reels、コメントや、LinkedIn の人物、企業、投稿、職歴を含む横断調査をエージェントに依頼できます。
+サブコマンドなしで `socai` を実行すると、同じプラットフォームを対象にした横断調査をエージェントに依頼できます。
 
 利用中の環境にビルド済みバイナリがない場合や、ソースから開発するときは Cargo を利用できます。
 
 ```bash
 git clone https://github.com/socai-io/socai.git
 cd socai
-cargo install --path cli --force
-cargo install --path asr --force
+cargo install --path cli --force --locked
+cargo install --path asr --force --locked
 ```
 
 2 番目のコマンドはローカル Whisper helper を `socai` と同じ場所にインストールします。非課金またはオフラインの文字起こしで内蔵モデルを使うために必要です。
@@ -113,7 +115,7 @@ socai
 | 方式 | 適した用途 | 開始方法 |
 | --- | --- | --- |
 | デスクトップアプリ | 自然言語タスク、履歴、成果物の確認とダウンロード | macOS または Windows 版をインストール |
-| CLI | エージェント連携、スクリプト、構造化 JSON | `socai xhs ...`、`socai dy ...`、`socai tiktok ...` を実行 |
+| CLI | エージェント連携、スクリプト、構造化 JSON | `socai xhs ...`、`socai dy ...`、`socai tiktok ...`、`socai instagram ...`、`socai linkedin ...` を実行 |
 | ターミナル UI | ターミナルで連続タスクを手動実行 | `socai` を実行 |
 
 ## 対応プラットフォーム
@@ -123,8 +125,8 @@ socai
 | 小紅書 | 検索、著者、投稿、コメントと返信、メディア保存、OCR、文字起こし | エージェントと構造化 CLI |
 | 抖音 | 検索、動画詳細、著者、コメントと返信、メディア成果物 | エージェントと構造化 CLI |
 | TikTok | 検索、動画詳細、著者プロフィール、コメントと返信、動画保存 | エージェントと構造化 CLI |
-| Instagram | キーワード検索、プロフィール、投稿、Reels、コメントと返信、動画保存 | エージェントワークフロー |
-| LinkedIn | 人物・企業・コンテンツ検索、プロフィール、職歴、関係情報、投稿、コメント | エージェントワークフロー |
+| Instagram | キーワード検索、プロフィール、投稿、Reels、コメントと返信、動画保存 | エージェントと構造化 CLI |
+| LinkedIn | 人物・企業・コンテンツ検索、プロフィール、職歴、関係情報、投稿、コメント | エージェントと構造化 CLI |
 
 すべて読み取り専用です。socai がフォロー、接続、投稿、いいね、リアクション、コメント、返信、メッセージ送信を代行することはありません。
 
@@ -201,6 +203,28 @@ socai tiktok search "coffee" --num 30 --pretty
 ```
 
 動画詳細、著者、コメント、メディア保存、診断コマンドは `socai dy --help` または `socai tiktok --help` で確認できます。
+
+### Instagram
+
+```bash
+socai instagram search "coffee" --num 20 --pretty
+socai instagram profile nike --num 12
+socai instagram get-posts --post https://www.instagram.com/p/<shortcode>/ --num-comments 8
+```
+
+プロフィール、投稿 / Reels、コメント、診断コマンドは `socai instagram --help` で確認できます。
+
+### LinkedIn
+
+```bash
+socai linkedin search "product designer" --type people --num 20 --pretty
+socai linkedin profile https://www.linkedin.com/in/<id>/
+socai linkedin history <id> --section experience
+socai linkedin company <company-id>
+socai linkedin get-posts --post https://www.linkedin.com/posts/<id> --num-comments 8
+```
+
+企業、関係情報、投稿、コメント、診断コマンドは `socai linkedin --help` で確認できます。
 
 ## ブラウザーとログイン
 
