@@ -4,8 +4,8 @@ This is development/maintainer documentation for operating socai CLI telemetry.
 It intentionally lives outside the README: the README stays focused on what
 users need to run socai.
 
-The final implementation sends one sanitized trace per top-level CLI tool
-command through the first-party endpoint at `https://socai.io/v1/events`.
+The final implementation sends correlated lifecycle events per top-level CLI
+tool command through the first-party endpoint at `https://socai.io/v1/events`.
 For the exact field contract, see [`../telemetry-schema.md`](../telemetry-schema.md).
 
 ## Product behavior summary
@@ -17,15 +17,17 @@ prioritize fixes for search, note extraction, and topic scans.
 Telemetry is enabled by default. Search query text is included by default because
 it is the main signal for understanding user intent and result quality.
 
-Each supported daemon command emits one trace:
+Each supported daemon command emits a start event, browser connection events
+when applicable, and either a normal or interrupted terminal event:
 
 - `search`
 - `author`
 
-The trace includes safe operational context such as command name, tool name,
+The events include safe operational context such as command name, tool name,
 duration, success/failure, result counts, app version, platform, OS details,
 approximate device capacity, terminal app, and explicitly provided optional CLI
-parameters under `metadata`.
+parameters under `metadata`. Browser failures use stable categories and path-free
+summaries rather than raw CDP errors.
 
 Over the events pipeline, socai does not send note bodies, comments, images,
 browser cookies, raw tool output bodies, or Axiom credentials; the free-text
@@ -277,7 +279,10 @@ When validating a release candidate or local build, restart the daemon first:
 socai stop || true
 ```
 
-Then run one command that should emit one trace:
+Then run one command. It should emit `socai_tool_call_start`, zero or more
+correlated `socai_browser_connect` rows, and one terminal `socai_tool_call`.
+If the client is terminated before a response, the terminal event is instead
+`socai_tool_call_interrupted`:
 
 ```bash
 socai xhs search "运营爆款思路" --num-notes 1
@@ -306,8 +311,11 @@ Use Axiom or the local JSONL buffer to confirm the expected behavior.
    ```
 
 2. Confirm the CLI request did not disable telemetry with `SOCAI_TELEMETRY=off`.
-3. Check the local JSONL buffer. If the local trace is missing, inspect daemon
-   logs and command errors first.
+3. Check the local JSONL buffer. If `socai_tool_call_start` exists without a
+   terminal `socai_tool_call` or `socai_tool_call_interrupted`, query its `request_id` for
+   `socai_browser_connect` failures; this identifies a stalled or interrupted
+   CDP path. If the start event itself is missing, inspect daemon logs and the
+   command's telemetry setting first.
 4. Confirm the proxy responds:
 
    ```bash
