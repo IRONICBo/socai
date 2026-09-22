@@ -692,7 +692,15 @@ pub async fn run_agent_with_events(
             {
                 Ok(response) => {
                     let duration_ms = llm_started.elapsed().as_millis() as u64;
-                    run_recorder.record_llm_response(summary_step, &response, duration_ms)?;
+                    // Forced-summary attempts stay hidden from timeline replay until validation
+                    // accepts them. This prevents a rejected artifact claim from reappearing
+                    // after the user reloads the task.
+                    run_recorder.record_llm_response_with_visibility(
+                        summary_step,
+                        &response,
+                        duration_ms,
+                        false,
+                    )?;
                     run_trace.record_llm(
                         summary_step,
                         duration_ms,
@@ -749,8 +757,11 @@ pub async fn run_agent_with_events(
                             ForcedSummaryKind::ExecutionLimit
                         },
                     ) {
-                        ForcedSummaryDisposition::Accept => {}
+                        ForcedSummaryDisposition::Accept => {
+                            run_recorder.mark_llm_response_visible(summary_step)?;
+                        }
                         ForcedSummaryDisposition::Partial { reason } => {
+                            run_recorder.mark_llm_response_visible(summary_step)?;
                             warn!(
                                 step = summary_step,
                                 reason, "forced summary preserved as a partial result"
@@ -1347,15 +1358,37 @@ fn claimed_artifact_kinds(text: &str) -> Vec<&'static str> {
         "。",
         "；",
     ];
+    let sentence_boundaries = [". ", "; ", "\n", "。", "；"];
     let mut kinds = Vec::new();
     for completion_marker in &completion_markers {
         for (offset, _) in lower.match_indices(*completion_marker) {
             let before = &lower[..offset];
-            let claim_start = claim_boundaries
+            // Source phrases delimit the object after a completion verb, but they can
+            // legitimately modify a subject before it ("the PDF from the data was
+            // created"). Only sentence boundaries are safe for the prefix scan.
+            let sentence_start = sentence_boundaries
                 .iter()
                 .filter_map(|boundary| before.rfind(boundary).map(|index| index + boundary.len()))
                 .max()
                 .unwrap_or_default();
+            let claim_start = [", but ", " but "]
+                .iter()
+                .filter_map(|boundary| {
+                    let relative = lower[sentence_start..offset].rfind(boundary)?;
+                    let boundary_start = sentence_start + relative;
+                    let candidate = boundary_start + boundary.len();
+                    let prior_has_completion = completion_markers
+                        .iter()
+                        .any(|marker| lower[sentence_start..boundary_start].contains(marker));
+                    let candidate_mentions_artifact = !artifact_kinds(&lower[candidate..offset])
+                        .is_empty()
+                        || ["file", "document", "文件", "文档"]
+                            .iter()
+                            .any(|marker| lower[candidate..offset].contains(marker));
+                    (prior_has_completion && candidate_mentions_artifact).then_some(candidate)
+                })
+                .max()
+                .unwrap_or(sentence_start);
             if completion_claim_is_negated(&lower[claim_start..offset], completion_marker) {
                 continue;
             }
@@ -1398,7 +1431,11 @@ fn completion_claim_is_negated(before: &str, completion_marker: &str) -> bool {
     {
         return true;
     }
-    if completion_marker == "可下载" && before.ends_with('不') {
+    if completion_marker == "可下载"
+        && ["不", "不是", "并非"]
+            .iter()
+            .any(|suffix| before.trim_end().ends_with(suffix))
+    {
         return true;
     }
     let words = before
@@ -1406,13 +1443,15 @@ fn completion_claim_is_negated(before: &str, completion_marker: &str) -> bool {
         .map(|word| word.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '\''))
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>();
-    if words.first() == Some(&"no") && !artifact_kinds(before).is_empty() {
+    if words.first() == Some(&"no")
+        && !artifact_kinds(before).is_empty()
+        && !words.iter().any(|word| matches!(*word, "and" | "but"))
+    {
         return true;
     }
-    if let Some(negation) = words
-        .iter()
-        .rposition(|word| matches!(*word, "not" | "never") || word.ends_with("n't"))
-    {
+    if let Some(negation) = words.iter().rposition(|word| {
+        matches!(*word, "not" | "never" | "no" | "neither" | "nor") || word.ends_with("n't")
+    }) {
         const NEGATION_FILLERS: &[&str] = &[
             "yet",
             "been",
@@ -1425,6 +1464,14 @@ fn completion_claim_is_negated(before: &str, completion_marker: &str) -> bool {
         if words[negation + 1..]
             .iter()
             .all(|word| NEGATION_FILLERS.contains(word))
+        {
+            return true;
+        }
+        if matches!(words[negation], "no" | "neither" | "nor")
+            && !artifact_kinds(before).is_empty()
+            && !words[negation + 1..]
+                .iter()
+                .any(|word| matches!(*word, "and" | "but"))
         {
             return true;
         }
@@ -1618,11 +1665,17 @@ mod tests {
     #[test]
     fn recovery_partial_can_report_a_requested_deliverable_as_missing() {
         let state = RunState::new("请根据搜索结果生成 PDF 报告");
+        assert_eq!(
+            claimed_artifact_kinds("There is no generated PDF, but the CSV was saved."),
+            vec!["csv"]
+        );
         for text in [
             "浏览器连接中断；已整理数据如下，PDF 尚未生成。",
             "The PDF was not created; the useful findings follow.",
             "The PDF is not available for download; the useful findings follow.",
             "The PDF failed to be created; the useful findings follow.",
+            "There is no generated PDF; the useful findings follow.",
+            "The PDF was neither generated nor saved; the useful findings follow.",
         ] {
             let response = summary_response(text);
             assert_eq!(
@@ -1645,6 +1698,8 @@ mod tests {
         for text in [
             "已生成 PDF 报告，可供下载。",
             "The PDF was created.",
+            "The PDF report from the collected data was created.",
+            "The PDF report based on collected data was created.",
             "report.pdf is available for download.",
             "report.pdf has no errors and is available for download.",
         ] {

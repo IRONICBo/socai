@@ -180,9 +180,20 @@ impl AgentRunRecorder {
         response: &LLMResponse,
         duration_ms: u64,
     ) -> std::io::Result<()> {
+        self.record_llm_response_with_visibility(step, response, duration_ms, true)
+    }
+
+    pub(crate) fn record_llm_response_with_visibility(
+        &self,
+        step: u32,
+        response: &LLMResponse,
+        duration_ms: u64,
+        user_visible: bool,
+    ) -> std::io::Result<()> {
         let mut value = serde_json::to_value(response).map_err(std::io::Error::other)?;
         value["duration_ms"] = json!(duration_ms);
         value["completed_at"] = json!(timestamp());
+        value["user_visible"] = json!(user_visible);
         write_json_atomic(
             &self.run_dir.join(format!("llm/{step:03}.response.json")),
             &value,
@@ -199,6 +210,14 @@ impl AgentRunRecorder {
             write_json_atomic(&self.manifest_path, &manifest)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn mark_llm_response_visible(&self, step: u32) -> std::io::Result<()> {
+        let path = self.run_dir.join(format!("llm/{step:03}.response.json"));
+        let mut value: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)
+            .map_err(std::io::Error::other)?;
+        value["user_visible"] = json!(true);
+        write_json_atomic(&path, &value)
     }
 
     pub fn record_llm_error(
