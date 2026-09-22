@@ -165,9 +165,10 @@ pub struct AgentOutcome {
     /// `final_text` is best-effort — an error placeholder, or partial output
     /// from earlier steps — so callers must not report the run as completed.
     pub error: Option<String>,
-    /// Why the run completed with a best-effort partial answer after tools
-    /// became unavailable. This is not a terminal error: the final LLM summary
-    /// completed successfully and `final_text` is user-visible.
+    /// Why the run completed with a best-effort partial answer, for example
+    /// after tools became unavailable or the execution limit was reached before
+    /// a requested deliverable was published. This is not a terminal error:
+    /// the final LLM summary completed successfully and `final_text` is visible.
     pub degraded_reason: Option<String>,
 }
 
@@ -612,6 +613,14 @@ pub async fn run_agent_with_events(
 
             ctx.active_tool_name.clear();
         }
+        if options.max_steps.saturating_sub(step) == 5 {
+            tool_result_blocks.push(Block::Text {
+                text: "[Execution budget: 5 tool-using steps remain. Prioritize completing the \
+                       user's requested deliverable now. If the task requests a file, create, \
+                       validate, and publish it before doing optional follow-up work.]"
+                    .to_string(),
+            });
+        }
         messages.push(Message::user_blocks(tool_result_blocks));
         if degraded_reason.is_some() {
             break;
@@ -728,7 +737,7 @@ pub async fn run_agent_with_events(
                         terminal_error = Some(msg);
                         break;
                     }
-                    if let Some(message) = forced_summary_failure(
+                    match forced_summary_disposition(
                         task,
                         &response,
                         &visible_text,
@@ -740,20 +749,44 @@ pub async fn run_agent_with_events(
                             ForcedSummaryKind::ExecutionLimit
                         },
                     ) {
-                        warn!(
-                            step = summary_step,
-                            "forced summary did not finish the task"
-                        );
-                        final_text = message.clone();
-                        emit(
-                            &events,
-                            AgentEvent::ApiError {
-                                step: summary_step,
-                                message: message.clone(),
-                            },
-                        );
-                        terminal_error = Some(message);
-                        break;
+                        ForcedSummaryDisposition::Accept => {}
+                        ForcedSummaryDisposition::Partial { reason } => {
+                            warn!(
+                                step = summary_step,
+                                reason, "forced summary preserved as a partial result"
+                            );
+                            degraded_reason = Some(reason);
+                        }
+                        ForcedSummaryDisposition::Reject {
+                            message,
+                            retry_without_claim,
+                        } => {
+                            warn!(
+                                step = summary_step,
+                                "forced summary did not finish the task"
+                            );
+                            if retry_without_claim && summary_attempt == 0 {
+                                forced_summary_prompt =
+                                    "Respond once with a concise, tool-free partial answer based \
+                                     only on evidence already gathered. Do not claim that any file \
+                                     was created, saved, exported, published, or is available for \
+                                     download unless an earlier successful publish_artifact result \
+                                     proves it. If the requested file was not published, say that \
+                                     clearly and put the useful summary directly in this response."
+                                        .to_string();
+                                continue;
+                            }
+                            final_text = message.clone();
+                            emit(
+                                &events,
+                                AgentEvent::ApiError {
+                                    step: summary_step,
+                                    message: message.clone(),
+                                },
+                            );
+                            terminal_error = Some(message);
+                            break;
+                        }
                     }
                     for text in &visible_texts {
                         emit(
@@ -794,8 +827,8 @@ pub async fn run_agent_with_events(
     }
 
     // A degraded reason represents a successfully delivered partial answer,
-    // not merely the browser failure that caused us to attempt one. If the
-    // summary itself failed, persist and return only the terminal error.
+    // whether recovery failed or the execution budget ended before delivery.
+    // If the summary itself failed, persist and return only the terminal error.
     let completed_degraded_reason = terminal_error
         .is_none()
         .then(|| degraded_reason.clone())
@@ -1097,14 +1130,26 @@ enum ForcedSummaryKind {
     RecoveryPartial,
 }
 
-fn forced_summary_failure(
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ForcedSummaryDisposition {
+    Accept,
+    Partial {
+        reason: String,
+    },
+    Reject {
+        message: String,
+        retry_without_claim: bool,
+    },
+}
+
+fn forced_summary_disposition(
     task: &str,
     response: &LLMResponse,
     visible_text: &str,
     run_state: &RunState,
     publish_required: bool,
     summary_kind: ForcedSummaryKind,
-) -> Option<String> {
+) -> ForcedSummaryDisposition {
     let tried_unavailable_tool =
         !response.tool_calls.is_empty() || contains_pseudo_tool_call(visible_text);
     let published = run_state
@@ -1115,23 +1160,18 @@ fn forced_summary_failure(
                 && artifact.metadata.get("category").and_then(Value::as_str) == Some("deliverable")
         })
         .collect::<Vec<_>>();
-    // A max-step summary must still honour the original deliverable request.
-    // A recovery summary is explicitly allowed to report that the requested
-    // file is missing; only deliverables it claims were created must exist.
-    let mut required_kinds = if summary_kind == ForcedSummaryKind::ExecutionLimit {
+    let mut requested_kinds = if summary_kind == ForcedSummaryKind::ExecutionLimit {
         requested_artifact_kinds(task)
     } else {
         Vec::new()
     };
-    for kind in claimed_artifact_kinds(visible_text) {
-        if !required_kinds.contains(&kind) {
-            required_kinds.push(kind);
-        }
-    }
-    required_kinds.sort_by_key(|kind| *kind == "generic");
-    let mut matched_artifacts = vec![false; published.len()];
-    let missing_required_deliverable = publish_required
-        && required_kinds.iter().any(|kind| {
+    requested_kinds.sort_by_key(|kind| *kind == "generic");
+    let mut claimed_kinds = claimed_artifact_kinds(visible_text);
+    claimed_kinds.sort_by_key(|kind| *kind == "generic");
+
+    let missing_deliverable = |required_kinds: &[&str]| {
+        let mut matched_artifacts = vec![false; published.len()];
+        required_kinds.iter().any(|kind| {
             if *kind == "generic" {
                 return published.is_empty();
             }
@@ -1144,33 +1184,51 @@ fn forced_summary_failure(
             } else {
                 true
             }
-        });
-    if !tried_unavailable_tool && !missing_required_deliverable {
-        return None;
+        })
+    };
+    let missing_claimed_deliverable = publish_required && missing_deliverable(&claimed_kinds);
+    let missing_requested_deliverable = publish_required && missing_deliverable(&requested_kinds);
+    if !tried_unavailable_tool && !missing_claimed_deliverable && !missing_requested_deliverable {
+        return ForcedSummaryDisposition::Accept;
     }
 
     let chinese = task
         .chars()
         .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch));
-    Some(if chinese {
-        if missing_required_deliverable {
-            if summary_kind == ForcedSummaryKind::RecoveryPartial {
-                "浏览器连接中断后的部分总结声称已生成交付文件，但没有找到经过验证并成功发布的对应文件。已有过程记录已保留，请重试。".to_string()
-            } else {
-                "任务在达到最大执行步数时仍未完成，且没有经过验证并成功发布的交付文件。已有过程记录已保留，请重试或缩小任务范围。".to_string()
-            }
+    if tried_unavailable_tool {
+        let message = if chinese {
+            "任务在达到最大执行步数后仍试图调用工具，但该操作没有实际执行。已有过程记录已保留，请重试。"
         } else {
-            "任务在达到最大执行步数后仍试图调用工具，但该操作没有实际执行。已有过程记录已保留，请重试。".to_string()
-        }
-    } else if missing_required_deliverable {
-        if summary_kind == ForcedSummaryKind::RecoveryPartial {
-            "The partial recovery summary claimed a deliverable that was not verified and published. Progress was preserved; please retry.".to_string()
+            "The task reached its execution limit while still attempting a tool call, so that operation was not executed. Progress was preserved; please retry."
+        };
+        return ForcedSummaryDisposition::Reject {
+            message: message.to_string(),
+            retry_without_claim: false,
+        };
+    }
+    if missing_claimed_deliverable {
+        let message = if chinese {
+            "最终总结声称已生成交付文件，但没有找到经过验证并成功发布的对应文件。已有过程记录已保留，请重试。"
         } else {
-            "The task reached its execution limit without a verified, published deliverable. Progress was preserved; retry or narrow the task scope.".to_string()
+            "The final summary claimed a deliverable that was not verified and published. Progress was preserved; please retry."
+        };
+        return ForcedSummaryDisposition::Reject {
+            message: message.to_string(),
+            retry_without_claim: true,
+        };
+    }
+    if missing_requested_deliverable {
+        let reason = if chinese {
+            "任务已达到最大执行步数；请求的交付文件尚未经过验证并成功发布，以下保留已完成的部分结果。"
+        } else {
+            "The task reached its execution limit before the requested deliverable was verified and published; the completed partial result is preserved below."
+        };
+        ForcedSummaryDisposition::Partial {
+            reason: reason.to_string(),
         }
     } else {
-        "The task reached its execution limit while still attempting a tool call, so that operation was not executed. Progress was preserved; please retry.".to_string()
-    })
+        ForcedSummaryDisposition::Accept
+    }
 }
 
 fn contains_pseudo_tool_call(text: &str) -> bool {
@@ -1265,6 +1323,8 @@ fn claimed_artifact_kinds(text: &str) -> Vec<&'static str> {
         "saved",
         "published",
         "ready for download",
+        "available for download",
+        "downloadable",
         "已生成",
         "已创建",
         "已导出",
@@ -1290,30 +1350,88 @@ fn claimed_artifact_kinds(text: &str) -> Vec<&'static str> {
     let mut kinds = Vec::new();
     for completion_marker in &completion_markers {
         for (offset, _) in lower.match_indices(*completion_marker) {
-            let target_start = offset + completion_marker.len();
-            let remaining = &lower[target_start..];
-            let target_end = claim_boundaries
+            let before = &lower[..offset];
+            let claim_start = claim_boundaries
                 .iter()
-                .chain(completion_markers.iter())
-                .filter_map(|marker| remaining.find(marker))
-                .min()
-                .unwrap_or(remaining.len());
-            let target = &remaining[..target_end];
-            for kind in artifact_kinds(target) {
+                .filter_map(|boundary| before.rfind(boundary).map(|index| index + boundary.len()))
+                .max()
+                .unwrap_or_default();
+            if completion_claim_is_negated(&lower[claim_start..offset], completion_marker) {
+                continue;
+            }
+            let after_start = offset + completion_marker.len();
+            let after = &lower[after_start..];
+            let claim_end = after_start
+                + claim_boundaries
+                    .iter()
+                    .chain(completion_markers.iter())
+                    .filter_map(|marker| after.find(marker))
+                    .min()
+                    .unwrap_or(after.len());
+            let claim = &lower[claim_start..claim_end];
+            let claim_kinds = artifact_kinds(claim);
+            let has_typed_artifact = !claim_kinds.is_empty();
+            for kind in claim_kinds {
                 if !kinds.contains(&kind) {
                     kinds.push(kind);
                 }
             }
-            if kinds.is_empty()
+            if !has_typed_artifact
                 && ["file", "document", "文件", "文档", "下载"]
                     .iter()
-                    .any(|marker| target.contains(marker))
+                    .any(|marker| claim.contains(marker))
+                && !kinds.contains(&"generic")
             {
                 kinds.push("generic");
             }
         }
     }
     kinds
+}
+
+fn completion_claim_is_negated(before: &str, completion_marker: &str) -> bool {
+    if completion_marker == "available for download"
+        && before
+            .chars()
+            .next_back()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric())
+    {
+        return true;
+    }
+    if completion_marker == "可下载" && before.ends_with('不') {
+        return true;
+    }
+    let words = before
+        .split_whitespace()
+        .map(|word| word.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '\''))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    if words.first() == Some(&"no") && !artifact_kinds(before).is_empty() {
+        return true;
+    }
+    if let Some(negation) = words
+        .iter()
+        .rposition(|word| matches!(*word, "not" | "never") || word.ends_with("n't"))
+    {
+        const NEGATION_FILLERS: &[&str] = &[
+            "yet",
+            "been",
+            "be",
+            "successfully",
+            "actually",
+            "fully",
+            "really",
+        ];
+        if words[negation + 1..]
+            .iter()
+            .all(|word| NEGATION_FILLERS.contains(word))
+        {
+            return true;
+        }
+    }
+    ["failed to be", "failed to get", "failed to become"]
+        .iter()
+        .any(|suffix| before.trim_end().ends_with(suffix))
 }
 
 fn artifact_kinds(text: &str) -> Vec<&'static str> {
@@ -1499,50 +1617,68 @@ mod tests {
 
     #[test]
     fn recovery_partial_can_report_a_requested_deliverable_as_missing() {
-        let response = summary_response("浏览器连接中断；已整理数据如下，PDF 尚未生成。");
         let state = RunState::new("请根据搜索结果生成 PDF 报告");
-
-        assert!(forced_summary_failure(
-            "请根据搜索结果生成 PDF 报告",
-            &response,
-            &response.text_blocks.join("\n\n"),
-            &state,
-            true,
-            ForcedSummaryKind::RecoveryPartial,
-        )
-        .is_none());
+        for text in [
+            "浏览器连接中断；已整理数据如下，PDF 尚未生成。",
+            "The PDF was not created; the useful findings follow.",
+            "The PDF is not available for download; the useful findings follow.",
+            "The PDF failed to be created; the useful findings follow.",
+        ] {
+            let response = summary_response(text);
+            assert_eq!(
+                forced_summary_disposition(
+                    "请根据搜索结果生成 PDF 报告",
+                    &response,
+                    &response.text_blocks.join("\n\n"),
+                    &state,
+                    true,
+                    ForcedSummaryKind::RecoveryPartial,
+                ),
+                ForcedSummaryDisposition::Accept
+            );
+        }
     }
 
     #[test]
     fn recovery_partial_rejects_an_unpublished_deliverable_claim() {
-        let response = summary_response("已生成 PDF 报告，可供下载。");
         let state = RunState::new("请根据搜索结果生成 PDF 报告");
-
-        assert!(forced_summary_failure(
-            "请根据搜索结果生成 PDF 报告",
-            &response,
-            &response.text_blocks.join("\n\n"),
-            &state,
-            true,
-            ForcedSummaryKind::RecoveryPartial,
-        )
-        .is_some());
+        for text in [
+            "已生成 PDF 报告，可供下载。",
+            "The PDF was created.",
+            "report.pdf is available for download.",
+            "report.pdf has no errors and is available for download.",
+        ] {
+            let response = summary_response(text);
+            assert!(matches!(
+                forced_summary_disposition(
+                    "请根据搜索结果生成 PDF 报告",
+                    &response,
+                    &response.text_blocks.join("\n\n"),
+                    &state,
+                    true,
+                    ForcedSummaryKind::RecoveryPartial,
+                ),
+                ForcedSummaryDisposition::Reject { .. }
+            ));
+        }
     }
 
     #[test]
-    fn execution_limit_still_requires_the_requested_deliverable() {
+    fn execution_limit_preserves_partial_result_without_requested_deliverable() {
         let response = summary_response("目前只完成了数据整理。");
         let state = RunState::new("请根据搜索结果生成 PDF 报告");
 
-        assert!(forced_summary_failure(
-            "请根据搜索结果生成 PDF 报告",
-            &response,
-            &response.text_blocks.join("\n\n"),
-            &state,
-            true,
-            ForcedSummaryKind::ExecutionLimit,
-        )
-        .is_some());
+        assert!(matches!(
+            forced_summary_disposition(
+                "请根据搜索结果生成 PDF 报告",
+                &response,
+                &response.text_blocks.join("\n\n"),
+                &state,
+                true,
+                ForcedSummaryKind::ExecutionLimit,
+            ),
+            ForcedSummaryDisposition::Partial { .. }
+        ));
     }
 
     #[test]

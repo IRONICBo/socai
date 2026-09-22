@@ -2777,7 +2777,7 @@ async fn run_agent_task_background(
                     &task_id,
                     "completed",
                     if outcome.partial {
-                        "task completed with partial results after browser recovery failed".into()
+                        "task completed with partial results".into()
                     } else {
                         "task completed".into()
                     },

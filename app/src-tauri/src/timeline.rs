@@ -776,8 +776,7 @@ fn append_terminal_snapshot_events(
                     events,
                     AgentTaskEventKind::Completed {
                         text: if snapshot.partial {
-                            "task completed with partial results after browser recovery failed"
-                                .into()
+                            "task completed with partial results".into()
                         } else {
                             "task completed".into()
                         },
