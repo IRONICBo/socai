@@ -1,0 +1,145 @@
+{
+  "id": "x",
+  "name": "X",
+  "domains": ["x.com", "*.x.com", "twitter.com", "*.twitter.com"],
+  "notes": ["knowledge.md"],
+  "browserTools": {
+    "pageState": {
+      "description": "Read the current X route, login gate, challenge, rate-limit, and hydration state.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "pageState",
+      "args": {},
+      "returns": { "type": "object", "description": "Current X page state." }
+    },
+    "searchState": {
+      "description": "Verify that X reached the requested search route and hydrated visible posts.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "searchState",
+      "args": {
+        "query": { "type": "string", "required": false, "description": "Expected search query." }
+      },
+      "returns": { "type": "object", "description": "Search route, query, gate, and result state." }
+    },
+    "searchResults": {
+      "description": "Collect visible X post search results across lazy-scroll pages up to limit.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "searchResults",
+      "args": {
+        "limit": { "type": "integer", "required": false, "description": "Maximum posts to return." },
+        "viewport_only": { "type": "boolean", "required": false, "description": "Only include posts intersecting the viewport." }
+      },
+      "returns": { "type": "array", "description": "Visible X posts." }
+    },
+    "scrollResults": {
+      "description": "Scroll an X search surface by one bounded viewport step.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "scrollResults",
+      "args": {
+        "nudge_up": { "type": "boolean", "required": false, "description": "Scroll slightly upward instead of down." },
+        "to_top": { "type": "boolean", "required": false, "description": "Reset to the top." }
+      },
+      "returns": { "type": "object", "description": "Search scroll and result-count state." }
+    },
+    "profileDetail": {
+      "description": "Extract the active X profile identity, biography, and visible counts.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "profileDetail",
+      "args": {},
+      "returns": { "type": "object", "description": "Visible X profile details or an explicit gate state." }
+    },
+    "profilePosts": {
+      "description": "Collect posts across the active X profile timeline up to limit.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "profilePosts",
+      "args": {
+        "limit": { "type": "integer", "required": false, "description": "Maximum posts to return." },
+        "viewport_only": { "type": "boolean", "required": false, "description": "Only include posts intersecting the viewport." }
+      },
+      "returns": { "type": "array", "description": "Visible X profile posts." }
+    },
+    "scrollPosts": {
+      "description": "Scroll an X profile timeline by one bounded viewport step.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "scrollPosts",
+      "args": {
+        "nudge_up": { "type": "boolean", "required": false, "description": "Scroll slightly upward instead of down." },
+        "to_top": { "type": "boolean", "required": false, "description": "Reset to the top." }
+      },
+      "returns": { "type": "object", "description": "Profile scroll and post-count state." }
+    },
+    "postDetail": {
+      "description": "Extract the active X post, author, text, media, publication time, and visible metrics.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "postDetail",
+      "args": {},
+      "returns": { "type": "object", "description": "Visible X post details or an explicit gate state." }
+    },
+    "comments": {
+      "description": "Collect visible replies on the active X post up to limit; never replies, likes, reposts, follows, or submits anything.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "comments",
+      "args": {
+        "limit": { "type": "integer", "required": false, "description": "Maximum visible replies to return." }
+      },
+      "returns": { "type": "array", "description": "Accumulated, deduplicated X replies." }
+    },
+    "scrollComments": {
+      "description": "Scroll the active X conversation by one bounded step to hydrate more replies.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "scrollComments",
+      "args": {},
+      "returns": { "type": "object", "description": "Reply growth and end-of-list state." }
+    },
+    "replyEditorTarget": {
+      "description": "Inspect the verified active conversation and return owned pointer geometry for its single visible reply editor; never focuses or types.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "replyEditorTarget",
+      "args": {
+        "post_id": { "type": "string", "required": true, "description": "Expected active X status id." }
+      },
+      "returns": { "type": "object", "description": "Fail-closed reply editor geometry bound to the active post." }
+    },
+    "replyDraftState": {
+      "description": "Read the draft and focus state of the verified active post reply editor.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "replyDraftState",
+      "args": {
+        "post_id": { "type": "string", "required": true, "description": "Expected active X status id." }
+      },
+      "returns": { "type": "object", "description": "Current reply draft state bound to the active post." }
+    },
+    "replySubmitTarget": {
+      "description": "Inspect the verified composer and return owned pointer geometry for its enabled Reply control; never clicks.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "replySubmitTarget",
+      "args": {
+        "post_id": { "type": "string", "required": true, "description": "Expected active X status id." }
+      },
+      "returns": { "type": "object", "description": "Fail-closed Reply control geometry bound to the active composer." }
+    },
+    "renderedReplyState": {
+      "description": "Verify an exact rendered reply by the signed-in account inside the active conversation.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "renderedReplyState",
+      "args": {
+        "post_id": { "type": "string", "required": true, "description": "Expected active X status id." },
+        "text": { "type": "string", "required": true, "description": "Exact reply text." }
+      },
+      "returns": { "type": "object", "description": "Exact signed-in-author reply count and ids for reconciliation." }
+    }
+  }
+}

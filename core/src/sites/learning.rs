@@ -431,9 +431,9 @@ pub async fn run_site_browser_tool_collecting(
 
 fn pagination_scroll_tool(site_id: &str, tool_name: &str) -> Option<&'static str> {
     match (site_id, tool_name) {
-        ("linkedin" | "instagram" | "dy" | "tiktok", "comments") => Some("scrollComments"),
-        ("linkedin" | "instagram", "searchResults") => Some("scrollResults"),
-        ("instagram", "profilePosts") => Some("scrollPosts"),
+        ("linkedin" | "instagram" | "dy" | "tiktok" | "x", "comments") => Some("scrollComments"),
+        ("linkedin" | "instagram" | "x", "searchResults") => Some("scrollResults"),
+        ("instagram" | "x", "profilePosts") => Some("scrollPosts"),
         ("dy" | "tiktok", "videoCards") => Some("scrollFeed"),
         _ => None,
     }
