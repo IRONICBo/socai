@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -59,6 +60,7 @@ fn instagram_tools(page: Arc<PageSession>) -> Vec<Arc<dyn Tool>> {
         Arc::new(SearchTool { page: page.clone() }),
         Arc::new(ProfileTool { page: page.clone() }),
         Arc::new(GetPostsTool { page: page.clone() }),
+        Arc::new(CommentTool { page: page.clone() }),
         Arc::new(PageStateTool { page }),
     ]
 }
@@ -94,6 +96,22 @@ pub static INSTAGRAM_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
                     kind: ArgKind::Int,
                 },
                 CommandArg {
+                    key: "deep",
+                    long: Some("deep"),
+                    value_name: "N",
+                    help: "Open up to N post/reel cards by trusted page click and return full details. Defaults to 0.",
+                    required: false,
+                    kind: ArgKind::Int,
+                },
+                CommandArg {
+                    key: "num_comments",
+                    long: Some("num-comments"),
+                    value_name: "N",
+                    help: "Comments to collect for each deeply read post. Defaults to 8.",
+                    required: false,
+                    kind: ArgKind::Int,
+                },
+                CommandArg {
                     key: "wait_seconds",
                     long: Some("wait-seconds"),
                     value_name: "SECONDS",
@@ -123,6 +141,22 @@ pub static INSTAGRAM_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
                     long: Some("num"),
                     value_name: "N",
                     help: "Number of post or reel cards to collect by scrolling. Defaults to 10.",
+                    required: false,
+                    kind: ArgKind::Int,
+                },
+                CommandArg {
+                    key: "deep",
+                    long: Some("deep"),
+                    value_name: "N",
+                    help: "Open up to N grid cards by trusted page click and return full details. Defaults to 0.",
+                    required: false,
+                    kind: ArgKind::Int,
+                },
+                CommandArg {
+                    key: "num_comments",
+                    long: Some("num-comments"),
+                    value_name: "N",
+                    help: "Comments to collect for each deeply read post. Defaults to 8.",
                     required: false,
                     kind: ArgKind::Int,
                 },
@@ -170,6 +204,39 @@ pub static INSTAGRAM_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
             ],
             slow: SlowWhen::Always,
             run: run_get_posts,
+        },
+        SiteCommand {
+            name: "comment",
+            tool_name: "comment",
+            about: "Comment on one Instagram post or Reel using verified pointer and keyboard events.",
+            args: &[
+                CommandArg {
+                    key: "post",
+                    long: None,
+                    value_name: "URL_OR_SHORTCODE",
+                    help: "Target Instagram post/Reel URL or shortcode.",
+                    required: true,
+                    kind: ArgKind::Str,
+                },
+                CommandArg {
+                    key: "text",
+                    long: Some("text"),
+                    value_name: "TEXT",
+                    help: "Exact comment text. The command refuses to replace an existing draft.",
+                    required: true,
+                    kind: ArgKind::Str,
+                },
+                CommandArg {
+                    key: "wait_seconds",
+                    long: Some("wait-seconds"),
+                    value_name: "SECONDS",
+                    help: "Maximum wait for hydration and post-submit reconciliation. Defaults to 30.",
+                    required: false,
+                    kind: ArgKind::Int,
+                },
+            ],
+            slow: SlowWhen::Always,
+            run: run_comment,
         },
         SiteCommand {
             name: "page_state",
@@ -239,6 +306,15 @@ fn run_page_state(
     )
 }
 
+fn run_comment(
+    page: Arc<PageSession>,
+    args: Value,
+    debug_snapshot: bool,
+    progress: Option<ToolProgressSender>,
+) -> BoxFuture<Value> {
+    run_named(page, args, debug_snapshot, progress, "comment", "comment")
+}
+
 fn run_named(
     page: Arc<PageSession>,
     args: Value,
@@ -284,6 +360,8 @@ impl Tool for SearchTool {
             "properties": {
                 "query": { "type": "string", "maxLength": 512 },
                 "num": { "type": "integer", "default": 10, "minimum": 1, "maximum": 100 },
+                "deep": { "type": "integer", "default": 0, "minimum": 0, "maximum": 100 },
+                "num_comments": { "type": "integer", "default": 8, "minimum": 0, "maximum": 100 },
                 "wait_seconds": { "type": "number", "default": 30, "minimum": 1, "maximum": 330 }
             },
             "required": ["query"]
@@ -296,6 +374,9 @@ impl Tool for SearchTool {
             anyhow::bail!("query must contain at most 512 characters");
         }
         let num = get_i64(&input, "num", DEFAULT_RESULT_COUNT).clamp(1, MAX_TOOL_ITEMS);
+        let deep = get_i64(&input, "deep", 0).clamp(0, num);
+        let num_comments =
+            get_i64(&input, "num_comments", DEFAULT_COMMENT_COUNT).clamp(0, MAX_TOOL_ITEMS);
         let wait_seconds =
             get_f64(&input, "wait_seconds", DEFAULT_WAIT_SECONDS).clamp(1.0, MAX_TOOL_WAIT_SECONDS);
         let target = format!(
@@ -374,12 +455,19 @@ impl Tool for SearchTool {
             .await?
         };
         let count = results.as_array().map(Vec::len).unwrap_or(0);
+        let deep_posts =
+            read_clicked_candidates(&self.page, ctx, &results, deep, num_comments, wait_seconds)
+                .await?;
+        let deep_status = deep_read_status(&results, &deep_posts, deep);
         Ok(json_result(&json!({
-            "ok": true,
+            "ok": deep_status.get("ok").and_then(Value::as_bool).unwrap_or(true),
+            "partial": !deep_status.get("ok").and_then(Value::as_bool).unwrap_or(true),
             "query": query,
             "url": current_url(&self.page).await.unwrap_or_default(),
             "count": count,
             "results": results,
+            "deep_posts": deep_posts,
+            "deep_status": deep_status,
             "state": state,
         })))
     }
@@ -405,6 +493,8 @@ impl Tool for ProfileTool {
             "properties": {
                 "profile": { "type": "string" },
                 "num": { "type": "integer", "default": 10, "minimum": 1, "maximum": 100 },
+                "deep": { "type": "integer", "default": 0, "minimum": 0, "maximum": 100 },
+                "num_comments": { "type": "integer", "default": 8, "minimum": 0, "maximum": 100 },
                 "wait_seconds": { "type": "number", "default": 30, "minimum": 1, "maximum": 330 }
             },
             "required": ["profile"]
@@ -415,6 +505,9 @@ impl Tool for ProfileTool {
         let locator = required_string(&input, "profile")?;
         let url = instagram_profile_url(&locator)?;
         let num = get_i64(&input, "num", DEFAULT_RESULT_COUNT).clamp(1, MAX_TOOL_ITEMS);
+        let deep = get_i64(&input, "deep", 0).clamp(0, num);
+        let num_comments =
+            get_i64(&input, "num_comments", DEFAULT_COMMENT_COUNT).clamp(0, MAX_TOOL_ITEMS);
         let wait_seconds =
             get_f64(&input, "wait_seconds", DEFAULT_WAIT_SECONDS).clamp(1.0, MAX_TOOL_WAIT_SECONDS);
         navigate_https(&self.page, &url).await?;
@@ -444,10 +537,17 @@ impl Tool for ProfileTool {
             true,
         )
         .await?;
+        let deep_posts =
+            read_clicked_candidates(&self.page, ctx, &posts, deep, num_comments, wait_seconds)
+                .await?;
+        let deep_status = deep_read_status(&posts, &deep_posts, deep);
         Ok(json_result(&json!({
-            "ok": true,
+            "ok": deep_status.get("ok").and_then(Value::as_bool).unwrap_or(true),
+            "partial": !deep_status.get("ok").and_then(Value::as_bool).unwrap_or(true),
             "profile": state,
             "posts": posts,
+            "deep_posts": deep_posts,
+            "deep_status": deep_status,
             "count": posts.as_array().map(Vec::len).unwrap_or(0),
         })))
     }
@@ -519,6 +619,280 @@ struct PageStateTool {
     page: Arc<PageSession>,
 }
 
+struct CommentTool {
+    page: Arc<PageSession>,
+}
+
+#[async_trait]
+impl Tool for CommentTool {
+    fn name(&self) -> &str {
+        "comment"
+    }
+
+    fn description(&self) -> &str {
+        "Comment on an explicitly selected Instagram post or Reel with real CDP pointer and keyboard events. Refuses login gates, ambiguous editors, existing drafts or exact comments, route changes, and submit retries."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "post": { "type": "string" },
+                "text": { "type": "string", "minLength": 1, "maxLength": 10000 },
+                "wait_seconds": { "type": "number", "default": 30, "minimum": 1, "maximum": 330 }
+            },
+            "required": ["post", "text"]
+        })
+    }
+
+    async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let locator = required_string(&input, "post")?;
+        let raw_text = input
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing required argument: text"))?;
+        if raw_text.trim().is_empty() || raw_text.trim() != raw_text {
+            anyhow::bail!(
+                "comment text must be non-empty and have no leading or trailing whitespace"
+            );
+        }
+        let text = raw_text.to_string();
+        if text.chars().count() > 10_000 {
+            anyhow::bail!("comment text must contain at most 10000 characters");
+        }
+        let wait_seconds =
+            get_f64(&input, "wait_seconds", DEFAULT_WAIT_SECONDS).clamp(1.0, MAX_TOOL_WAIT_SECONDS);
+        let url = instagram_post_url(&locator)?;
+        let expected_shortcode = instagram_post_shortcode(&url)
+            .ok_or_else(|| anyhow::anyhow!("canonical Instagram URL is missing a shortcode"))?;
+        navigate_https(&self.page, &url).await?;
+        let detail =
+            wait_for_browser_tool(&self.page, SITE_ID, "postDetail", None, wait_seconds).await?;
+        let page_state =
+            crate::sites::learning::run_site_browser_tool(&self.page, SITE_ID, "pageState", None)
+                .await?;
+        if let Some(reason) = gate_reason(&page_state) {
+            return Ok(json_result(&failure_payload(
+                reason,
+                json!({ "post": locator, "url": url, "detail": detail, "page_state": page_state, "submit_click_count": 0 }),
+            )));
+        }
+        if page_state.get("ok").and_then(Value::as_bool) != Some(true)
+            || page_state.get("authenticated").and_then(Value::as_bool) != Some(true)
+        {
+            return Ok(json_result(&failure_payload(
+                "login_required",
+                json!({ "post": locator, "url": url, "detail": detail, "page_state": page_state, "submit_click_count": 0 }),
+            )));
+        }
+        let shortcode = detail
+            .get("shortcode")
+            .or_else(|| detail.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if detail.get("ok").and_then(Value::as_bool) != Some(true)
+            || shortcode != expected_shortcode
+        {
+            return Ok(json_result(&failure_payload(
+                if detail.get("ok").and_then(Value::as_bool) == Some(true) {
+                    "wrong_post"
+                } else {
+                    detail
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("post_unavailable")
+                },
+                json!({ "post": locator, "expected_shortcode": expected_shortcode, "url": url, "detail": detail, "page_state": page_state, "submit_click_count": 0 }),
+            )));
+        }
+        let action_args = json!({ "shortcode": shortcode });
+        let rendered_args = json!({ "shortcode": shortcode, "text": text });
+        let before = crate::sites::learning::run_site_browser_tool(
+            &self.page,
+            SITE_ID,
+            "renderedCommentState",
+            Some(&rendered_args),
+        )
+        .await?;
+        let baseline = before.get("count").and_then(Value::as_u64).unwrap_or(0);
+        if baseline > 0 {
+            return Ok(json_result(&failure_payload(
+                "exact_comment_preexists",
+                json!({
+                    "shortcode": shortcode,
+                    "url": url,
+                    "comment": text,
+                    "submit_click_count": 0,
+                    "reconcile": before,
+                }),
+            )));
+        }
+
+        let editor = crate::sites::learning::run_site_browser_tool(
+            &self.page,
+            SITE_ID,
+            "commentEditorTarget",
+            Some(&action_args),
+        )
+        .await?;
+        let Some((editor_x, editor_y)) = verified_instagram_write_target(&editor, shortcode) else {
+            return Ok(json_result(&failure_payload(
+                editor
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("comment_editor_unavailable"),
+                json!({ "shortcode": shortcode, "url": url, "editor": editor, "submit_click_count": 0 }),
+            )));
+        };
+        self.page.click(editor_x, editor_y).await?;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let draft = crate::sites::learning::run_site_browser_tool(
+            &self.page,
+            SITE_ID,
+            "commentDraftState",
+            Some(&action_args),
+        )
+        .await?;
+        if draft.get("ok").and_then(Value::as_bool) != Some(true)
+            || draft.get("focused").and_then(Value::as_bool) != Some(true)
+            || !draft
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .is_empty()
+        {
+            return Ok(json_result(&failure_payload(
+                "comment_editor_not_empty_or_focused",
+                json!({ "shortcode": shortcode, "url": url, "draft": draft, "submit_click_count": 0 }),
+            )));
+        }
+        self.page.type_chars(&text).await?;
+        let typed_deadline = Instant::now() + Duration::from_secs(5);
+        let typed = loop {
+            let state = crate::sites::learning::run_site_browser_tool(
+                &self.page,
+                SITE_ID,
+                "commentDraftState",
+                Some(&action_args),
+            )
+            .await?;
+            if state.get("value").and_then(Value::as_str) == Some(text.as_str())
+                || Instant::now() >= typed_deadline
+            {
+                break state;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        };
+        if typed.get("value").and_then(Value::as_str) != Some(text.as_str()) {
+            return Ok(json_result(&failure_payload(
+                "comment_draft_mismatch",
+                json!({ "shortcode": shortcode, "url": url, "draft": typed, "submit_click_count": 0 }),
+            )));
+        }
+
+        let final_page_state =
+            crate::sites::learning::run_site_browser_tool(&self.page, SITE_ID, "pageState", None)
+                .await?;
+        if final_page_state.get("ok").and_then(Value::as_bool) != Some(true)
+            || final_page_state
+                .get("authenticated")
+                .and_then(Value::as_bool)
+                != Some(true)
+        {
+            return Ok(json_result(&failure_payload(
+                gate_reason(&final_page_state).unwrap_or("page_gate_before_submit"),
+                json!({ "shortcode": shortcode, "url": url, "page_state": final_page_state, "submit_click_count": 0 }),
+            )));
+        }
+        let final_detail =
+            crate::sites::learning::run_site_browser_tool(&self.page, SITE_ID, "postDetail", None)
+                .await?;
+        let final_draft = crate::sites::learning::run_site_browser_tool(
+            &self.page,
+            SITE_ID,
+            "commentDraftState",
+            Some(&action_args),
+        )
+        .await?;
+        let submit = crate::sites::learning::run_site_browser_tool(
+            &self.page,
+            SITE_ID,
+            "commentSubmitTarget",
+            Some(&action_args),
+        )
+        .await?;
+        let Some((submit_x, submit_y)) = verified_instagram_write_target(&submit, shortcode) else {
+            return Ok(json_result(&failure_payload(
+                submit
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("comment_submit_unavailable"),
+                json!({ "shortcode": shortcode, "url": url, "submit": submit, "submit_click_count": 0 }),
+            )));
+        };
+        if final_detail.get("ok").and_then(Value::as_bool) != Some(true)
+            || final_detail
+                .get("shortcode")
+                .or_else(|| final_detail.get("id"))
+                .and_then(Value::as_str)
+                != Some(shortcode)
+            || final_draft.get("value").and_then(Value::as_str) != Some(text.as_str())
+        {
+            return Ok(json_result(&failure_payload(
+                "volatile_state_changed_before_submit",
+                json!({ "shortcode": shortcode, "url": url, "page_state": final_page_state, "detail": final_detail, "draft": final_draft, "submit_click_count": 0 }),
+            )));
+        }
+
+        let dispatch_error = self
+            .page
+            .click(submit_x, submit_y)
+            .await
+            .err()
+            .map(|error| format!("{error:#}"));
+        let deadline = Instant::now() + Duration::from_secs_f64(wait_seconds);
+        let reconciled = loop {
+            let state = crate::sites::learning::run_site_browser_tool(
+                &self.page,
+                SITE_ID,
+                "renderedCommentState",
+                Some(&rendered_args),
+            )
+            .await?;
+            if state.get("count").and_then(Value::as_u64).unwrap_or(0) > baseline
+                || Instant::now() >= deadline
+            {
+                break state;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        };
+        let committed = reconciled.get("count").and_then(Value::as_u64).unwrap_or(0) > baseline;
+        Ok(json_result(&json!({
+            "ok": committed,
+            "status": if committed { "committed" } else { "commit_unknown" },
+            "shortcode": shortcode,
+            "url": url,
+            "comment": text,
+            "interaction": "trusted_pointer_and_keyboard",
+            "platform_api_called": false,
+            "submit_click_count": 1,
+            "dispatch_error": dispatch_error,
+            "baseline_exact_comment_count": baseline,
+            "reconcile": reconciled,
+        })))
+    }
+}
+
+fn verified_instagram_write_target(target: &Value, shortcode: &str) -> Option<(f64, f64)> {
+    if target.get("ok").and_then(Value::as_bool) != Some(true)
+        || target.get("hit_owned").and_then(Value::as_bool) != Some(true)
+        || target.get("shortcode").and_then(Value::as_str) != Some(shortcode)
+    {
+        return None;
+    }
+    Some((target.get("x")?.as_f64()?, target.get("y")?.as_f64()?))
+}
+
 #[async_trait]
 impl Tool for PageStateTool {
     fn name(&self) -> &str {
@@ -546,6 +920,535 @@ impl Tool for PageStateTool {
         let state = invoke_browser_tool(&self.page, ctx, SITE_ID, "pageState", None, false).await?;
         Ok(json_result(&state))
     }
+}
+
+async fn read_clicked_candidates(
+    page: &PageSession,
+    ctx: &ToolContext,
+    candidates: &Value,
+    deep: i64,
+    num_comments: i64,
+    wait_seconds: f64,
+) -> anyhow::Result<Value> {
+    if deep <= 0 {
+        return Ok(Value::Array(Vec::new()));
+    }
+    let Some(items) = candidates.as_array() else {
+        return Ok(Value::Array(Vec::new()));
+    };
+    let mut output = Vec::new();
+    for candidate in items {
+        if output.len() >= deep as usize {
+            break;
+        }
+        let kind = candidate.get("kind").and_then(Value::as_str).unwrap_or("");
+        if !matches!(kind, "post" | "reel") {
+            continue;
+        }
+        let Some(shortcode) = candidate
+            .get("shortcode")
+            .or_else(|| candidate.get("id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let result =
+            match read_clicked_instagram_post(page, ctx, shortcode, num_comments, wait_seconds)
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => failure_payload(
+                    "deep_read_error",
+                    json!({
+                        "shortcode": shortcode,
+                        "navigation_policy": "card_click_only",
+                        "origin_preserved": true,
+                        "error": format!("{error:#}"),
+                    }),
+                ),
+            };
+        let restored = result
+            .get("close")
+            .and_then(|close| close.get("ok"))
+            .and_then(Value::as_bool)
+            .or_else(|| result.get("origin_preserved").and_then(Value::as_bool))
+            .unwrap_or(false);
+        output.push(result);
+        if !restored {
+            break;
+        }
+    }
+    Ok(Value::Array(output))
+}
+
+fn deep_read_status(candidates: &Value, deep_posts: &Value, deep: i64) -> Value {
+    let available = candidates
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|candidate| {
+            matches!(
+                candidate.get("kind").and_then(Value::as_str),
+                Some("post" | "reel")
+            )
+        })
+        .count();
+    let requested = (deep.max(0) as usize).min(available);
+    let attempted = deep_posts.as_array().map(Vec::len).unwrap_or(0);
+    let completed = deep_posts
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("ok").and_then(Value::as_bool) == Some(true))
+        .count();
+    let ok = deep <= 0 || (attempted == requested && completed == requested);
+    json!({
+        "ok": ok,
+        "requested": requested,
+        "attempted": attempted,
+        "completed": completed,
+    })
+}
+
+async fn locate_instagram_post_card(page: &PageSession, args: &Value) -> anyhow::Result<Value> {
+    let mut target =
+        crate::sites::learning::run_site_browser_tool(page, SITE_ID, "postCardTarget", Some(args))
+            .await?;
+    if target.get("ok").and_then(Value::as_bool) == Some(true)
+        || target.get("status").and_then(Value::as_str) != Some("post_card_not_found")
+    {
+        return Ok(target);
+    }
+
+    let mut active_scroll_tool = None;
+    for tool_name in ["scrollResults", "scrollPosts"] {
+        let scroll = crate::sites::learning::run_site_browser_tool(
+            page,
+            SITE_ID,
+            tool_name,
+            Some(&json!({ "to_top": true })),
+        )
+        .await?;
+        if scroll.get("ok").and_then(Value::as_bool) == Some(true) {
+            active_scroll_tool = Some(tool_name);
+            break;
+        }
+    }
+    let Some(scroll_tool) = active_scroll_tool else {
+        return Ok(target);
+    };
+
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    for _ in 0..16 {
+        target = crate::sites::learning::run_site_browser_tool(
+            page,
+            SITE_ID,
+            "postCardTarget",
+            Some(args),
+        )
+        .await?;
+        if target.get("ok").and_then(Value::as_bool) == Some(true)
+            || target.get("status").and_then(Value::as_str) != Some("post_card_not_found")
+        {
+            return Ok(target);
+        }
+        let scroll = crate::sites::learning::run_site_browser_tool(
+            page,
+            SITE_ID,
+            scroll_tool,
+            Some(&json!({})),
+        )
+        .await?;
+        if scroll.get("ok").and_then(Value::as_bool) != Some(true) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        target = crate::sites::learning::run_site_browser_tool(
+            page,
+            SITE_ID,
+            "postCardTarget",
+            Some(args),
+        )
+        .await?;
+        if target.get("ok").and_then(Value::as_bool) == Some(true)
+            || target.get("status").and_then(Value::as_str) != Some("post_card_not_found")
+        {
+            return Ok(target);
+        }
+        if scroll.get("at_end").and_then(Value::as_bool) == Some(true) {
+            break;
+        }
+    }
+    Ok(target)
+}
+
+fn validated_instagram_click_target(
+    target: &Value,
+    expected_shortcode: &str,
+) -> anyhow::Result<(f64, f64)> {
+    if target.get("ok").and_then(Value::as_bool) != Some(true)
+        || target.get("hit_owned").and_then(Value::as_bool) != Some(true)
+    {
+        anyhow::bail!("Instagram post card click target is not owned by the expected anchor");
+    }
+    let actual_shortcode = target
+        .get("shortcode")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let source_url = target
+        .get("source_url")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let validated_url = instagram_post_url(source_url)?;
+    if actual_shortcode != expected_shortcode
+        || instagram_post_shortcode(&validated_url).as_deref() != Some(expected_shortcode)
+    {
+        anyhow::bail!("Instagram post card identity changed before click");
+    }
+    let x = target
+        .get("x")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| anyhow::anyhow!("Instagram post card target is missing x"))?;
+    let y = target
+        .get("y")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| anyhow::anyhow!("Instagram post card target is missing y"))?;
+    Ok((x, y))
+}
+
+fn source_surface_restored(
+    source_url: &str,
+    source_state: &Value,
+    current_url: &str,
+    current_state: &Value,
+) -> bool {
+    if source_url != current_url
+        || gate_reason(current_state).is_some()
+        || current_state.get("ok").and_then(Value::as_bool) != Some(true)
+        || current_state
+            .get("login_gate_present")
+            .and_then(Value::as_bool)
+            == Some(true)
+        || current_state.get("hydrated").and_then(Value::as_bool) != Some(true)
+        || current_state
+            .get("content_available")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return false;
+    }
+    let expected_type = source_state
+        .get("page_type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let actual_type = current_state
+        .get("page_type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if expected_type != actual_type {
+        return false;
+    }
+    let expected_query = source_state
+        .get("search_query")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let actual_query = current_state
+        .get("search_query")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !expected_query.is_empty() && expected_query != actual_query {
+        return false;
+    }
+    let expected_profile = source_state
+        .get("profile_username")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let actual_profile = current_state
+        .get("profile_username")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if expected_type == "profile"
+        && (expected_profile.is_empty() || expected_profile != actual_profile)
+    {
+        return false;
+    }
+    let expected_results = source_state
+        .get("result_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let actual_results = current_state
+        .get("result_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    (expected_results == 0 && expected_type != "search") || actual_results > 0
+}
+
+async fn read_clicked_instagram_post(
+    page: &PageSession,
+    ctx: &ToolContext,
+    shortcode: &str,
+    num_comments: i64,
+    wait_seconds: f64,
+) -> anyhow::Result<Value> {
+    let source_url = current_url(page).await.unwrap_or_default();
+    let source_state =
+        crate::sites::learning::run_site_browser_tool(page, SITE_ID, "pageState", None).await?;
+    let args = json!({ "shortcode": shortcode });
+    let initial = locate_instagram_post_card(page, &args).await?;
+    if initial.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Ok(failure_payload(
+            initial
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("post_card_not_found"),
+            json!({
+                "shortcode": shortcode,
+                "navigation_policy": "card_click_only",
+                "source_url": source_url,
+                "origin_preserved": true,
+                "open": initial,
+            }),
+        ));
+    }
+
+    tokio::time::sleep(Duration::from_millis(180)).await;
+    let fresh =
+        crate::sites::learning::run_site_browser_tool(page, SITE_ID, "postCardTarget", Some(&args))
+            .await?;
+    if fresh.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Ok(failure_payload(
+            fresh
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("post_card_changed_before_click"),
+            json!({
+                "shortcode": shortcode,
+                "navigation_policy": "card_click_only",
+                "source_url": source_url,
+                "origin_preserved": true,
+                "initial_target": initial,
+                "fresh_target": fresh,
+            }),
+        ));
+    }
+    if initial.get("source_url").and_then(Value::as_str)
+        != fresh.get("source_url").and_then(Value::as_str)
+    {
+        return Ok(failure_payload(
+            "post_card_changed_before_click",
+            json!({
+                "shortcode": shortcode,
+                "navigation_policy": "card_click_only",
+                "source_url": source_url,
+                "origin_preserved": true,
+                "initial_target": initial,
+                "fresh_target": fresh,
+            }),
+        ));
+    }
+    let (x, y) = validated_instagram_click_target(&fresh, shortcode)?;
+    if let Err(error) = page.click(x, y).await {
+        let close = close_clicked_instagram_post(page, shortcode, &source_url, &source_state)
+            .await
+            .unwrap_or_else(
+                |close_error| json!({ "ok": false, "error": format!("{close_error:#}") }),
+            );
+        return Ok(failure_payload(
+            "post_click_error",
+            json!({
+                "shortcode": shortcode,
+                "navigation_policy": "card_click_only",
+                "source_url": source_url,
+                "error": format!("{error:#}"),
+                "close": close,
+            }),
+        ));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs_f64(wait_seconds.clamp(1.0, 330.0));
+    let open_result = async {
+        let mut open = json!({ "ok": false, "status": "waiting" });
+        while Instant::now() < deadline {
+            open = crate::sites::learning::run_site_browser_tool(
+                page,
+                SITE_ID,
+                "postOpenState",
+                Some(&args),
+            )
+            .await?;
+            if open.get("ok").and_then(Value::as_bool) == Some(true)
+                || gate_reason(&open).is_some()
+                || matches!(
+                    open.get("status").and_then(Value::as_str),
+                    Some("wrong_post" | "full_page_navigation")
+                )
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        Ok::<_, anyhow::Error>(open)
+    }
+    .await;
+    let open = match open_result {
+        Ok(open) => open,
+        Err(error) => {
+            let close = close_clicked_instagram_post(page, shortcode, &source_url, &source_state)
+                .await
+                .unwrap_or_else(
+                    |close_error| json!({ "ok": false, "error": format!("{close_error:#}") }),
+                );
+            return Ok(failure_payload(
+                "post_open_state_error",
+                json!({
+                    "shortcode": shortcode,
+                    "navigation_policy": "card_click_only",
+                    "source_url": source_url,
+                    "error": format!("{error:#}"),
+                    "close": close,
+                }),
+            ));
+        }
+    };
+
+    if open.get("ok").and_then(Value::as_bool) != Some(true) {
+        let close = close_clicked_instagram_post(page, shortcode, &source_url, &source_state).await;
+        let reason = gate_reason(&open).unwrap_or_else(|| {
+            open.get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("post_click_failed")
+        });
+        return Ok(failure_payload(
+            reason,
+            json!({
+                "shortcode": shortcode,
+                "navigation_policy": "card_click_only",
+                "source_url": source_url,
+                "open": open,
+                "close": close.unwrap_or_else(|error| json!({ "ok": false, "error": format!("{error:#}") })),
+            }),
+        ));
+    }
+
+    let read = async {
+        let entity = invoke_browser_tool(page, ctx, SITE_ID, "postDetail", None, false).await?;
+        let comments = if num_comments > 0 {
+            invoke_browser_tool(
+                page,
+                ctx,
+                SITE_ID,
+                "comments",
+                Some(&json!({ "limit": num_comments })),
+                true,
+            )
+            .await?
+        } else {
+            Value::Array(Vec::new())
+        };
+        Ok::<_, anyhow::Error>((entity, comments))
+    }
+    .await;
+    let close = close_clicked_instagram_post(page, shortcode, &source_url, &source_state)
+        .await
+        .unwrap_or_else(|error| json!({ "ok": false, "error": format!("{error:#}") }));
+
+    match read {
+        Ok((entity, comments)) => {
+            let entity_ok = entity.get("ok").and_then(Value::as_bool) == Some(true);
+            Ok(json!({
+                "ok": entity_ok && close.get("ok").and_then(Value::as_bool) == Some(true),
+                "shortcode": shortcode,
+                "navigation_policy": "card_click_only",
+                "source_url": source_url,
+                "open_strategy": "trusted_cdp_card_click",
+                "entity": entity,
+                "comments": comments,
+                "close": close,
+            }))
+        }
+        Err(error) => Ok(failure_payload(
+            "post_read_failed",
+            json!({
+                "shortcode": shortcode,
+                "navigation_policy": "card_click_only",
+                "source_url": source_url,
+                "error": format!("{error:#}"),
+                "close": close,
+            }),
+        )),
+    }
+}
+
+async fn close_clicked_instagram_post(
+    page: &PageSession,
+    shortcode: &str,
+    source_url: &str,
+    source_state: &Value,
+) -> anyhow::Result<Value> {
+    let before_close = current_url(page).await.unwrap_or_default();
+    let before_state =
+        crate::sites::learning::run_site_browser_tool(page, SITE_ID, "pageState", None).await?;
+    if source_surface_restored(source_url, source_state, &before_close, &before_state) {
+        return Ok(
+            json!({ "ok": true, "strategy": "already_restored", "url": before_close, "state": before_state }),
+        );
+    }
+
+    page.press_key("Escape").await?;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let after_escape = current_url(page).await.unwrap_or_default();
+    let after_escape_state =
+        crate::sites::learning::run_site_browser_tool(page, SITE_ID, "pageState", None).await?;
+    if source_surface_restored(source_url, source_state, &after_escape, &after_escape_state) {
+        return Ok(
+            json!({ "ok": true, "strategy": "escape", "url": after_escape, "state": after_escape_state }),
+        );
+    }
+
+    let close =
+        crate::sites::learning::run_site_browser_tool(page, SITE_ID, "closePostTarget", None)
+            .await?;
+    if close.get("ok").and_then(Value::as_bool) == Some(true)
+        && close.get("hit_owned").and_then(Value::as_bool) == Some(true)
+        && close.get("shortcode").and_then(Value::as_str) == Some(shortcode)
+    {
+        let x = close
+            .get("x")
+            .and_then(Value::as_f64)
+            .ok_or_else(|| anyhow::anyhow!("Instagram close target is missing x"))?;
+        let y = close
+            .get("y")
+            .and_then(Value::as_f64)
+            .ok_or_else(|| anyhow::anyhow!("Instagram close target is missing y"))?;
+        page.click(x, y).await?;
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        let after_close = current_url(page).await.unwrap_or_default();
+        let after_close_state =
+            crate::sites::learning::run_site_browser_tool(page, SITE_ID, "pageState", None).await?;
+        if source_surface_restored(source_url, source_state, &after_close, &after_close_state) {
+            return Ok(
+                json!({ "ok": true, "strategy": "close_button", "url": after_close, "state": after_close_state }),
+            );
+        }
+    }
+
+    let state = crate::sites::learning::run_site_browser_tool(
+        page,
+        SITE_ID,
+        "postOpenState",
+        Some(&json!({ "shortcode": shortcode })),
+    )
+    .await?;
+    Ok(json!({
+        "ok": false,
+        "strategy": "close_failed",
+        "source_url": source_url,
+        "url": current_url(page).await.unwrap_or_default(),
+        "state": state,
+        "reason": "originating_list_not_restored",
+    }))
 }
 
 async fn read_instagram_post(
@@ -598,19 +1501,23 @@ async fn read_instagram_post(
 
 fn instagram_profile_url(locator: &str) -> anyhow::Result<String> {
     let trimmed = locator.trim();
-    if let Ok(url) = reqwest::Url::parse(trimmed) {
-        if !matches!(url.scheme(), "https") {
-            anyhow::bail!("Instagram profile URL must be https");
+    if let Ok(mut url) = reqwest::Url::parse(trimmed) {
+        validate_instagram_origin(&url)?;
+        let parts = url
+            .path_segments()
+            .into_iter()
+            .flatten()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        if parts.len() != 1 || !valid_instagram_username(parts[0]) {
+            anyhow::bail!("Instagram profile URL must identify exactly one profile");
         }
+        url.set_query(None);
+        url.set_fragment(None);
         return Ok(url.to_string());
     }
     let username = trimmed.trim_start_matches('@').to_ascii_lowercase();
-    if username.is_empty()
-        || !username
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_'))
-        || RESERVED_PROFILE_NAMES.contains(&username.as_str())
-    {
+    if !valid_instagram_username(&username) {
         anyhow::bail!("invalid Instagram username or profile URL: {locator}");
     }
     Ok(format!("https://www.instagram.com/{username}/"))
@@ -618,10 +1525,13 @@ fn instagram_profile_url(locator: &str) -> anyhow::Result<String> {
 
 fn instagram_post_url(locator: &str) -> anyhow::Result<String> {
     let trimmed = locator.trim();
-    if let Ok(url) = reqwest::Url::parse(trimmed) {
-        if !matches!(url.scheme(), "https") {
-            anyhow::bail!("Instagram post URL must be https");
+    if let Ok(mut url) = reqwest::Url::parse(trimmed) {
+        validate_instagram_origin(&url)?;
+        if instagram_post_shortcode(url.as_str()).is_none() {
+            anyhow::bail!("Instagram post URL must identify a post or Reel");
         }
+        url.set_query(None);
+        url.set_fragment(None);
         return Ok(url.to_string());
     }
     if !trimmed
@@ -632,4 +1542,45 @@ fn instagram_post_url(locator: &str) -> anyhow::Result<String> {
         anyhow::bail!("invalid Instagram post URL or shortcode: {locator}");
     }
     Ok(format!("https://www.instagram.com/p/{trimmed}/"))
+}
+
+fn validate_instagram_origin(url: &reqwest::Url) -> anyhow::Result<()> {
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    if url.scheme() != "https"
+        || !(host == "instagram.com" || host.ends_with(".instagram.com"))
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        anyhow::bail!("Instagram URL must use HTTPS on instagram.com without credentials");
+    }
+    Ok(())
+}
+
+fn valid_instagram_username(username: &str) -> bool {
+    !username.is_empty()
+        && username
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_'))
+        && !RESERVED_PROFILE_NAMES.contains(&username.to_ascii_lowercase().as_str())
+}
+
+fn instagram_post_shortcode(raw_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(raw_url).ok()?;
+    let parts = url
+        .path_segments()?
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let shortcode = match parts.as_slice() {
+        [kind, shortcode] if matches!(*kind, "p" | "reel") => *shortcode,
+        [_owner, kind, shortcode] if matches!(*kind, "p" | "reel") => *shortcode,
+        _ => return None,
+    };
+    if shortcode.len() < 5
+        || !shortcode
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return None;
+    }
+    Some(shortcode.to_string())
 }
