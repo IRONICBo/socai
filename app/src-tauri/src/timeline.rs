@@ -601,6 +601,9 @@ fn replay_run_events(snapshot: &AgentTaskSnapshot, run_dir: &Path) -> Vec<AgentT
 
     let mut last_step = None;
     for (step, response) in llm_responses(run_dir) {
+        if response.get("user_visible").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
         push_step_event(snapshot, &mut events, &mut last_step, step);
         if let Some(error) = response.get("error").and_then(Value::as_str) {
             events.push(replay_event(
@@ -776,8 +779,7 @@ fn append_terminal_snapshot_events(
                     events,
                     AgentTaskEventKind::Completed {
                         text: if snapshot.partial {
-                            "task completed with partial results after browser recovery failed"
-                                .into()
+                            "task completed with partial results".into()
                         } else {
                             "task completed".into()
                         },
