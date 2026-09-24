@@ -1,0 +1,99 @@
+@import url('https://api.fontshare.com/v2/css?f[]=general-sans@300,400,500,600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&display=swap');
+
+:root {
+  --sl-font: "General Sans", ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --sl-font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --sl-content-width: 52rem;
+  --sl-text-5xl: clamp(2.4rem, 5vw, 4rem);
+  --sl-color-accent-low: #262626;
+  --sl-color-accent: #d4d4d4;
+  --sl-color-accent-high: #fafafa;
+  --sl-color-white: #fafafa;
+  --sl-color-gray-1: #e5e5e5;
+  --sl-color-gray-2: #d4d4d4;
+  --sl-color-gray-3: #a3a3a3;
+  --sl-color-gray-4: #737373;
+  --sl-color-gray-5: #404040;
+  --sl-color-gray-6: #171717;
+  --sl-color-black: #0a0a0a;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-high: #0a0a0a;
+  --sl-color-accent: #262626;
+  --sl-color-accent-low: #f4f4f4;
+  --sl-color-white: #0a0a0a;
+  --sl-color-gray-1: #262626;
+  --sl-color-gray-2: #404040;
+  --sl-color-gray-3: #737373;
+  --sl-color-gray-4: #a3a3a3;
+  --sl-color-gray-5: #d4d4d4;
+  --sl-color-gray-6: #e5e5e5;
+  --sl-color-gray-7: #f4f4f4;
+  --sl-color-black: #fafaf9;
+}
+
+html {
+  font-feature-settings: "ss01", "ss02", "cv11";
+}
+
+.site-title {
+  gap: 0.65rem;
+  color: var(--sl-color-white);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+.site-title img {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.header {
+  border-bottom: 1px solid var(--sl-color-gray-5);
+  box-shadow: none;
+}
+
+.sidebar-pane {
+  border-inline-end: 1px solid var(--sl-color-gray-5);
+}
+
+.right-sidebar {
+  border-inline-start-color: var(--sl-color-gray-5);
+}
+
+.sl-markdown-content a:not(:where(.not-content *)) {
+  color: var(--sl-color-white);
+  text-decoration-color: var(--sl-color-gray-4);
+  text-underline-offset: 0.2em;
+}
+
+.sl-markdown-content :is(h1, h2, h3, h4) {
+  letter-spacing: -0.025em;
+}
+
+.sl-markdown-content code:not(:where(.expressive-code *)) {
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.3rem;
+  background: var(--sl-color-gray-6);
+  font-size: 0.88em;
+}
+
+.expressive-code figure {
+  --ec-brdRad: 0.4rem;
+}
+
+.hero .tagline {
+  max-width: 44rem;
+  color: var(--sl-color-gray-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

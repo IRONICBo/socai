@@ -4,6 +4,8 @@ Date: 2026-05-28
 
 Scope: final launch checklist for [`https://socai.io`](https://socai.io), issue #34.
 
+> This is a historical record of the 2026-05-28 launch checks. The current site generates `sitemap-index.xml`; `sitemap.xml` is retained as a compatibility redirect. Use the [deployment runbook](../.claude/skills/socai-site-deployment/SKILL.md) for current commands.
+
 ## Summary
 
 Status: **website launch checks passed on production**, with one release-artifact follow-up documented.
