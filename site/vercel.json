@@ -42,6 +42,11 @@
       "permanent": true
     },
     {
+      "source": "/sitemap.xml",
+      "destination": "/sitemap-index.xml",
+      "permanent": true
+    },
+    {
       "source": "/download",
       "destination": "https://socai-download.oss-cn-beijing.aliyuncs.com/releases/latest/socai-macos-universal.dmg",
       "permanent": false

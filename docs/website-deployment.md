@@ -1,6 +1,6 @@
 # Website deployment
 
-The socai marketing/download site lives in [`site/`](../site/) and is deployed to Vercel at [`https://socai.io`](https://socai.io).
+The socai marketing/download site lives in [`site/`](../site/) and is deployed to Vercel at [`https://socai.io`](https://socai.io). The same Astro build serves the Starlight documentation under [`https://socai.io/docs/`](https://socai.io/docs/); its Markdown sources live in `site/src/content/docs/docs/`.
 
 The detailed deployment runbook is the shared project skill:
 
