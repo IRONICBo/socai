@@ -8,6 +8,8 @@ use socai_core::agent::tool::{ToolProgressEvent, ToolProgressSender};
 use socai_core::runtime::SocaiRuntime;
 use socai_core::sites::{find_native_site_adapter, NativeSiteAdapter, SiteCommand};
 #[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -40,7 +42,7 @@ const SOCKET_NAME: &str = "rust-daemon.sock";
 const ENDPOINT_NAME: &str = "rust-daemon-endpoint.json";
 const PID_NAME: &str = "rust-daemon.pid";
 const LOG_NAME: &str = "rust-daemon.log";
-const IDLE_TIMEOUT: Duration = Duration::from_secs(3 * 60 * 60);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// The daemon only serves a CLI of the exact same build. A version mismatch
@@ -75,13 +77,15 @@ fn process_build_id() -> &'static str {
 enum DaemonClientError {
     VersionMismatch(String),
     StaleDaemon(String),
+    CommandFailed(String),
 }
 
 impl std::fmt::Display for DaemonClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DaemonClientError::VersionMismatch(message)
-            | DaemonClientError::StaleDaemon(message) => f.write_str(message),
+            | DaemonClientError::StaleDaemon(message)
+            | DaemonClientError::CommandFailed(message) => f.write_str(message),
         }
     }
 }
@@ -216,6 +220,8 @@ pub async fn run_daemon() -> Result<()> {
     let _ = process_build_id();
     let paths = daemon_paths()?;
     fs::create_dir_all(&paths.home).await?;
+    #[cfg(unix)]
+    fs::set_permissions(&paths.home, std::fs::Permissions::from_mode(0o700)).await?;
     cleanup_stale_ipc(&paths).await?;
 
     let listener = bind_daemon_listener(&paths).await?;
@@ -326,6 +332,10 @@ pub async fn send_or_spawn(
             let _ = stop_daemon().await;
             wait_for_daemon_exit().await;
         }
+        // The daemon is alive and returned an application/browser error. Keep
+        // its CDP websocket and reusable site tab intact so a corrected follow-
+        // up command can continue in the same browser session.
+        Some(DaemonClientError::CommandFailed(_)) => return Err(err),
         None => {}
     }
     spawn_daemon().await?;
@@ -573,7 +583,6 @@ impl DaemonState {
         self.telemetry
             .capture("socai_tool_call", Value::Object(props));
     }
-
 }
 
 fn base_trace_props(
@@ -660,7 +669,7 @@ async fn send_request(
                     Some(CODE_STALE_DAEMON) => {
                         anyhow::Error::new(DaemonClientError::StaleDaemon(message))
                     }
-                    _ => anyhow!("{message}"),
+                    _ => anyhow::Error::new(DaemonClientError::CommandFailed(message)),
                 });
             }
             // Legacy daemons (pre build checking) execute commands without
@@ -695,6 +704,8 @@ fn parse_daemon_line(line: &str) -> Result<DaemonLine> {
 async fn spawn_daemon() -> Result<()> {
     let paths = daemon_paths()?;
     fs::create_dir_all(&paths.home).await?;
+    #[cfg(unix)]
+    fs::set_permissions(&paths.home, std::fs::Permissions::from_mode(0o700)).await?;
     cleanup_stale_ipc(&paths).await?;
 
     spawn_detached_subcommand("__daemon", &paths.log, |_| {})?;
@@ -718,8 +729,10 @@ async fn spawn_daemon() -> Result<()> {
 
 #[cfg(unix)]
 async fn bind_daemon_listener(paths: &DaemonPaths) -> Result<DaemonListener> {
-    UnixListener::bind(&paths.socket)
-        .with_context(|| format!("bind daemon socket {}", paths.socket.display()))
+    let listener = UnixListener::bind(&paths.socket)
+        .with_context(|| format!("bind daemon socket {}", paths.socket.display()))?;
+    fs::set_permissions(&paths.socket, std::fs::Permissions::from_mode(0o600)).await?;
+    Ok(listener)
 }
 
 #[cfg(windows)]
