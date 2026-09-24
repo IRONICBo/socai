@@ -325,6 +325,8 @@ Local development, build instructions, repository conventions, and the reference
 
 [![Jev Social demo](https://raw.githubusercontent.com/socai-io/jev-social/main/docs/jev-social.gif)](https://github.com/socai-io/jev-social)
 
+[View the demo](https://socai-io.github.io/jev-social/) · [Install the Agent Skill](https://github.com/socai-io/jev-social/tree/v0.1.5/skills/jev-social) · [Star Jev Social](https://github.com/socai-io/jev-social)
+
 ## Community
 
 [Join the Discord](https://discord.gg/CpQdA7bwt8) · or scan the WeChat group QR:
