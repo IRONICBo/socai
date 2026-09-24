@@ -31,14 +31,14 @@
       "permanent": true
     },
     {
-      "source": "/:path*",
+      "source": "/:path(.*)",
       "has": [
         {
           "type": "host",
           "value": "www.socai.io"
         }
       ],
-      "destination": "https://socai.io/:path*",
+      "destination": "https://socai.io/:path",
       "permanent": true
     },
     {
