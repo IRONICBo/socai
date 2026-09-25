@@ -40,7 +40,7 @@ Ask it to find handmade art and it starts with a search. Once results come back,
 
 **Jev chooses the actual operation: which socai CLI command to call, which link to open, and which post's comments to read.** socai handles the navigation, clicks and content retrieval. The model doesn't have to locate the search box in a fresh screenshot every time.
 
-You describe what you're looking for. The results bring together posts, authors, comments and links you can open yourself.
+You describe what you're looking for. The results bring together posts, authors, comments and links you can open yourself. Captured cards stay visible while the final report streams in, and accepted findings must cite one of those captured sources.
 
 ## Example: find out what's popular in your niche on Instagram
 
@@ -69,8 +69,8 @@ All of these tasks involve a lot of searching, opening, reading and copying. Let
 [jev-social is open source](https://github.com/socai-io/jev-social). With Node 20+ installed, you can onboard and open the local app without cloning the repository:
 
 ```bash
-npx github:socai-io/jev-social#v0.1.5 onboard
-npx github:socai-io/jev-social#v0.1.5
+npx github:socai-io/jev-social#v0.1.6 onboard
+npx github:socai-io/jev-social#v0.1.6
 ```
 
 Onboarding prompts for your OpenRouter key and offers to install the current socai CLI when it is missing. You'll still need to log in to the social accounts you want to research. The [Jev Social project page](https://socai-io.github.io/jev-social/) has the recorded demo, architecture and source-checkout path.
