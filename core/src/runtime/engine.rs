@@ -521,6 +521,20 @@ impl SocaiRuntime {
         self.cdp.disconnect().await;
     }
 
+    /// Cancel an in-flight (including not-yet-polled) browser connection and
+    /// wait until a started detached connect task has released its lock. An
+    /// established browser remains connected. CLI request cancellation uses
+    /// this before admitting the next command, so retries cannot be attributed
+    /// to its successor.
+    pub async fn cancel_browser_connect_and_wait(&self) {
+        self.cdp.invalidate_connects();
+        if matches!(self.cdp.status().await, StatusPayload::Connecting { .. }) {
+            self.cdp.disconnect().await;
+        }
+        let connect_lock = self.cdp.connect_lock();
+        let _settled = connect_lock.lock().await;
+    }
+
     pub async fn browser_status(&self) -> StatusPayload {
         self.cdp.status().await
     }

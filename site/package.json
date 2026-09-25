@@ -10,9 +10,16 @@
     "preview": "astro preview"
   },
   "devDependencies": {
-    "astro": "^5.13.5"
+    "astro": "7.3.5"
   },
   "dependencies": {
+    "@astrojs/starlight": "0.42.3",
     "@vercel/analytics": "^2.0.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "devalue": "5.9.2",
+      "postcss": "8.5.28"
+    }
   }
 }

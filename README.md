@@ -321,9 +321,11 @@ Local development, build instructions, repository conventions, and the reference
 
 ## Built with socai
 
-[Jev Social](https://github.com/socai-io/jev-social) is a local-first demo that lets Jev choose bounded socai CLI operations for Instagram, TikTok, and LinkedIn, streams the browser evidence into post cards, and produces a source-linked research report.
+[Jev Social](https://github.com/socai-io/jev-social) is a local-first demo that lets Jev choose bounded socai CLI operations for Instagram, TikTok, and LinkedIn. Captured post cards stay visible while a source-linked research report streams into the browser.
 
 [![Jev Social demo](https://raw.githubusercontent.com/socai-io/jev-social/main/docs/jev-social.gif)](https://github.com/socai-io/jev-social)
+
+[View the demo](https://socai-io.github.io/jev-social/) · [Install the Agent Skill](https://github.com/socai-io/jev-social/tree/v0.1.6/skills/jev-social) · [Star Jev Social](https://github.com/socai-io/jev-social)
 
 ## Community
 
