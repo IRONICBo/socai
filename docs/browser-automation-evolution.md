@@ -793,7 +793,7 @@ granularity (domain tool calls, not `click @e1`):
   `~/.socai/daemon.sock` → print result → exit.
 - A long-lived **daemon** owns one persistent "tool tab" plus a cached
   `XhsRuntime`. It auto-spawns on the first tool call and auto-shuts after
-  3h idle, so chrome stays warm across invocations (`socai stop` ends it early).
+  24h idle, so chrome stays warm across invocations (`socai stop` ends it early).
 - **No internal LLM loop.** The caller — a human, a script, or an external
   agent (Claude Code, Codex) — decides which tool to invoke. This *is* socai's
   external-agent surface (see §7.4).

@@ -14,8 +14,8 @@ use crate::agent::compaction::truncate;
 use crate::agent::tool::{
     ToolProgressEvent, ToolProgressPhase, ToolProgressSender, ToolProgressStatus,
 };
-use crate::agent::{Backend as LlmProvider, Tool, ToolContext, ToolResult};
-use crate::cdp::PageSession;
+use crate::agent::{make_run_dir, Backend as LlmProvider, Tool, ToolContext, ToolResult};
+use crate::cdp::{with_snapshot_recording, PageSession};
 use crate::media::{
     background_media_run_is_cancelled, background_video_download_semaphore,
     current_background_media_generation, emit_background_media_event, ocr_diagnostics, ocr_warm_up,
@@ -41,6 +41,7 @@ use crate::sites::xhs::page::{LoginGate, XHS_SEARCH_FILTERS};
 use crate::sites::xhs::page_diagnostics::{
     copy as copy_page_diagnostic, promote as promote_page_diagnostic,
 };
+use crate::sites::xhs::publish;
 use crate::sites::xhs::{
     ReadNoteOptions, XhsAuthorProfile, XhsHistoryStore, XhsNoteCard, XhsPageRuntime, XHS_HOME_URL,
 };
@@ -424,8 +425,146 @@ pub static XHS_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
             slow: SlowWhen::Always,
             run: run_author_scan,
         },
+        SiteCommand {
+            name: "prepare-publish",
+            tool_name: "prepare_publish",
+            about: "Upload images and fill a Xiaohongshu note, then persist a receipt without publishing it.",
+            args: &[
+                CommandArg {
+                    key: "media",
+                    long: Some("media"),
+                    value_name: "IMAGE_PATH",
+                    help: "Local JPG, JPEG, PNG, or WebP image (repeatable, 1-18).",
+                    required: true,
+                    kind: ArgKind::StrList,
+                },
+                CommandArg {
+                    key: "title",
+                    long: Some("title"),
+                    value_name: "TITLE",
+                    help: "Note title (1-20 characters).",
+                    required: true,
+                    kind: ArgKind::Str,
+                },
+                CommandArg {
+                    key: "text",
+                    long: Some("text"),
+                    value_name: "TEXT",
+                    help: "Note body (1-1000 characters).",
+                    required: true,
+                    kind: ArgKind::Str,
+                },
+            ],
+            slow: SlowWhen::Always,
+            run: run_prepare_publish,
+        },
+        SiteCommand {
+            name: "commit-action",
+            tool_name: "commit_action",
+            about: "Verify a prepared XHS note and click the final publish control exactly once.",
+            args: &[CommandArg {
+                key: "action_id",
+                long: Some("action-id"),
+                value_name: "ACTION_ID",
+                help: "Action id returned by prepare-publish.",
+                required: true,
+                kind: ArgKind::Str,
+            }],
+            slow: SlowWhen::Always,
+            run: run_commit_action,
+        },
+        SiteCommand {
+            name: "reconcile-action",
+            tool_name: "reconcile_action",
+            about: "Read the XHS note manager to resolve a committed or commit-unknown publish action.",
+            args: &[CommandArg {
+                key: "action_id",
+                long: Some("action-id"),
+                value_name: "ACTION_ID",
+                help: "Action id returned by prepare-publish.",
+                required: true,
+                kind: ArgKind::Str,
+            }],
+            slow: SlowWhen::Always,
+            run: run_reconcile_action,
+        },
     ],
 };
+
+fn run_prepare_publish(
+    page: Arc<PageSession>,
+    args: Value,
+    debug_snapshot: bool,
+    _progress: Option<ToolProgressSender>,
+) -> BoxFuture<Value> {
+    Box::pin(async move {
+        let media = args
+            .get("media")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("missing required argument: media"))?
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow::anyhow!("media paths must be strings"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let title = required_string(&args, "title")?;
+        let text = required_string(&args, "text")?;
+        let run_dir = make_run_dir("xhs_prepare_publish");
+        let data = with_snapshot_recording(&page, &run_dir, debug_snapshot, async {
+            publish::prepare_publish(page.clone(), media, title, text).await
+        })
+        .await?;
+        Ok(json!({
+            "command": "prepare-publish",
+            "run_dir": run_dir.to_string_lossy(),
+            "data": data,
+        }))
+    })
+}
+
+fn run_commit_action(
+    page: Arc<PageSession>,
+    args: Value,
+    debug_snapshot: bool,
+    _progress: Option<ToolProgressSender>,
+) -> BoxFuture<Value> {
+    Box::pin(async move {
+        let action_id = required_string(&args, "action_id")?;
+        let run_dir = make_run_dir("xhs_commit_action");
+        let data = with_snapshot_recording(&page, &run_dir, debug_snapshot, async {
+            publish::commit_action(page.clone(), action_id).await
+        })
+        .await?;
+        Ok(json!({
+            "command": "commit-action",
+            "run_dir": run_dir.to_string_lossy(),
+            "data": data,
+        }))
+    })
+}
+
+fn run_reconcile_action(
+    page: Arc<PageSession>,
+    args: Value,
+    debug_snapshot: bool,
+    _progress: Option<ToolProgressSender>,
+) -> BoxFuture<Value> {
+    Box::pin(async move {
+        let action_id = required_string(&args, "action_id")?;
+        let run_dir = make_run_dir("xhs_reconcile_action");
+        let data = with_snapshot_recording(&page, &run_dir, debug_snapshot, async {
+            publish::reconcile_action(page.clone(), action_id).await
+        })
+        .await?;
+        Ok(json!({
+            "command": "reconcile-action",
+            "run_dir": run_dir.to_string_lossy(),
+            "data": data,
+        }))
+    })
+}
 
 fn run_get_notes(
     page: Arc<PageSession>,

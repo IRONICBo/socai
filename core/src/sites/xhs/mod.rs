@@ -3,6 +3,7 @@ pub mod history;
 mod media_manifest;
 pub mod page;
 pub(crate) mod page_diagnostics;
+pub mod publish;
 pub mod tools;
 
 pub use self::entities::{parse_count_text, XhsAuthorProfile, XhsNote, XhsNoteCard};

@@ -7,8 +7,12 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use socai_core::agent::tool::{ToolProgressEvent, ToolProgressSender};
-use socai_core::runtime::{BrowserStatus, RuntimeBrowserEvent, SocaiRuntime};
-use socai_core::sites::{find_native_site_adapter, NativeSiteAdapter, SiteCommand};
+use socai_core::runtime::{BrowserStatus, ChromeConnectOptions, RuntimeBrowserEvent, SocaiRuntime};
+use socai_core::sites::{
+    all_native_site_adapters, find_native_site_adapter, NativeSiteAdapter, SiteCommand,
+};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -44,7 +48,7 @@ const SOCKET_NAME: &str = "rust-daemon.sock";
 const ENDPOINT_NAME: &str = "rust-daemon-endpoint.json";
 const PID_NAME: &str = "rust-daemon.pid";
 const LOG_NAME: &str = "rust-daemon.log";
-const IDLE_TIMEOUT: Duration = Duration::from_secs(3 * 60 * 60);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// The daemon only serves a CLI of the exact same build. A version mismatch
@@ -79,13 +83,15 @@ fn process_build_id() -> &'static str {
 enum DaemonClientError {
     VersionMismatch(String),
     StaleDaemon(String),
+    CommandFailed(String),
 }
 
 impl std::fmt::Display for DaemonClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DaemonClientError::VersionMismatch(message)
-            | DaemonClientError::StaleDaemon(message) => f.write_str(message),
+            | DaemonClientError::StaleDaemon(message)
+            | DaemonClientError::CommandFailed(message) => f.write_str(message),
         }
     }
 }
@@ -211,8 +217,14 @@ struct DaemonEndpoint {
 struct DaemonState {
     runtime: SocaiRuntime,
     telemetry: Telemetry,
+}
+
+/// Request metadata and read-only runtime access that must stay available
+/// while a long site command holds the mutable daemon-state lock.
+struct DaemonControl {
+    runtime: SocaiRuntime,
     auth_token: Option<String>,
-    last_activity: Instant,
+    last_activity: Mutex<Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -231,6 +243,8 @@ pub async fn run_daemon() -> Result<()> {
     let _ = process_build_id();
     let paths = daemon_paths()?;
     fs::create_dir_all(&paths.home).await?;
+    #[cfg(unix)]
+    fs::set_permissions(&paths.home, std::fs::Permissions::from_mode(0o700)).await?;
     cleanup_stale_ipc(&paths).await?;
 
     let listener = bind_daemon_listener(&paths).await?;
@@ -245,13 +259,13 @@ pub async fn run_daemon() -> Result<()> {
     // kill grace is 6 seconds. The handle is a cheap Arc-backed clone of the
     // same runtime.
     let runtime_for_shutdown = runtime.clone();
+    let control = Arc::new(DaemonControl {
+        runtime: runtime.clone(),
+        auth_token: auth_token.clone(),
+        last_activity: Mutex::new(Instant::now()),
+    });
     let telemetry = Telemetry::new(&paths.home, TelemetrySource::CliDaemon);
-    let state = Arc::new(Mutex::new(DaemonState {
-        runtime,
-        telemetry,
-        auth_token,
-        last_activity: Instant::now(),
-    }));
+    let state = Arc::new(Mutex::new(DaemonState { runtime, telemetry }));
     let command_gate = Arc::new(Mutex::new(()));
     let stop = Arc::new(Notify::new());
     let mut idle_check = tokio::time::interval(Duration::from_secs(60));
@@ -263,16 +277,19 @@ pub async fn run_daemon() -> Result<()> {
             accept_result = listener.accept() => {
                 let (stream, _) = accept_result.context("accept daemon client")?;
                 let state = state.clone();
+                let control = control.clone();
                 let stop = stop.clone();
                 let command_gate = command_gate.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = serve_client(stream, state, stop, command_gate).await {
+                    if let Err(err) =
+                        serve_client(stream, state, control, stop, command_gate).await
+                    {
                         eprintln!("daemon client error: {err:#}");
                     }
                 });
             }
             _ = idle_check.tick() => {
-                if state.lock().await.last_activity.elapsed() > IDLE_TIMEOUT {
+                if control.last_activity.lock().await.elapsed() > IDLE_TIMEOUT {
                     break;
                 }
             }
@@ -343,6 +360,10 @@ pub async fn send_or_spawn(
             let _ = stop_daemon().await;
             wait_for_daemon_exit().await;
         }
+        // The daemon is alive and returned an application/browser error. Keep
+        // its CDP websocket and reusable site tab intact so a corrected follow-
+        // up command can continue in the same browser session.
+        Some(DaemonClientError::CommandFailed(_)) => return Err(err),
         None => {}
     }
     spawn_daemon().await?;
@@ -364,9 +385,151 @@ pub async fn stop_daemon() -> Result<bool> {
     }
 }
 
+/// Read the current daemon/browser state without spawning the daemon or
+/// initiating a browser connection. A missing, stale, or older daemon is an
+/// explicit unknown state rather than a reason to touch Chrome.
+pub async fn read_status() -> Value {
+    match send_request("", "status", json!({}), Duration::from_secs(2), &mut |_| {}).await {
+        Ok(status) => status,
+        Err(_) => {
+            let daemon_running =
+                send_request("", "ping", json!({}), Duration::from_secs(2), &mut |_| {})
+                    .await
+                    .is_ok();
+            status_snapshot(None, daemon_running, false)
+        }
+    }
+}
+
+fn status_snapshot(
+    browser: Option<BrowserStatus>,
+    daemon_running: bool,
+    daemon_compatible: bool,
+) -> Value {
+    let configured_profile = ChromeConnectOptions::from_config()
+        .map(|options| options.profile.as_str())
+        .unwrap_or("unknown");
+    let platforms = all_native_site_adapters()
+        .iter()
+        .map(|site| {
+            json!({
+                "id": site.id,
+                "available": true,
+                "login_state": "unknown",
+                "operations": site.commands.iter().map(|command| command.name).collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let (browser_state, browser_connected, active_profile_mode, error_code, next_step) =
+        match browser {
+            Some(BrowserStatus::Connected {
+                managed, remote, ..
+            }) => (
+                "connected",
+                true,
+                Some(if remote {
+                    "remote"
+                } else if managed {
+                    "managed"
+                } else {
+                    "existing"
+                }),
+                None,
+                None,
+            ),
+            Some(BrowserStatus::Connecting { .. }) => ("connecting", false, None, None, None),
+            Some(BrowserStatus::Disconnected { reason }) => {
+                let (code, action) = safe_browser_failure(&reason, configured_profile);
+                ("disconnected", false, None, Some(code), Some(action))
+            }
+            None if daemon_running => (
+                "unknown",
+                false,
+                None,
+                Some("DAEMON_STATUS_UNAVAILABLE"),
+                Some("Update or restart socai once, then retry `socai status --json`."),
+            ),
+            None => (
+                "unknown",
+                false,
+                None,
+                Some("DAEMON_UNAVAILABLE"),
+                Some("Run any read-only socai platform command, then retry `socai status --json`."),
+            ),
+        };
+
+    json!({
+        "schema_version": 1,
+        "cli_available": true,
+        "cli_version": PROTOCOL_VERSION,
+        "daemon_running": daemon_running,
+        "daemon_compatible": daemon_compatible,
+        "browser_connected": browser_connected,
+        "browser_state": browser_state,
+        "profile_mode": configured_profile,
+        "active_profile_mode": active_profile_mode,
+        "error_code": error_code,
+        "next_step": next_step,
+        "platforms": platforms,
+    })
+}
+
+fn safe_browser_failure(reason: &str, configured_profile: &str) -> (&'static str, &'static str) {
+    let reason = reason.to_ascii_lowercase();
+    if reason == "not_yet_connected" {
+        return (
+            "BROWSER_NOT_CONNECTED",
+            "Run a read-only socai platform command when browser access is needed.",
+        );
+    }
+    if reason == "user_disconnected" {
+        return (
+            "BROWSER_DISCONNECTED",
+            "Reconnect from socai before starting browser research.",
+        );
+    }
+    if reason.contains("permission denied")
+        || reason.contains("operation not permitted")
+        || reason.contains("access denied")
+    {
+        return (
+            "BROWSER_PERMISSION_REQUIRED",
+            "Allow Chrome data access and remote debugging, then retry once.",
+        );
+    }
+    if configured_profile == "remote"
+        || reason.contains("remote browser")
+        || reason.contains("browser session")
+        || reason.contains("socai pro")
+    {
+        return (
+            "REMOTE_SESSION_UNAVAILABLE",
+            "Check socai pro and the remote browser service, then retry later.",
+        );
+    }
+    if reason.contains("no running chrome")
+        || reason.contains("failed to connect")
+        || reason.contains("did not respond")
+        || reason.contains("connection refused")
+        || reason.contains("endpoint")
+        || reason.contains("cdp")
+    {
+        return (
+            "BROWSER_ENDPOINT_UNREACHABLE",
+            "Start a compatible Chrome session or select the managed profile, then retry.",
+        );
+    }
+    (
+        "BROWSER_CONNECTION_FAILED",
+        "Check the socai browser setup, then retry once.",
+    )
+}
+
 async fn serve_client(
     stream: DaemonStream,
     state: Arc<Mutex<DaemonState>>,
+    control: Arc<DaemonControl>,
     stop: Arc<Notify>,
     command_gate: Arc<Mutex<()>>,
 ) -> Result<()> {
@@ -383,6 +546,7 @@ async fn serve_client(
             &mut reader,
             &mut writer,
             state.clone(),
+            control.clone(),
             stop.clone(),
             command_gate.clone(),
         )
@@ -404,6 +568,7 @@ async fn serve_request<R, W>(
     reader: &mut R,
     writer: &mut W,
     state: Arc<Mutex<DaemonState>>,
+    control: Arc<DaemonControl>,
     stop: Arc<Notify>,
     command_gate: Arc<Mutex<()>>,
 ) -> Result<bool>
@@ -413,7 +578,14 @@ where
 {
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let mut disconnect_probe = String::new();
-    let response = handle_request(request, state, stop, Some(progress_tx), command_gate);
+    let response = handle_request(
+        request,
+        state,
+        control,
+        stop,
+        Some(progress_tx),
+        command_gate,
+    );
     tokio::pin!(response);
     let disconnect = reader.read_line(&mut disconnect_probe);
     tokio::pin!(disconnect);
@@ -457,6 +629,7 @@ where
 async fn handle_request(
     request: DaemonRequest,
     state: Arc<Mutex<DaemonState>>,
+    control: Arc<DaemonControl>,
     stop: Arc<Notify>,
     progress: Option<ToolProgressSender>,
     command_gate: Arc<Mutex<()>>,
@@ -464,8 +637,7 @@ async fn handle_request(
     let id = request.id.clone();
     let command = request.command.clone();
     let telemetry = request.telemetry.clone();
-    let auth_token = { state.lock().await.auth_token.clone() };
-    if !daemon_request_authorized(request.auth.as_deref(), auth_token.as_deref()) {
+    if !daemon_request_authorized(request.auth.as_deref(), control.auth_token.as_deref()) {
         return DaemonResponse::failure(id, None, "daemon authentication failed".into());
     }
 
@@ -509,6 +681,14 @@ async fn handle_request(
             return Ok(json!({ "ok": true }));
         }
 
+        if command == "status" {
+            return Ok(status_snapshot(
+                Some(control.runtime.browser_status().await),
+                true,
+                true,
+            ));
+        }
+
         let site_id = if request.site.trim().is_empty() {
             "xhs"
         } else {
@@ -520,9 +700,9 @@ async fn handle_request(
             .command(&command)
             .ok_or_else(|| anyhow!("unknown {site_id} command: {command}"))?;
 
+        *control.last_activity.lock().await = Instant::now();
         let command_gate = command_gate.lock_owned().await;
         let mut state = state.lock().await;
-        state.last_activity = Instant::now();
         state
             .run_site_command(
                 &id,
@@ -699,7 +879,6 @@ impl ToolCallTrace {
             telemetry.include_query_text,
         )
     }
-
     #[allow(clippy::too_many_arguments)]
     fn start_with_telemetry(
         telemetry: ToolTelemetry,
@@ -1009,7 +1188,7 @@ async fn send_request(
                     Some(CODE_STALE_DAEMON) => {
                         anyhow::Error::new(DaemonClientError::StaleDaemon(message))
                     }
-                    _ => anyhow!("{message}"),
+                    _ => anyhow::Error::new(DaemonClientError::CommandFailed(message)),
                 });
             }
             // Legacy daemons (pre build checking) execute commands without
@@ -1044,6 +1223,8 @@ fn parse_daemon_line(line: &str) -> Result<DaemonLine> {
 async fn spawn_daemon() -> Result<()> {
     let paths = daemon_paths()?;
     fs::create_dir_all(&paths.home).await?;
+    #[cfg(unix)]
+    fs::set_permissions(&paths.home, std::fs::Permissions::from_mode(0o700)).await?;
     cleanup_stale_ipc(&paths).await?;
 
     spawn_detached_subcommand("__daemon", &paths.log, |_| {})?;
@@ -1067,8 +1248,10 @@ async fn spawn_daemon() -> Result<()> {
 
 #[cfg(unix)]
 async fn bind_daemon_listener(paths: &DaemonPaths) -> Result<DaemonListener> {
-    UnixListener::bind(&paths.socket)
-        .with_context(|| format!("bind daemon socket {}", paths.socket.display()))
+    let listener = UnixListener::bind(&paths.socket)
+        .with_context(|| format!("bind daemon socket {}", paths.socket.display()))?;
+    fs::set_permissions(&paths.socket, std::fs::Permissions::from_mode(0o600)).await?;
+    Ok(listener)
 }
 
 #[cfg(windows)]

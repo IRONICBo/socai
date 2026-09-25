@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -681,6 +682,245 @@ return (async () => {{
         self.execute("Input.insertText", json!({ "text": text }))
             .await?;
         Ok(())
+    }
+
+    /// Return the browser-context id that owns this tab. Chrome uses the
+    /// context boundary to separate profiles while all commands continue to
+    /// share the same browser websocket.
+    pub async fn browser_context_id(&self) -> anyhow::Result<String> {
+        let (target_id, client) = {
+            let connection = self.connection.read().await;
+            (connection.target_id.clone(), connection.client.clone())
+        };
+        let result = client
+            .execute("Target.getTargetInfo", json!({ "targetId": target_id }))
+            .await?;
+        Ok(result
+            .pointer("/targetInfo/browserContextId")
+            .and_then(Value::as_str)
+            .unwrap_or("default")
+            .to_string())
+    }
+
+    /// Attach local files to a rendered `<input type=file>` through CDP.
+    /// This keeps uploads on the normal website flow and never calls a
+    /// platform-private upload API.
+    pub async fn set_file_input_files(
+        &self,
+        selector: &str,
+        files: &[PathBuf],
+    ) -> anyhow::Result<()> {
+        if files.is_empty() {
+            anyhow::bail!("at least one upload file is required");
+        }
+        let mut resolved = Vec::with_capacity(files.len());
+        for file in files {
+            let canonical = file
+                .canonicalize()
+                .with_context(|| format!("upload file does not exist: {}", file.display()))?;
+            if !canonical.is_file() {
+                anyhow::bail!("upload path is not a file: {}", canonical.display());
+            }
+            resolved.push(canonical.to_string_lossy().into_owned());
+        }
+        self.snapshot_before().await;
+        self.execute("DOM.enable", json!({})).await?;
+        let document = self
+            .execute("DOM.getDocument", json!({ "depth": -1, "pierce": true }))
+            .await?;
+        let root_id = document
+            .pointer("/root/nodeId")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow!("DOM.getDocument missing root node"))?;
+        let node = self
+            .execute(
+                "DOM.querySelector",
+                json!({ "nodeId": root_id, "selector": selector }),
+            )
+            .await?;
+        let node_id = node
+            .get("nodeId")
+            .and_then(Value::as_i64)
+            .filter(|value| *value != 0)
+            .ok_or_else(|| anyhow!("file input not found for selector: {selector}"))?;
+        self.execute(
+            "DOM.setFileInputFiles",
+            json!({ "nodeId": node_id, "files": resolved }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Focus a DOM field and select its current contents without writing to it.
+    /// The subsequent text is still entered through trusted CDP keyboard input.
+    pub async fn focus_and_select(&self, selector: &str) -> anyhow::Result<()> {
+        self.snapshot_before().await;
+        self.execute("DOM.enable", json!({})).await?;
+        let document = self
+            .execute("DOM.getDocument", json!({ "depth": -1, "pierce": true }))
+            .await?;
+        let root_id = document
+            .pointer("/root/nodeId")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow!("DOM.getDocument missing root node"))?;
+        let result = self
+            .execute(
+                "DOM.querySelector",
+                json!({ "nodeId": root_id, "selector": selector }),
+            )
+            .await?;
+        let node_id = result
+            .get("nodeId")
+            .and_then(Value::as_i64)
+            .filter(|value| *value != 0)
+            .ok_or_else(|| anyhow!("editable field not found for selector: {selector}"))?;
+        self.execute("DOM.focus", json!({ "nodeId": node_id }))
+            .await?;
+        let object = self
+            .execute("DOM.resolveNode", json!({ "nodeId": node_id }))
+            .await?;
+        let object_id = object
+            .pointer("/object/objectId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("DOM.resolveNode missing editable object"))?;
+        self.execute(
+            "Runtime.callFunctionOn",
+            json!({
+                "objectId": object_id,
+                "functionDeclaration": "function(){this.focus();if(typeof this.select==='function'){this.select();}else{const r=document.createRange();r.selectNodeContents(this);const s=getSelection();s.removeAllRanges();s.addRange(r);}return true;}",
+                "returnByValue": true,
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Locate an exact-text button in CDP's flattened DOM, including rendered
+    /// shadow/portal trees that are absent from the page's main-world query APIs.
+    pub async fn flattened_exact_text_button(
+        &self,
+        text: &str,
+        required_class: &str,
+    ) -> anyhow::Result<Value> {
+        self.snapshot_before().await;
+        self.execute("DOM.enable", json!({})).await?;
+        let document = self
+            .execute(
+                "DOM.getFlattenedDocument",
+                json!({ "depth": -1, "pierce": true }),
+            )
+            .await?;
+        let nodes = document
+            .get("nodes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("DOM.getFlattenedDocument missing nodes"))?;
+        let by_id: HashMap<i64, &Value> = nodes
+            .iter()
+            .filter_map(|node| {
+                node.get("nodeId")
+                    .and_then(Value::as_i64)
+                    .map(|id| (id, node))
+            })
+            .collect();
+
+        for text_node in nodes.iter().filter(|node| {
+            node.get("nodeType").and_then(Value::as_i64) == Some(3)
+                && node.get("nodeValue").and_then(Value::as_str).map(str::trim) == Some(text)
+        }) {
+            let mut parent_id = text_node.get("parentId").and_then(Value::as_i64);
+            for _ in 0..8 {
+                let Some(node_id) = parent_id else { break };
+                let Some(node) = by_id.get(&node_id).copied() else {
+                    break;
+                };
+                let node_name = node
+                    .get("nodeName")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let attributes = node
+                    .get("attributes")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut class_name = "";
+                let mut disabled = false;
+                for pair in attributes.chunks(2) {
+                    let key = pair.first().and_then(Value::as_str).unwrap_or_default();
+                    let value = pair.get(1).and_then(Value::as_str).unwrap_or_default();
+                    if key == "class" {
+                        class_name = value;
+                    }
+                    if key == "disabled" || (key == "aria-disabled" && value == "true") {
+                        disabled = true;
+                    }
+                }
+                if node_name.eq_ignore_ascii_case("button")
+                    && (required_class.is_empty()
+                        || class_name
+                            .split_whitespace()
+                            .any(|item| item == required_class))
+                {
+                    let backend_node_id = node
+                        .get("backendNodeId")
+                        .and_then(Value::as_i64)
+                        .ok_or_else(|| anyhow!("publish button has no stable backend node id"))?;
+                    let model = self
+                        .execute("DOM.getBoxModel", json!({ "nodeId": node_id }))
+                        .await?;
+                    let quad = model
+                        .pointer("/model/content")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| anyhow!("publish button has no rendered box"))?;
+                    if quad.len() != 8 {
+                        anyhow::bail!("publish button returned an invalid box model");
+                    }
+                    let numbers = quad
+                        .iter()
+                        .map(|value| value.as_f64().unwrap_or_default())
+                        .collect::<Vec<_>>();
+                    let x = (numbers[0] + numbers[2] + numbers[4] + numbers[6]) / 4.0;
+                    let y = (numbers[1] + numbers[3] + numbers[5] + numbers[7]) / 4.0;
+                    let hit = self
+                        .execute(
+                            "DOM.getNodeForLocation",
+                            json!({
+                                "x": x.round() as i64,
+                                "y": y.round() as i64,
+                                "includeUserAgentShadowDOM": true,
+                                "ignorePointerEventsNone": false,
+                            }),
+                        )
+                        .await?;
+                    let mut hit_node_id = hit.get("nodeId").and_then(Value::as_i64);
+                    let mut hit_owned = false;
+                    for _ in 0..16 {
+                        let Some(hit_id) = hit_node_id else { break };
+                        if hit_id == node_id {
+                            hit_owned = true;
+                            break;
+                        }
+                        hit_node_id = by_id
+                            .get(&hit_id)
+                            .and_then(|node| node.get("parentId"))
+                            .and_then(Value::as_i64);
+                    }
+                    return Ok(json!({
+                        "ok": true,
+                        "text": text,
+                        "node_id": node_id,
+                        "backend_node_id": backend_node_id,
+                        "class_name": class_name,
+                        "disabled": disabled,
+                        "x": x,
+                        "y": y,
+                        "hit_owned": hit_owned,
+                        "source": "cdp_flattened_dom",
+                    }));
+                }
+                parent_id = node.get("parentId").and_then(Value::as_i64);
+            }
+        }
+        Ok(json!({ "ok": false, "reason": "exact rendered button not found" }))
     }
 
     /// Type `text` as a stream of per-character key events (keyDown with the
