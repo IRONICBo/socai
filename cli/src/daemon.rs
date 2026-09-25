@@ -1,11 +1,13 @@
 use socai_core::telemetry::tool_call::{summarize_tool_args, summarize_tool_result};
-use socai_core::telemetry::{query_text_enabled, telemetry_enabled, Telemetry, TelemetrySource};
+use socai_core::telemetry::{
+    query_text_enabled, redact_secrets, telemetry_enabled, Telemetry, TelemetrySource,
+};
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use socai_core::agent::tool::{ToolProgressEvent, ToolProgressSender};
-use socai_core::runtime::{BrowserStatus, ChromeConnectOptions, SocaiRuntime};
+use socai_core::runtime::{BrowserStatus, ChromeConnectOptions, RuntimeBrowserEvent, SocaiRuntime};
 use socai_core::sites::{
     all_native_site_adapters, find_native_site_adapter, NativeSiteAdapter, SiteCommand,
 };
@@ -15,10 +17,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Stdio;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 #[cfg(windows)]
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(unix)]
@@ -223,6 +227,17 @@ struct DaemonControl {
     last_activity: Mutex<Instant>,
 }
 
+#[derive(Clone, Debug)]
+struct ToolTraceContext {
+    request_id: String,
+    site_id: String,
+    command: String,
+    tool_name: String,
+}
+
+#[cfg(test)]
+type RecordedEvents = Arc<StdMutex<Vec<(String, Value)>>>;
+
 pub async fn run_daemon() -> Result<()> {
     // Pin the binary fingerprint before a rebuild can swap the file under us.
     let _ = process_build_id();
@@ -251,6 +266,7 @@ pub async fn run_daemon() -> Result<()> {
     });
     let telemetry = Telemetry::new(&paths.home, TelemetrySource::CliDaemon);
     let state = Arc::new(Mutex::new(DaemonState { runtime, telemetry }));
+    let command_gate = Arc::new(Mutex::new(()));
     let stop = Arc::new(Notify::new());
     let mut idle_check = tokio::time::interval(Duration::from_secs(60));
     let terminate = terminate_signal();
@@ -263,8 +279,11 @@ pub async fn run_daemon() -> Result<()> {
                 let state = state.clone();
                 let control = control.clone();
                 let stop = stop.clone();
+                let command_gate = command_gate.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = serve_client(stream, state, control, stop).await {
+                    if let Err(err) =
+                        serve_client(stream, state, control, stop, command_gate).await
+                    {
                         eprintln!("daemon client error: {err:#}");
                     }
                 });
@@ -512,6 +531,7 @@ async fn serve_client(
     state: Arc<Mutex<DaemonState>>,
     control: Arc<DaemonControl>,
     stop: Arc<Notify>,
+    command_gate: Arc<Mutex<()>>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -520,57 +540,90 @@ async fn serve_client(
     while reader.read_line(&mut line).await? != 0 {
         let request: DaemonRequest = serde_json::from_str(line.trim_end())?;
         let request_id = request.id.clone();
-        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-        let mut disconnect_probe = String::new();
-        let response = handle_request(
+        let served = serve_request(
             request,
+            request_id,
+            &mut reader,
+            &mut writer,
             state.clone(),
             control.clone(),
             stop.clone(),
-            Some(progress_tx),
-        );
-        tokio::pin!(response);
-        let disconnect = reader.read_line(&mut disconnect_probe);
-        tokio::pin!(disconnect);
-        let mut progress_open = true;
-        loop {
-            tokio::select! {
-                biased;
-                event = progress_rx.recv(), if progress_open => {
-                    match event {
-                        Some(event) => {
-                            let frame = DaemonProgressFrame {
-                                kind: "progress".to_string(),
-                                id: request_id.clone(),
-                                event,
-                            };
-                            writer
-                                .write_all(serde_json::to_string(&frame)?.as_bytes())
-                                .await?;
-                            writer.write_all(b"\n").await?;
-                        }
-                        None => progress_open = false,
-                    }
-                }
-                response = &mut response => {
-                    writer
-                        .write_all(serde_json::to_string(&response)?.as_bytes())
-                        .await?;
-                    writer.write_all(b"\n").await?;
-                    break;
-                }
-                read = &mut disconnect => {
-                    if read? == 0 {
-                        return Ok(());
-                    }
-                    anyhow::bail!("daemon client sent another request before the previous response");
-                }
-            }
+            command_gate.clone(),
+        )
+        .await;
+        match served {
+            Ok(true) => line.clear(),
+            Ok(false) => return Ok(()),
+            Err(error) => return Err(error),
         }
-        line.clear();
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_request<R, W>(
+    request: DaemonRequest,
+    request_id: String,
+    reader: &mut R,
+    writer: &mut W,
+    state: Arc<Mutex<DaemonState>>,
+    control: Arc<DaemonControl>,
+    stop: Arc<Notify>,
+    command_gate: Arc<Mutex<()>>,
+) -> Result<bool>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+    let mut disconnect_probe = String::new();
+    let response = handle_request(
+        request,
+        state,
+        control,
+        stop,
+        Some(progress_tx),
+        command_gate,
+    );
+    tokio::pin!(response);
+    let disconnect = reader.read_line(&mut disconnect_probe);
+    tokio::pin!(disconnect);
+    let mut progress_open = true;
+    loop {
+        tokio::select! {
+            biased;
+            event = progress_rx.recv(), if progress_open => {
+                match event {
+                    Some(event) => {
+                        let frame = DaemonProgressFrame {
+                            kind: "progress".to_string(),
+                            id: request_id.clone(),
+                            event,
+                        };
+                        writer
+                            .write_all(serde_json::to_string(&frame)?.as_bytes())
+                            .await?;
+                        writer.write_all(b"\n").await?;
+                    }
+                    None => progress_open = false,
+                }
+            }
+            response = &mut response => {
+                writer
+                    .write_all(serde_json::to_string(&response)?.as_bytes())
+                    .await?;
+                writer.write_all(b"\n").await?;
+                return Ok(true);
+            }
+            read = &mut disconnect => {
+                if read? == 0 {
+                    return Ok(false);
+                }
+                anyhow::bail!("daemon client sent another request before the previous response");
+            }
+        }
+    }
 }
 
 async fn handle_request(
@@ -579,6 +632,7 @@ async fn handle_request(
     control: Arc<DaemonControl>,
     stop: Arc<Notify>,
     progress: Option<ToolProgressSender>,
+    command_gate: Arc<Mutex<()>>,
 ) -> DaemonResponse {
     let id = request.id.clone();
     let command = request.command.clone();
@@ -647,9 +701,18 @@ async fn handle_request(
             .ok_or_else(|| anyhow!("unknown {site_id} command: {command}"))?;
 
         *control.last_activity.lock().await = Instant::now();
+        let command_gate = command_gate.lock_owned().await;
         let mut state = state.lock().await;
         state
-            .run_site_command(&id, site, spec, request.args, &telemetry, progress)
+            .run_site_command(
+                &id,
+                site,
+                spec,
+                request.args,
+                &telemetry,
+                progress,
+                command_gate,
+            )
             .await
     }
     .await;
@@ -671,6 +734,7 @@ fn daemon_request_authorized(request_auth: Option<&str>, daemon_auth: Option<&st
 }
 
 impl DaemonState {
+    #[allow(clippy::too_many_arguments)]
     async fn run_site_command(
         &mut self,
         request_id: &str,
@@ -679,12 +743,25 @@ impl DaemonState {
         args: Value,
         telemetry: &DaemonTelemetry,
         progress: Option<ToolProgressSender>,
+        command_gate: tokio::sync::OwnedMutexGuard<()>,
     ) -> Result<Value> {
-        let started = Instant::now();
+        let tool_trace = ToolCallTrace::start(
+            self.telemetry.clone(),
+            self.runtime.clone(),
+            command_gate,
+            request_id,
+            site.id,
+            spec.name,
+            spec.tool_name,
+            &args,
+            telemetry,
+        );
         // Marks browser work in flight for the whole command, so the remote
         // idle reaper never releases the session under a running tool.
         let _activity = self.runtime.begin_activity().await;
-        let result = async {
+        let runtime = self.runtime.clone();
+        let mut browser_events = runtime.subscribe_browser_events();
+        let command = async {
             let debug_snapshot = debug_snapshot_flag(&args);
             // Create the session tab blank and let the command navigate itself:
             // every site command either opens its own entry URL (e.g. `author`
@@ -692,76 +769,242 @@ impl DaemonState {
             // the right page (search via ensure_search_ready). Passing
             // home_url here would force an extra `/explore` load before the
             // command then navigates again — wasted time for no benefit.
-            let page = self.runtime.ensure_site_page(site.id, "").await?;
+            let page = runtime.ensure_site_page(site.id, "").await?;
             (spec.run)(page, args.clone(), debug_snapshot, progress).await
-        }
-        .await;
-        self.track_tool_trace(
-            request_id,
-            site.id,
-            spec.name,
-            spec.tool_name,
-            &args,
-            telemetry,
-            started,
-            &result,
-        );
+        };
+        tokio::pin!(command);
+        let mut browser_events_open = true;
+        let result = loop {
+            tokio::select! {
+                biased;
+                event = browser_events.recv(), if browser_events_open => {
+                    match event {
+                        Ok(RuntimeBrowserEvent::StatusChanged(status)) => {
+                            tool_trace.capture_browser_status(&status);
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            browser_events_open = false;
+                        }
+                    }
+                }
+                result = &mut command => break result,
+            }
+        };
+        tool_trace.finish(&result);
         result
     }
+}
 
+struct ToolCallTrace {
+    telemetry: ToolTelemetry,
+    cancel_runtime: Option<SocaiRuntime>,
+    command_gate: Option<tokio::sync::OwnedMutexGuard<()>>,
+    context: ToolTraceContext,
+    properties: Map<String, Value>,
+    started: Instant,
+    finished: bool,
+}
+
+#[derive(Clone)]
+struct ToolTelemetry {
+    enabled: bool,
+    telemetry: Option<Telemetry>,
+    #[cfg(test)]
+    recorded: Option<RecordedEvents>,
+}
+
+impl ToolTelemetry {
+    fn production(telemetry: Telemetry, enabled: bool) -> Self {
+        Self {
+            enabled,
+            telemetry: enabled.then_some(telemetry),
+            #[cfg(test)]
+            recorded: None,
+        }
+    }
+
+    fn capture(&self, name: &str, properties: Value) {
+        if !self.enabled {
+            return;
+        }
+        #[cfg(test)]
+        if let Some(recorded) = &self.recorded {
+            if let Ok(mut events) = recorded.lock() {
+                events.push((name.to_string(), properties.clone()));
+            }
+        }
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.capture(name, properties);
+        }
+    }
+
+    #[cfg(test)]
+    fn recording(enabled: bool) -> (Self, RecordedEvents) {
+        let recorded = Arc::new(StdMutex::new(Vec::new()));
+        (
+            Self {
+                enabled,
+                telemetry: None,
+                recorded: Some(recorded.clone()),
+            },
+            recorded,
+        )
+    }
+}
+
+impl ToolCallTrace {
     #[allow(clippy::too_many_arguments)]
-    fn track_tool_trace(
-        &self,
+    fn start(
+        telemetry_client: Telemetry,
+        runtime: SocaiRuntime,
+        command_gate: tokio::sync::OwnedMutexGuard<()>,
         request_id: &str,
         site_id: &str,
         command: &str,
         tool_name: &str,
         input: &Value,
         telemetry: &DaemonTelemetry,
-        started: Instant,
-        result: &Result<Value>,
-    ) {
-        if !telemetry.enabled {
-            return;
-        }
+    ) -> Self {
+        Self::start_with_telemetry(
+            ToolTelemetry::production(telemetry_client, telemetry.enabled),
+            Some(runtime),
+            Some(command_gate),
+            request_id,
+            site_id,
+            command,
+            tool_name,
+            input,
+            telemetry.include_query_text,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn start_with_telemetry(
+        telemetry: ToolTelemetry,
+        cancel_runtime: Option<SocaiRuntime>,
+        command_gate: Option<tokio::sync::OwnedMutexGuard<()>>,
+        request_id: &str,
+        site_id: &str,
+        command: &str,
+        tool_name: &str,
+        input: &Value,
+        include_query_text: bool,
+    ) -> Self {
+        let context = ToolTraceContext {
+            request_id: request_id.to_string(),
+            site_id: site_id.to_string(),
+            command: command.to_string(),
+            tool_name: tool_name.to_string(),
+        };
 
-        let mut props = base_trace_props(request_id, site_id, command, tool_name);
-        props.insert(
-            "duration_ms".into(),
-            json!(started.elapsed().as_millis() as u64),
-        );
+        let mut properties = trace_context_props(&context);
         merge_object(
-            &mut props,
-            Value::Object(summarize_tool_args(input, telemetry.include_query_text)),
+            &mut properties,
+            Value::Object(summarize_tool_args(input, include_query_text)),
         );
-        match result {
-            Ok(value) => {
-                props.insert("ok".into(), json!(true));
-                merge_object(&mut props, Value::Object(summarize_tool_result(value)));
-            }
-            Err(err) => {
-                props.insert("ok".into(), json!(false));
-                props.insert("error".into(), json!(error_summary(err)));
-            }
-        }
+        telemetry.capture("socai_tool_call_start", Value::Object(properties.clone()));
 
+        Self {
+            telemetry,
+            cancel_runtime,
+            command_gate,
+            context,
+            properties,
+            started: Instant::now(),
+            finished: false,
+        }
+    }
+
+    fn finish(mut self, result: &Result<Value>) {
+        let mut properties = self.properties.clone();
+        finish_tool_call_props(
+            &mut properties,
+            self.started.elapsed().as_millis() as u64,
+            Some(result),
+        );
         self.telemetry
-            .capture("socai_tool_call", Value::Object(props));
+            .capture("socai_tool_call", Value::Object(properties));
+        self.finished = true;
+    }
+
+    fn capture_browser_status(&self, status: &BrowserStatus) {
+        let Some(properties) = browser_connect_props(status, &self.context) else {
+            return;
+        };
+        self.telemetry
+            .capture("socai_browser_connect", Value::Object(properties));
     }
 }
 
-fn base_trace_props(
-    request_id: &str,
-    site_id: &str,
-    command: &str,
-    tool_name: &str,
-) -> Map<String, Value> {
+impl Drop for ToolCallTrace {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let mut properties = self.properties.clone();
+        finish_tool_call_props(
+            &mut properties,
+            self.started.elapsed().as_millis() as u64,
+            None,
+        );
+        self.telemetry
+            .capture("socai_tool_call_interrupted", Value::Object(properties));
+        let (Some(runtime), Some(command_gate)) =
+            (self.cancel_runtime.take(), self.command_gate.take())
+        else {
+            return;
+        };
+        // The CDP connect loop is detached from the command future. Keep the
+        // daemon's command gate across its cancellation/settlement so a later
+        // request cannot inherit retries and misattribute their telemetry.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                // Always invalidate the connect generation. The detached task
+                // may have been spawned but not yet published `Connecting`.
+                runtime.cancel_browser_connect_and_wait().await;
+                drop(command_gate);
+            });
+        }
+    }
+}
+
+fn trace_context_props(context: &ToolTraceContext) -> Map<String, Value> {
     let mut props = Map::new();
-    props.insert("request_id".into(), json!(request_id));
-    props.insert("command".into(), json!(command));
-    props.insert("tool_name".into(), json!(tool_name));
-    props.insert("site".into(), json!(site_id));
+    props.insert("request_id".into(), json!(context.request_id));
+    props.insert("command".into(), json!(context.command));
+    props.insert("tool_name".into(), json!(context.tool_name));
+    props.insert("site".into(), json!(context.site_id));
     props
+}
+
+fn finish_tool_call_props(
+    props: &mut Map<String, Value>,
+    duration_ms: u64,
+    result: Option<&Result<Value>>,
+) {
+    props.insert("duration_ms".into(), json!(duration_ms));
+    match result {
+        Some(Ok(value)) => {
+            props.insert("outcome".into(), json!("completed"));
+            props.insert("ok".into(), json!(true));
+            merge_object(props, Value::Object(summarize_tool_result(value)));
+        }
+        Some(Err(err)) => {
+            props.insert("outcome".into(), json!("failed"));
+            props.insert("ok".into(), json!(false));
+            props.insert("error".into(), json!(error_summary(err)));
+        }
+        None => {
+            props.insert("outcome".into(), json!("interrupted"));
+            props.insert("ok".into(), json!(false));
+            props.insert("error_type".into(), json!("command_interrupted"));
+            props.insert(
+                "error".into(),
+                json!("command interrupted before completion"),
+            );
+        }
+    }
 }
 
 fn merge_object(target: &mut Map<String, Value>, value: Value) {
@@ -774,9 +1017,120 @@ fn merge_object(target: &mut Map<String, Value>, value: Value) {
 }
 
 fn error_summary(err: &anyhow::Error) -> String {
-    let rendered = format!("{err:#}");
-    let first = rendered.lines().next().unwrap_or("command failed").trim();
-    first.chars().take(240).collect()
+    short_redacted_error(&format!("{err:#}"))
+}
+
+fn short_redacted_error(error: &str) -> String {
+    redact_secrets(error)
+        .lines()
+        .next()
+        .unwrap_or("command failed")
+        .trim()
+        .chars()
+        .take(240)
+        .collect()
+}
+
+fn browser_connect_props(
+    status: &BrowserStatus,
+    context: &ToolTraceContext,
+) -> Option<Map<String, Value>> {
+    let mut props = trace_context_props(context);
+    match status {
+        BrowserStatus::Connecting { attempt } => {
+            props.insert("outcome".into(), json!("requested"));
+            props.insert("attempt".into(), json!(attempt));
+        }
+        BrowserStatus::Connected {
+            managed,
+            remote,
+            source,
+            remote_timeout_seconds,
+            remote_remaining_seconds,
+            ..
+        } => {
+            let profile = if *remote {
+                "remote"
+            } else if *managed {
+                "managed"
+            } else {
+                "existing"
+            };
+            props.insert("outcome".into(), json!("completed"));
+            props.insert("browser_profile".into(), json!(profile));
+            props.insert(
+                "browser_source".into(),
+                json!(browser_source_category(source)),
+            );
+            if let Some(seconds) = remote_timeout_seconds {
+                props.insert("remote_timeout_seconds".into(), json!(seconds));
+            }
+            if let Some(seconds) = remote_remaining_seconds {
+                props.insert("remote_remaining_seconds".into(), json!(seconds));
+            }
+        }
+        BrowserStatus::Disconnected { reason } if reason != "not_yet_connected" => {
+            let (error_type, error) = browser_disconnect_details(reason);
+            props.insert(
+                "outcome".into(),
+                json!(if reason == "user_disconnected" {
+                    "disconnected"
+                } else {
+                    "failed"
+                }),
+            );
+            props.insert("error_type".into(), json!(error_type));
+            props.insert("error".into(), json!(error));
+        }
+        BrowserStatus::Disconnected { .. } => return None,
+    }
+    Some(props)
+}
+
+fn browser_disconnect_details(reason: &str) -> (&'static str, &'static str) {
+    let reason = reason.to_ascii_lowercase();
+    if reason == "user_disconnected" {
+        ("user_disconnected", "browser disconnected by user")
+    } else if reason.contains("permission denied") || reason.contains("access denied") {
+        (
+            "browser_profile_access_denied",
+            "browser profile access denied",
+        )
+    } else if reason.contains("no chrome/chromium executable") {
+        ("chrome_not_found", "chrome executable not found")
+    } else if reason.contains("singleton") || reason.contains("another chrome instance") {
+        (
+            "browser_profile_conflict",
+            "browser profile is already in use",
+        )
+    } else if reason.contains("managed chrome") {
+        (
+            "managed_chrome_launch_failed",
+            "managed chrome failed to start",
+        )
+    } else if reason.contains("remote browser") || reason.contains("hosted") {
+        ("remote_browser_failed", "remote browser connection failed")
+    } else if reason.contains("websocket") {
+        (
+            "browser_websocket_failed",
+            "browser websocket connection failed",
+        )
+    } else if reason.contains("timed out") || reason.contains("timeout") {
+        ("browser_connect_timeout", "browser connection timed out")
+    } else if reason.contains("connection lost") || reason.contains("transport") {
+        (
+            "browser_transport_disconnected",
+            "browser transport disconnected",
+        )
+    } else {
+        ("browser_connect_failed", "browser connection failed")
+    }
+}
+
+fn browser_source_category(source: &str) -> &str {
+    source
+        .split_once(':')
+        .map_or(source, |(category, _)| category)
 }
 
 async fn send_request(
@@ -1200,3 +1554,208 @@ fn signal_pid(pid: u32, force: bool) {
 
 #[cfg(windows)]
 fn signal_pid(_pid: u32, _force: bool) {}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn trace_context() -> ToolTraceContext {
+        ToolTraceContext {
+            request_id: "request-1".into(),
+            site_id: "xhs".into(),
+            command: "search".into(),
+            tool_name: "search".into(),
+        }
+    }
+
+    fn recording_trace(enabled: bool) -> (ToolCallTrace, RecordedEvents) {
+        let (telemetry, recorded) = ToolTelemetry::recording(enabled);
+        let trace = ToolCallTrace::start_with_telemetry(
+            telemetry,
+            None,
+            None,
+            "request-1",
+            "xhs",
+            "search",
+            "search",
+            &json!({ "query": "synthetic", "num_notes": 1 }),
+            false,
+        );
+        (trace, recorded)
+    }
+
+    #[test]
+    fn tool_call_trace_records_exact_success_lifecycle() {
+        let (trace, recorded) = recording_trace(true);
+        trace.capture_browser_status(&BrowserStatus::Connecting { attempt: 1 });
+        let result = Ok(json!({ "data": { "ok": true, "notes": [{}] } }));
+        trace.finish(&result);
+
+        let events = recorded.lock().expect("recorded telemetry lock");
+        let names: Vec<_> = events.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "socai_tool_call_start",
+                "socai_browser_connect",
+                "socai_tool_call"
+            ]
+        );
+        assert_eq!(events[2].1.get("outcome"), Some(&json!("completed")));
+        assert_eq!(events[2].1.get("ok"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn tool_call_trace_drop_records_one_distinct_interruption() {
+        let recorded = {
+            let (trace, recorded) = recording_trace(true);
+            drop(trace);
+            recorded
+        };
+        let events = recorded.lock().expect("recorded telemetry lock");
+        let names: Vec<_> = events.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["socai_tool_call_start", "socai_tool_call_interrupted"]
+        );
+        assert_eq!(events[1].1.get("outcome"), Some(&json!("interrupted")));
+        assert_eq!(
+            events[1].1.get("error_type"),
+            Some(&json!("command_interrupted"))
+        );
+    }
+
+    #[test]
+    fn tool_call_trace_opt_out_records_no_lifecycle_events() {
+        let (trace, recorded) = recording_trace(false);
+        trace.capture_browser_status(&BrowserStatus::Connecting { attempt: 1 });
+        drop(trace);
+        assert!(recorded.lock().expect("recorded telemetry lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn interrupted_trace_hands_command_gate_to_cleanup() {
+        let command_gate = Arc::new(Mutex::new(()));
+        let guard = command_gate.clone().lock_owned().await;
+        let (telemetry, recorded) = ToolTelemetry::recording(true);
+        let trace = ToolCallTrace::start_with_telemetry(
+            telemetry,
+            Some(SocaiRuntime::new()),
+            Some(guard),
+            "request-1",
+            "xhs",
+            "search",
+            "search",
+            &json!({ "query": "synthetic" }),
+            false,
+        );
+        drop(trace);
+
+        let _next_command = timeout(Duration::from_secs(1), command_gate.lock())
+            .await
+            .expect("cleanup releases command gate");
+        let events = recorded.lock().expect("recorded telemetry lock");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].0, "socai_tool_call_interrupted");
+    }
+
+    #[test]
+    fn tool_call_terminal_props_cover_success_failure_and_interruption() {
+        let mut completed = trace_context_props(&trace_context());
+        let success = Ok(json!({ "data": { "ok": true, "notes": [{}, {}] } }));
+        finish_tool_call_props(&mut completed, 42, Some(&success));
+        assert_eq!(completed.get("outcome"), Some(&json!("completed")));
+        assert_eq!(completed.get("ok"), Some(&json!(true)));
+        assert_eq!(completed.get("duration_ms"), Some(&json!(42)));
+        assert_eq!(completed.get("notes_count"), Some(&json!(2)));
+
+        let mut failed = trace_context_props(&trace_context());
+        let failure: Result<Value> = Err(anyhow!(
+            "CDP disconnected with Authorization: Bearer very-secret-token"
+        ));
+        finish_tool_call_props(&mut failed, 84, Some(&failure));
+        assert_eq!(failed.get("outcome"), Some(&json!("failed")));
+        assert_eq!(failed.get("ok"), Some(&json!(false)));
+        let error = failed
+            .get("error")
+            .and_then(Value::as_str)
+            .expect("failure error");
+        assert!(!error.contains("very-secret-token"));
+
+        let mut interrupted = trace_context_props(&trace_context());
+        finish_tool_call_props(&mut interrupted, 126, None);
+        assert_eq!(interrupted.get("outcome"), Some(&json!("interrupted")));
+        assert_eq!(interrupted.get("ok"), Some(&json!(false)));
+        assert_eq!(
+            interrupted.get("error_type"),
+            Some(&json!("command_interrupted"))
+        );
+    }
+
+    #[test]
+    fn browser_connect_props_include_request_correlation_for_each_stage() {
+        let context = trace_context();
+        let requested = browser_connect_props(&BrowserStatus::Connecting { attempt: 2 }, &context)
+            .expect("connecting event");
+        assert_eq!(requested.get("request_id"), Some(&json!("request-1")));
+        assert_eq!(requested.get("outcome"), Some(&json!("requested")));
+        assert_eq!(requested.get("attempt"), Some(&json!(2)));
+
+        let connected = browser_connect_props(
+            &BrowserStatus::Connected {
+                endpoint: "ws://127.0.0.1:9222/devtools/browser/private".into(),
+                browser_version: "Chrome/140".into(),
+                page_count: 1,
+                source: "managed_profile:/private/profile".into(),
+                managed: true,
+                remote: false,
+                remote_timeout_seconds: None,
+                remote_remaining_seconds: None,
+                user_data_dir: Some("/private/profile".into()),
+            },
+            &context,
+        )
+        .expect("connected event");
+        assert_eq!(connected.get("outcome"), Some(&json!("completed")));
+        assert_eq!(connected.get("browser_profile"), Some(&json!("managed")));
+        assert_eq!(
+            connected.get("browser_source"),
+            Some(&json!("managed_profile"))
+        );
+        assert!(!connected.contains_key("endpoint"));
+        assert!(!connected.contains_key("user_data_dir"));
+
+        let disconnected = browser_connect_props(
+            &BrowserStatus::Disconnected {
+                reason: "managed chrome failed for profile /Users/private/.socai/chrome-profile \
+                         with Bearer very-secret-token"
+                    .into(),
+            },
+            &context,
+        )
+        .expect("disconnected event");
+        assert_eq!(disconnected.get("outcome"), Some(&json!("failed")));
+        assert_eq!(
+            disconnected.get("error_type"),
+            Some(&json!("managed_chrome_launch_failed"))
+        );
+        let error = disconnected
+            .get("error")
+            .and_then(Value::as_str)
+            .expect("disconnect error");
+        assert!(!error.contains("very-secret-token"));
+        assert!(!error.contains("/Users/private"));
+    }
+
+    #[test]
+    fn browser_connect_props_ignore_initial_disconnected_state() {
+        let event = browser_connect_props(
+            &BrowserStatus::Disconnected {
+                reason: "not_yet_connected".into(),
+            },
+            &trace_context(),
+        );
+        assert!(event.is_none());
+    }
+}

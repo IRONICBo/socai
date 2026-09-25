@@ -3,8 +3,8 @@
 This document is the current schema, privacy, and configuration contract for
 socai telemetry across both surfaces that emit events:
 
-- the **CLI daemon** (`source: "cli_daemon"`) — one sanitized trace per
-  top-level CLI tool command (introduced in PR #63), and
+- the **CLI daemon** (`source: "cli_daemon"`) — correlated start, browser
+  connection, and terminal events per top-level CLI tool command, and
 - the **desktop app** (`source: "desktop"`) — agent-task lifecycle and per-tool
   events for tasks the user runs in the Tauri app.
 
@@ -68,9 +68,23 @@ existing daemon process is reused.
 
 ## Trace model
 
-Each successful or failed top-level daemon command emits one trace after the
-command finishes. The command result can fail while telemetry still records the
-attempt with `ok=false` and an error summary.
+Each top-level daemon command emits `socai_tool_call_start` before browser work
+begins. Completed and failed commands keep emitting the existing terminal
+`socai_tool_call`; a command dropped because the client disconnects emits the
+separate `socai_tool_call_interrupted` event so existing tool-call volume and
+failure-rate queries retain their historical meaning. All lifecycle rows carry
+the same `request_id`. This preserves evidence for commands that stall before
+producing a result.
+
+While that command is active, browser status changes emit
+`socai_browser_connect` with the same request correlation. Connecting attempts
+use `outcome=requested` and include `attempt`; successful connections use
+`outcome=completed`; CDP failures use `outcome=failed` with a stable
+`error_type` and path-free summary. `browser_source` is normalized to a source
+category, so managed-profile and active-port paths never leave the device. The initial
+`not_yet_connected` state is not emitted. If a CLI client disconnects while a
+CDP connection is still pending, the daemon settles that detached connection
+task before admitting the next command, preventing cross-request attribution.
 
 Supported command/tool mapping:
 
@@ -79,11 +93,12 @@ Supported command/tool mapping:
 | `search` | `search` | `search` |
 | `author` | `author` | `author_scan` |
 
-Every event carries a top-level `event` field naming its type — the CLI tool
-trace is `socai_tool_call`. The proxy validates that it starts with `socai_` and
-forwards it to Axiom as the type discriminator. The emitting surface is carried
-separately in `source`, so the same `event` value (for example `socai_tool_call`)
-spans both the CLI daemon and the desktop app.
+Every event carries a top-level `event` field naming its type. CLI lifecycle
+events are `socai_tool_call_start`, `socai_browser_connect`, and either
+`socai_tool_call` or `socai_tool_call_interrupted`. The proxy validates that the
+name starts with `socai_` and forwards it to Axiom as the type discriminator.
+The emitting surface is carried separately in `source`, so the same event value
+(for example `socai_tool_call`) spans both the CLI daemon and the desktop app.
 
 ## Forwarded Axiom fields
 
@@ -146,8 +161,11 @@ Current metadata keys:
 | Field | Type | Description |
 | --- | --- | --- |
 | `duration_ms` | number | Command runtime in milliseconds. |
+| `outcome` | string | Terminal state: `completed` or `failed` on `socai_tool_call`, and `interrupted` on `socai_tool_call_interrupted`; browser events additionally use `requested` and `disconnected`. |
 | `ok` | boolean | Whether the command returned successfully. |
-| `error` | string | First-line error summary when `ok=false`. |
+| `error` | string | Secret-redacted, first-line command error when `ok=false`; browser failures use a path-free summary. |
+| `error_type` | string | Stable failure class when available; interrupted commands use `command_interrupted`, and browser failures use a browser-specific category. |
+| `attempt` | number | Browser connection attempt number on `socai_browser_connect` requested events. |
 | `result_ok` | boolean | Safe `data.ok` result flag when present. |
 | `cards_count` | number | Count of top-level `cards` result entries when present. |
 | `search_cards_count` | number | Count of `search.cards` entries when present. |

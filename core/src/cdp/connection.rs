@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -297,6 +298,11 @@ pub struct Cdp {
     /// observe `Disconnected` before either transitions, and each would then
     /// acquire its own browser — for a hosted profile, its own billed session.
     connect_lock: Arc<Mutex<()>>,
+    /// Invalidates already-scheduled connect tasks before they get a chance to
+    /// acquire `connect_lock` or publish `Connecting`. This closes the narrow
+    /// spawn-to-first-poll cancellation race that connection state alone
+    /// cannot represent.
+    connect_generation: Arc<AtomicU64>,
     /// Serializes `disconnect()` end to end. Without it, a second disconnect
     /// (the idle reaper racing an app quit, say) finds no owner in the state,
     /// returns immediately, and lets process exit abort the first caller's
@@ -312,6 +318,7 @@ impl Cdp {
             events,
             owned_targets: Arc::new(Mutex::new(HashSet::new())),
             connect_lock: Arc::new(Mutex::new(())),
+            connect_generation: Arc::new(AtomicU64::new(0)),
             teardown_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -409,6 +416,18 @@ impl Cdp {
 
     pub(crate) fn connect_lock(&self) -> Arc<Mutex<()>> {
         Arc::clone(&self.connect_lock)
+    }
+
+    pub(crate) fn connect_generation(&self) -> u64 {
+        self.connect_generation.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn connect_generation_is_current(&self, generation: u64) -> bool {
+        self.connect_generation() == generation
+    }
+
+    pub(crate) fn invalidate_connects(&self) {
+        self.connect_generation.fetch_add(1, Ordering::SeqCst);
     }
 
     pub(crate) fn teardown_lock(&self) -> Arc<Mutex<()>> {

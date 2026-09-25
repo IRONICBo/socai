@@ -74,8 +74,9 @@ impl Cdp {
     /// connected or connecting, returns immediately.
     pub fn connect(&self) {
         let cdp = self.clone();
+        let generation = cdp.connect_generation();
         tokio::spawn(async move {
-            run_connect(cdp, None, MAX_ATTEMPTS, true).await;
+            run_connect(cdp, None, MAX_ATTEMPTS, true, generation).await;
         });
     }
 
@@ -83,8 +84,9 @@ impl Cdp {
     /// chrome shows at most one Allow prompt per user action.
     pub fn connect_once(&self) {
         let cdp = self.clone();
+        let generation = cdp.connect_generation();
         tokio::spawn(async move {
-            run_connect(cdp, None, 1, true).await;
+            run_connect(cdp, None, 1, true, generation).await;
         });
     }
 
@@ -94,8 +96,9 @@ impl Cdp {
     /// resolved a chrome profile preference.
     pub fn connect_with_options(&self, options: ChromeConnectOptions) {
         let cdp = self.clone();
+        let generation = cdp.connect_generation();
         tokio::spawn(async move {
-            run_connect(cdp, Some(options), MAX_ATTEMPTS, true).await;
+            run_connect(cdp, Some(options), MAX_ATTEMPTS, true, generation).await;
         });
     }
 
@@ -104,8 +107,9 @@ impl Cdp {
     /// never resurrect a browser the user just asked to close.
     pub(crate) fn recover_with_options(&self, options: ChromeConnectOptions) {
         let cdp = self.clone();
+        let generation = cdp.connect_generation();
         tokio::spawn(async move {
-            run_connect(cdp, Some(options), MAX_ATTEMPTS, false).await;
+            run_connect(cdp, Some(options), MAX_ATTEMPTS, false, generation).await;
         });
     }
 
@@ -122,6 +126,11 @@ impl Cdp {
     }
 
     pub async fn disconnect(&self) {
+        // Invalidate before the first await. A connect task spawned by the
+        // cancelled caller may not have been polled yet, so it has no state or
+        // lock for `disconnect` to observe; the generation check makes that
+        // late task a no-op when it eventually starts.
+        self.invalidate_connects();
         // One teardown at a time, held across the release: a second
         // disconnect (the idle reaper racing an app quit, say) must not
         // return before the first caller's release has landed, or process
@@ -220,7 +229,12 @@ async fn run_connect(
     options: Option<ChromeConnectOptions>,
     max_attempts: u8,
     allow_after_user_disconnect: bool,
+    generation: u64,
 ) {
+    if !cdp.connect_generation_is_current(generation) {
+        debug!("connect cancelled before task start");
+        return;
+    }
     // Exactly one connect loop at a time. The state check below is a filter,
     // not a claim: two callers (a UI connect button pressed twice, say) can
     // both observe `Disconnected` before either transitions, and both would
@@ -230,6 +244,10 @@ async fn run_connect(
         debug!("connect already in progress; ignoring duplicate request");
         return;
     };
+    if !cdp.connect_generation_is_current(generation) {
+        debug!("connect cancelled before lock acquisition");
+        return;
+    }
     {
         let state = cdp.state();
         let guard = state.lock().await;
@@ -248,7 +266,15 @@ async fn run_connect(
     let deadline = tokio::time::Instant::now() + CONNECT_BUDGET;
     let max_attempts = max_attempts.max(1);
     for attempt in 1..=max_attempts {
-        if !begin_connect_attempt(&cdp, attempt, attempt == 1, allow_after_user_disconnect).await {
+        if !begin_connect_attempt(
+            &cdp,
+            attempt,
+            attempt == 1,
+            allow_after_user_disconnect,
+            generation,
+        )
+        .await
+        {
             return;
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -619,9 +645,13 @@ async fn begin_connect_attempt(
     attempt: u8,
     first: bool,
     allow_after_user_disconnect: bool,
+    generation: u64,
 ) -> bool {
     let state = cdp.state();
     let mut guard = state.lock().await;
+    if !cdp.connect_generation_is_current(generation) {
+        return false;
+    }
     let eligible = match *guard {
         CdpState::Connecting { .. } => true,
         CdpState::Disconnected { ref reason } => {
@@ -636,6 +666,30 @@ async fn begin_connect_attempt(
     let payload: StatusPayload = (&*guard).into();
     cdp.emit(BrowserEvent::StatusChanged(payload));
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalidated_connect_never_publishes_connecting() {
+        let cdp = Cdp::new();
+        let generation = cdp.connect_generation();
+        let mut events = cdp.subscribe();
+        cdp.invalidate_connects();
+
+        run_connect(cdp.clone(), None, 1, true, generation).await;
+
+        assert!(matches!(
+            cdp.status().await,
+            StatusPayload::Disconnected { .. }
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
 }
 
 /// Swap the connection state and hand back whatever browser resource the old
