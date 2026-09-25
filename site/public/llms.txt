@@ -1,0 +1,23 @@
+# socai documentation
+
+> socai is a local agent that researches Xiaohongshu, Douyin, TikTok, Instagram, and LinkedIn through a signed-in Chrome session and returns source-linked evidence.
+
+## Start here
+
+- [Documentation overview](https://socai.io/docs/)
+- [Quickstart](https://socai.io/docs/quickstart/)
+- [Installation](https://socai.io/docs/installation/)
+- [Connect Chrome](https://socai.io/docs/browser-connection/)
+
+## Use socai
+
+- [Agent workflows](https://socai.io/docs/agent-workflows/)
+- [CLI reference](https://socai.io/docs/cli/)
+- [Supported platforms](https://socai.io/docs/platforms/)
+- [Evidence and artifacts](https://socai.io/docs/evidence/)
+
+## Reference
+
+- [Troubleshooting](https://socai.io/docs/troubleshooting/)
+- [Development](https://socai.io/docs/development/)
+- [GitHub repository](https://github.com/socai-io/socai)

@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod browser_script;
 pub mod dy;
 pub mod instagram;

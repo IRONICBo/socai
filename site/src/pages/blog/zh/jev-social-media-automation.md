@@ -40,7 +40,7 @@ socai 已经有搜索、打开帖子、读主页、获取评论这些社交平�
 
 **Jev 选到的是具体操作：调用哪个 socai CLI 命令、打开哪个链接、读取哪条帖子的评论。** socai 负责把浏览器里的导航、点击和内容读取做完。这样就不用让模型每次从一张截图里重新找搜索框、猜按钮在哪。
 
-你只需要说想找什么，等它把帖子、作者、评论和原帖链接带回来。
+你只需要说想找什么，等它把帖子、作者、评论和原帖链接带回来。已抓取的卡片会一直保留，最终报告从上到下流式生成；报告里的结论必须引用这些已抓取的来源。
 
 ## 案例：在 Instagram 找某个方向火的帖子
 
@@ -70,8 +70,8 @@ socai 已经有搜索、打开帖子、读主页、获取评论这些社交平�
 [jev-social 是开源的](https://github.com/socai-io/jev-social)。安装 Node 20+ 后，不用克隆仓库，运行两条命令即可完成设置并打开本地界面：
 
 ```bash
-npx github:socai-io/jev-social#v0.1.3 onboard
-npx github:socai-io/jev-social#v0.1.3
+npx github:socai-io/jev-social#v0.1.6 onboard
+npx github:socai-io/jev-social#v0.1.6
 ```
 
 设置过程会提示你输入 OpenRouter Key；如果没有找到 socai CLI，也会询问是否安装官方版本。你仍然需要登录要调研的社媒账号。[Jev Social 项目页](https://socai-io.github.io/jev-social/)提供演示、架构说明和源码安装方式。

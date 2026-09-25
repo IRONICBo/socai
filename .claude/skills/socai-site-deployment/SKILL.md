@@ -16,9 +16,10 @@ This skill is the source-of-truth deployment runbook. [`../../../docs/website-de
 - Vercel team/scope: `socai-d83824c8` (`socai`)
 - Vercel project: `socai-site`
 - Production domain: `https://socai.io`
+- Documentation route: `https://socai.io/docs/` (Starlight pages built with the Astro site)
 - Canonical host: `socai.io`
 - `www` behavior: `https://www.socai.io/*` should 308/redirect to `https://socai.io/*`
-- Download route: `https://socai.io/download` redirects to GitHub's latest universal macOS DMG
+- Download route: `https://socai.io/download` redirects to the latest universal macOS DMG on the socai OSS release mirror
 - GitHub route: `https://socai.io/github` redirects to `https://github.com/socai-io/socai`
 
 Expected Vercel project settings:
@@ -59,7 +60,8 @@ python3 -m json.tool site/vercel.json >/dev/null
 python3 -m json.tool site/public/site.webmanifest >/dev/null
 python3 - <<'PY'
 import xml.etree.ElementTree as ET
-ET.parse('site/public/sitemap.xml')
+ET.parse('site/dist/sitemap-index.xml')
+ET.parse('site/dist/sitemap-0.xml')
 PY
 ```
 
@@ -137,7 +139,11 @@ Use HEAD checks first:
 
 ```bash
 curl -I https://socai.io/
+curl -I https://socai.io/docs/
+curl -I https://socai.io/docs/quickstart/
 curl -I https://www.socai.io/
+curl -I https://socai.io/sitemap.xml
+curl -I https://socai.io/sitemap-index.xml
 curl -I https://socai.io/download
 curl -I https://socai.io/github
 ```
@@ -145,8 +151,10 @@ curl -I https://socai.io/github
 Expected first-hop behavior:
 
 - `https://socai.io/` returns `200`.
+- `https://socai.io/docs/` returns `200`, and a nested page such as `/docs/quickstart/` returns `200`.
 - `https://www.socai.io/` returns `308` with `location: https://socai.io/`.
-- `https://socai.io/download` returns a Vercel redirect (`307`) to `https://github.com/socai-io/socai/releases/latest/download/socai-macos-universal.dmg`.
+- `https://socai.io/sitemap.xml` permanently redirects to `/sitemap-index.xml`, which returns `200`.
+- `https://socai.io/download` returns a Vercel redirect (`307`) to the latest universal macOS DMG on the configured OSS release mirror.
 - `https://socai.io/github` returns a Vercel redirect (`307`) to `https://github.com/socai-io/socai`.
 
 Use `-L` only when you want to follow the chain:
@@ -203,5 +211,5 @@ When reporting a deployment task, include:
 - Vercel project settings confirmed
 - Deployment URL and production domain
 - Commands run
-- Verification output summary for `/`, `www`, `/download`, and `/github`
+- Verification output summary for `/`, `/docs/`, `/docs/quickstart/`, `www`, `/download`, and `/github`
 - Any remaining manual blockers, especially Git integration / PR previews
