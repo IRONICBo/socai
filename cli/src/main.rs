@@ -37,6 +37,16 @@ fn build_cli() -> clap::Command {
             clap::Command::new("update")
                 .about("Update the macOS release-binary install to the latest version."),
         )
+        .subcommand(
+            clap::Command::new("status")
+                .about("Print privacy-safe CLI and browser readiness without connecting Chrome.")
+                .arg(
+                    Arg::new("json")
+                        .long("json")
+                        .action(ArgAction::SetTrue)
+                        .help("Print compact machine-readable JSON."),
+                ),
+        )
         .subcommand(clap::Command::new("stop").about("Stop the background socai rust daemon."))
         .subcommand(
             clap::Command::new("config")
@@ -240,7 +250,7 @@ async fn run_site_command(
 fn should_warn_for_update(subcommand: &str) -> bool {
     !matches!(
         subcommand,
-        "__daemon" | "update" | "version" | "config" | "pro"
+        "__daemon" | "update" | "version" | "status" | "config" | "pro"
     )
 }
 
@@ -272,6 +282,14 @@ async fn main() -> Result<()> {
             .await?
         }
         "update" => version::run_update_command().await?,
+        "status" => {
+            let status = daemon::read_status().await;
+            if sub_matches.get_flag("json") {
+                println!("{}", serde_json::to_string(&status)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            }
+        }
         "config" => run_config_command(sub_matches)?,
         "pro" => run_pro_command(sub_matches).await?,
         "stop" => {

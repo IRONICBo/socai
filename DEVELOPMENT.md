@@ -32,7 +32,27 @@ structured core events through the daemon and rendered on stderr. The default
 behavior draws English progress bars only when stderr is an interactive
 terminal, so non-interactive agents and scripts receive no progress output.
 Desktop and TUI agents call core tools directly and continue to receive the
-unchanged `ToolResult`.
+unchanged `ToolResult`. The CLI daemon remains warm for 24 hours after the
+last site command so browser-backed clients can reuse it across a full day.
+
+### Privacy-safe browser readiness
+
+`socai status --json` reads the current daemon state without starting the
+daemon, connecting Chrome, or retrying a failed browser connection. Its
+versioned JSON contract separates CLI availability, daemon state, browser
+connection state, configured `profile_mode`, nullable `active_profile_mode`,
+platform capabilities, and platform login state. This observational command
+never probes a website, so login remains `unknown`; platform read commands
+surface any observed login gate in their own result.
+
+The status payload deliberately omits WebSocket URLs, debugging ports, browser
+versions, cookies, account identifiers, user-data directories, local paths,
+and raw connection errors. Browser failures are reduced to stable codes such
+as `BROWSER_PERMISSION_REQUIRED`, `BROWSER_ENDPOINT_UNREACHABLE`, and
+`REMOTE_SESSION_UNAVAILABLE`, with one safe next step. If no compatible daemon
+is reachable, `daemon_compatible` is `false` and `browser_state` is `unknown`
+instead of touching Chrome. `daemon_running` separately reports whether any
+socai daemon answered the version-exempt local ping.
 
 ### TUI
 
