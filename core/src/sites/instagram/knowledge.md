@@ -1,6 +1,6 @@
 # Instagram research workflow
 
-Use Instagram for read-only profile, post, reel, and comment research. Do not follow accounts, react, like, reply, comment, or send direct messages.
+Use Instagram for read-only profile, post, reel, and comment research by default. It may comment only when the user explicitly requests the exact target post and comment content. Do not follow accounts, react, like, reply to comments, or send direct messages.
 
 ## Search and gates
 
@@ -28,3 +28,9 @@ Use `scrollResults` only after `searchState` confirms a valid search surface and
 ## Post assets
 
 Post/reel rows from `searchResults` and `profilePosts` are automatically collected across lazy-scroll pages up to `limit`. Those rows, full `postDetail` data, and the final accumulated comments are archived automatically as desktop cards and JSON artifacts. Preserve returned media URLs. Cite a saved post with its exact archive id (`instagram:<shortcode>`) when the host requests `note:` citations.
+
+## Explicit comments
+
+- Use `comment` only for an explicit user-authorized write. Preserve the requested text and target; do not invent additional comments.
+- The command uses visible CDP pointer and keyboard events. It never calls a platform write API, never replaces a non-empty draft, and dispatches the Post click at most once.
+- If the exact text already exists, the command fails closed instead of creating a duplicate or claiming ownership. Treat `commit_unknown` as unknown and never retry automatically.

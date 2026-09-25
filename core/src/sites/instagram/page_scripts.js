@@ -16,6 +16,12 @@
     return normalized.slice(0, Math.max(0, Number(maxLength || 12000)));
   }
 
+  function editableText(node, maxLength) {
+    const raw = node && ('value' in node ? node.value : node.innerText ?? node.textContent) || '';
+    return String(raw).replace(/\u00a0/g, ' ').replace(/\r\n?/g, '\n')
+      .slice(0, Math.max(0, Number(maxLength || 12000)));
+  }
+
   function visible(node) {
     if (!node || !node.getBoundingClientRect) return false;
     const rect = node.getBoundingClientRect();
@@ -64,7 +70,9 @@
 
   function postIdentity(raw) {
     try {
-      const match = new URL(raw, location.href).pathname.match(POST_PATH);
+      const canonical = instagramUrl(raw);
+      if (!canonical) return null;
+      const match = new URL(canonical).pathname.match(POST_PATH);
       return match ? { kind: match[1].toLowerCase() === 'p' ? 'post' : 'reel', shortcode: match[2] } : null;
     } catch (_) {
       return null;
@@ -140,6 +148,15 @@
   function hasPostContent() {
     const identity = postIdentity(location.href);
     if (!identity) return false;
+    const dialog = activePostDialog(identity);
+    if (dialog && firstVisibleNode(dialog, [
+      'h1',
+      'img[src]',
+      'video',
+      'time[datetime]',
+      'textarea',
+      '[contenteditable="true"]',
+    ])) return true;
     return metaContent('og:type') === 'article' && !!(
       metaContent('og:description') || metaContent('description') ||
       document.querySelector('main img[src], main video')
@@ -440,6 +457,164 @@
     return output;
   }
 
+  function elementCenter(node) {
+    const rect = node.getBoundingClientRect();
+    return {
+      x: Math.round(rect.left + rect.width / 2),
+      y: Math.round(rect.top + rect.height / 2),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    };
+  }
+
+  function ownedClickPoint(node) {
+    if (!node || !inViewport(node)) return null;
+    const point = elementCenter(node);
+    const hit = document.elementFromPoint?.(point.x, point.y);
+    const owned = !!hit && (hit === node || node.contains?.(hit) ||
+      hit.closest?.('button, [role="button"], a[href]') === node);
+    return owned ? point : null;
+  }
+
+  function activePostDialog(identity) {
+    if (!identity) return null;
+    for (const dialog of document.querySelectorAll('[role="dialog"]')) {
+      if (!visible(dialog)) continue;
+      const links = Array.from(dialog.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]'));
+      const ownsIdentity = links.some((link) => {
+        const candidate = postIdentity(link.href || link.getAttribute('href'));
+        return candidate && candidate.shortcode === identity.shortcode;
+      });
+      if (ownsIdentity) return dialog;
+    }
+    return null;
+  }
+
+  function activePostWriteRoot(identity) {
+    const dialog = activePostDialog(identity);
+    if (dialog) return dialog;
+    if (!identity || Array.from(document.querySelectorAll('[role="dialog"]')).some(visible)) return null;
+    const active = activePostIdentity();
+    if (!active || active.shortcode !== identity.shortcode) return null;
+    const main = document.querySelector('main');
+    return main && visible(main) ? main : null;
+  }
+
+  function postCardTarget(arg) {
+    const input = arg || {};
+    const expected = cleanText(input.shortcode || input.id || '', 200);
+    const links = [];
+    const seen = new Set();
+    const append = (candidate) => {
+      const sourceUrl = instagramUrl(candidate && (candidate.href || candidate.getAttribute('href')));
+      const identity = postIdentity(sourceUrl);
+      if (!sourceUrl || !identity || seen.has(sourceUrl)) return;
+      seen.add(sourceUrl);
+      links.push(candidate);
+    };
+    if (searchSurfaceActive()) searchResultLinks().forEach(append);
+    const main = document.querySelector('main') || document;
+    Array.from(main.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]')).forEach(append);
+    for (const dialog of document.querySelectorAll('[role="dialog"]')) {
+      if (!visible(dialog)) continue;
+      Array.from(dialog.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]')).forEach(append);
+    }
+    let link = expected
+      ? links.find((candidate) => postIdentity(candidate.href || candidate.getAttribute('href'))?.shortcode === expected)
+      : null;
+    if (!link && Number.isInteger(input.index) && input.index >= 0) link = links[input.index] || null;
+    if (!link) return { ok: false, status: 'post_card_not_found', shortcode: expected };
+    const sourceUrl = instagramUrl(link.href || link.getAttribute('href'));
+    const identity = postIdentity(sourceUrl);
+    if (!sourceUrl || !identity) return { ok: false, status: 'post_identity_missing', shortcode: expected };
+    link.scrollIntoView({ block: 'center', inline: 'center', behavior: 'auto' });
+    const cover = link.querySelector('img[src], video');
+    for (const target of cover ? [cover, link] : [link]) {
+      const rect = target.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) continue;
+      const center = elementCenter(target);
+      const hit = document.elementFromPoint(center.x, center.y);
+      const hitOwned = !!hit && (hit === link || hit === target ||
+        (typeof link.contains === 'function' && link.contains(hit)) ||
+        (typeof hit.closest === 'function' && hit.closest('a[href]') === link));
+      if (!hitOwned) {
+        return {
+          ok: false,
+          status: 'post_card_click_point_obscured',
+          shortcode: identity.shortcode,
+          source_url: sourceUrl,
+        };
+      }
+      return {
+        ok: true,
+        target: target === cover ? 'cover' : 'card',
+        shortcode: identity.shortcode,
+        kind: identity.kind,
+        source_url: sourceUrl,
+        hit_owned: true,
+        ...center,
+      };
+    }
+    return { ok: false, status: 'post_card_zero_sized', shortcode: identity.shortcode };
+  }
+
+  function postOpenState(arg) {
+    const expected = cleanText(arg && (arg.shortcode || arg.id) || '', 200);
+    const identity = activePostIdentity();
+    const dialog = activePostDialog(identity);
+    const matches = !!identity && (!expected || identity.shortcode === expected);
+    const detail = matches && dialog ? postDetail() : null;
+    const ready = !!detail && detail.ok === true;
+    let status = 'post_not_open';
+    if (identity && !matches) status = 'wrong_post';
+    else if (matches && !dialog) status = 'full_page_navigation';
+    else if (matches && !ready) status = 'post_unhydrated';
+    else if (ready) status = 'post_open';
+    return {
+      ok: ready && !loginRoute() && !loginGatePresent() && !challengeRequired() && !rateLimited(),
+      status,
+      expected_shortcode: expected,
+      shortcode: identity && identity.shortcode || '',
+      kind: identity && identity.kind || '',
+      url: location.href,
+      has_dialog: !!dialog,
+      content_ready: ready,
+      login_required: loginRoute() || loginGatePresent(),
+      challenge_required: challengeRequired(),
+      rate_limited: rateLimited(),
+    };
+  }
+
+  function closePostTarget() {
+    const identity = activePostIdentity();
+    const dialog = activePostDialog(identity);
+    if (!dialog) return { ok: false, status: 'post_dialog_not_found' };
+    const labels = /^(?:close|关闭|cerrar|fermer|schlie(?:ß|ss)en|chiudi|閉じる)$/i;
+    const controls = Array.from(dialog.querySelectorAll('button, [role="button"]'));
+    for (const control of controls) {
+      if (!visible(control)) continue;
+      const label = cleanText(`${control.getAttribute('aria-label') || ''} ${control.innerText || ''}`, 200);
+      if (!labels.test(label)) continue;
+      const point = ownedClickPoint(control);
+      if (point) return { ok: true, hit_owned: true, shortcode: identity.shortcode, ...point, label };
+    }
+    const closeIcon = firstVisibleNode(document, [
+      'svg[aria-label="Close" i]',
+      'svg[aria-label="关闭"]',
+      '[data-testid*="close" i]',
+    ]);
+    const target = closeIcon && (closeIcon.closest('button, [role="button"]') || closeIcon);
+    if (!target) return { ok: false, status: 'post_close_control_not_found' };
+    const dialogRect = dialog.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const associated = targetRect.left >= dialogRect.right - 32 &&
+      targetRect.left - dialogRect.right <= 360 && targetRect.top <= dialogRect.top + 180;
+    const point = associated && ownedClickPoint(target);
+    return point
+      ? { ok: true, hit_owned: true, shortcode: identity.shortcode, ...point, label: cleanText(target.getAttribute && target.getAttribute('aria-label') || '', 200) }
+      : { ok: false, status: associated ? 'post_close_control_obscured' : 'post_close_control_unowned' };
+  }
+
   function profileDetail() {
     const username = profileUsername(location.href);
     const state = pageState();
@@ -515,9 +690,10 @@
   function postMedia() {
     const output = [];
     const seen = new Map();
-    const main = document.querySelector('main') || document;
     const activeIdentity = activePostIdentity();
-    const containers = Array.from(main.querySelectorAll('article, [role="dialog"]'));
+    const dialog = activePostDialog(activeIdentity);
+    const root = dialog || document.querySelector('main') || document;
+    const containers = [root, ...Array.from(root.querySelectorAll('article'))];
     const container = containers.find((candidate) => Array.from(candidate.querySelectorAll(
       'a[href*="/p/"], a[href*="/reel/"]',
     )).some((link) => {
@@ -603,7 +779,8 @@
   }
 
   function postPublishedAt() {
-    for (const time of document.querySelectorAll('main time[datetime], time[datetime]')) {
+    const root = activePostDialog(activePostIdentity()) || document.querySelector('main') || document;
+    for (const time of root.querySelectorAll('time[datetime]')) {
       const commentLink = time.closest('a[href*="/c/"]');
       if (!commentLink) return time.dateTime || time.getAttribute('datetime') || '';
     }
@@ -620,7 +797,8 @@
   function commentRows(limit) {
     const flat = [];
     const seen = new Set();
-    for (const time of document.querySelectorAll('a[href*="/c/"] time[datetime]')) {
+    const root = activePostDialog(activePostIdentity()) || document.querySelector('main') || document;
+    for (const time of root.querySelectorAll('a[href*="/c/"] time[datetime]')) {
       const commentLink = time.closest('a[href*="/c/"]');
       const url = instagramUrl(commentLink && commentLink.href);
       const idMatch = url.match(/\/c\/(\d+)\/?$/);
@@ -697,6 +875,101 @@
     return postIdentity(location.href) ? commentRows(limit) : [];
   }
 
+  // Write-action helpers never mutate the page. They expose the current
+  // rendered editor/button geometry and exact read-back state; CDP owns the
+  // trusted pointer/keyboard events and the one-shot commit policy.
+  function commentRoot(arg) {
+    const identity = activePostIdentity();
+    const expected = cleanText(arg && (arg.shortcode || arg.id) || '', 200);
+    if (!identity || !expected || identity.shortcode !== expected) return null;
+    return activePostWriteRoot(identity);
+  }
+
+  function commentEditor(arg) {
+    const root = commentRoot(arg);
+    if (!root) return null;
+    const editors = Array.from(root.querySelectorAll(
+      'textarea, [contenteditable="true"], [role="textbox"]',
+    )).filter((editor) => visible(editor) && !editor.disabled && editor.getAttribute('aria-disabled') !== 'true' && !editor.readOnly);
+    return editors.find((editor) => /(add a comment|comment|添加评论|发表评论|评论)/i.test(
+      `${editor.placeholder || ''} ${editor.getAttribute('aria-label') || ''}`,
+    )) || null;
+  }
+
+  function commentEditorTarget(arg) {
+    const editor = commentEditor(arg);
+    if (!editor) return { ok: false, status: 'comment_editor_not_found' };
+    const point = ownedClickPoint(editor);
+    if (!point) return { ok: false, status: 'comment_editor_obscured' };
+    return { ok: true, status: 'comment_editor_ready', shortcode: activePostIdentity().shortcode, hit_owned: true, ...point };
+  }
+
+  function commentDraftState(arg) {
+    const editor = commentEditor(arg);
+    if (!editor) return { ok: false, status: 'comment_editor_not_found', value: '' };
+    const active = document.activeElement;
+    return {
+      ok: true,
+      status: 'comment_editor_ready',
+      shortcode: activePostIdentity().shortcode,
+      focused: active === editor || editor.contains?.(active),
+      value: editableText(editor, 10000),
+    };
+  }
+
+  function commentSubmitTarget(arg) {
+    const root = commentRoot(arg);
+    const editor = commentEditor(arg);
+    if (!root || !editor) return { ok: false, status: 'comment_editor_not_found' };
+    const scopes = [];
+    for (let node = editor.parentElement, depth = 0; node && node !== root && depth < 7; node = node.parentElement, depth += 1) scopes.push(node);
+    scopes.push(root);
+    const controls = scopes.flatMap((scope) => Array.from(scope.querySelectorAll('button, [role="button"]')))
+      .filter((node) => visible(node) && /^(post|publish|send|发布|发送|发表)$/i.test(cleanText(node, 100)))
+      .sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        return ar.width * ar.height - br.width * br.height;
+      });
+    const control = controls[0];
+    if (!control || !inViewport(control)) return { ok: false, status: 'comment_submit_not_found' };
+    const point = ownedClickPoint(control);
+    const owned = !!point;
+    const disabled = !!control.disabled || control.getAttribute('aria-disabled') === 'true'
+      || /disabled/.test(String(control.className || ''));
+    return {
+      ok: !disabled && owned,
+      status: disabled ? 'comment_submit_disabled' : owned ? 'comment_submit_ready' : 'comment_submit_obscured',
+      shortcode: activePostIdentity().shortcode,
+      text: cleanText(control, 100),
+      disabled,
+      hit_owned: owned,
+      ...(point || elementCenter(control)),
+    };
+  }
+
+  function renderedCommentState(arg) {
+    const expected = cleanText(arg && arg.text || '', 10000);
+    if (!expected) return { ok: false, status: 'invalid_comment_text', visible: false, count: 0 };
+    const root = commentRoot(arg);
+    if (!root) return { ok: false, status: 'wrong_post', visible: false, count: 0 };
+    const exact = Array.from(root.querySelectorAll('span, div, p')).filter((node) => {
+      if (!visible(node) || node.closest?.('textarea, [contenteditable="true"], [role="textbox"]')) return false;
+      return cleanText(node, 10000) === expected;
+    });
+    const matches = exact.filter((node) => !Array.from(node.querySelectorAll?.('span, div, p') || [])
+      .some((child) => child !== node && visible(child) && cleanText(child, 10000) === expected));
+    const inView = matches.filter(inViewport);
+    return {
+      ok: matches.length > 0,
+      status: matches.length ? 'comment_visible' : 'comment_not_visible',
+      visible: matches.length > 0,
+      in_viewport: inView.length > 0,
+      count: matches.length,
+      in_viewport_count: inView.length,
+    };
+  }
+
   async function scrollComments() {
     if (!postIdentity(location.href)) {
       return { ok: false, status: 'not_post', url: location.href };
@@ -742,11 +1015,15 @@
     if (!identity) {
       return { ok: false, status: 'not_post', url: location.href, page_state: state };
     }
+    const dialog = activePostDialog(identity);
     const description = metaContent('description') || metaContent('og:description');
-    const caption = quotedCaption(description || metaContent('og:title'));
-    const author = postAuthor(description, canonical);
+    const visibleCaption = dialog && firstVisibleNode(dialog, ['h1']);
+    const caption = quotedCaption(description || metaContent('og:title')) || cleanText(visibleCaption, 20000);
+    const visibleAuthorLink = dialog && Array.from(dialog.querySelectorAll('a[href]'))
+      .find((link) => profileUsername(link.href));
+    const author = postAuthor(description, canonical) || profileUsername(visibleAuthorLink && visibleAuthorLink.href);
     const media = postMedia();
-    const engagement = engagementFromDescription(description);
+    const engagement = engagementFromDescription(`${description}\n${cleanText(dialog, 5000)}`);
     const visibleComments = commentRows(100);
     const contentAvailable = hasPostContent() && !!(caption || author || media.length);
     return {
@@ -777,11 +1054,12 @@
     const challenge = challengeRequired();
     const limited = rateLimited();
     const login = loginRoute();
+    const loginGate = loginGatePresent();
     const searchCount = searchSurfaceActive() ? searchResultLinks().length : 0;
     const contentAvailable = hasPostContent() || hasProfileContent() || searchCount > 0;
     const hydrated = document.readyState !== 'loading' && (bodyLength > 20 || challenge || limited);
     return {
-      ok: !challenge && !limited && !login,
+      ok: !challenge && !limited && !login && !loginGate,
       site: 'instagram',
       url: location.href,
       canonical_url: canonicalPageUrl(),
@@ -790,12 +1068,14 @@
       ready_state: document.readyState,
       body_text_len: bodyLength,
       authenticated: authenticated(),
-      login_required: login,
-      login_gate_present: loginGatePresent(),
+      login_required: login || loginGate,
+      login_gate_present: loginGate,
       challenge_required: challenge,
       rate_limited: limited,
       content_available: contentAvailable,
       result_count: searchCount,
+      search_query: searchSurfaceActive() ? currentSearchQuery() : '',
+      profile_username: profileUsername(location.href),
       hydrated,
       blank_or_throttled: document.readyState === 'loading' || (bodyLength < 20 && !challenge && !limited),
     };
@@ -810,8 +1090,15 @@
     scrollPosts,
     profileDetail,
     profilePosts,
+    postCardTarget,
+    postOpenState,
+    closePostTarget,
     postDetail,
     comments,
     scrollComments,
+    commentEditorTarget,
+    commentDraftState,
+    commentSubmitTarget,
+    renderedCommentState,
   });
 })();
