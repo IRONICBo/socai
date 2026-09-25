@@ -9,6 +9,7 @@ pub mod registry;
 pub mod runner;
 pub(crate) mod skill_cli;
 pub mod tiktok;
+pub mod x;
 pub mod xhs;
 
 pub use browser_script::{with_browser_script, BROWSER_SCRIPT_TOOL_NAME};
