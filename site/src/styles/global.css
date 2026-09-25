@@ -271,12 +271,12 @@ html[data-language="zh"] .hero h1 {
 }
 
 .hero__subtitle {
-  max-width: 38em;
+  max-width: 48em;
   margin: 0 auto 36px;
   color: var(--fg-soft);
   font-size: clamp(14px, 1.7vw, 16px);
   line-height: 1.55;
-  text-wrap: pretty;
+  text-wrap: balance;
 }
 
 .hero__actions {
