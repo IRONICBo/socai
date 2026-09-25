@@ -110,6 +110,7 @@ static NATIVE_SITE_ADAPTERS: &[&NativeSiteAdapter] = &[
     &crate::sites::tiktok::TIKTOK_NATIVE_ADAPTER,
     &crate::sites::instagram::INSTAGRAM_NATIVE_ADAPTER,
     &crate::sites::linkedin::LINKEDIN_NATIVE_ADAPTER,
+    &crate::sites::x::X_NATIVE_ADAPTER,
 ];
 
 pub fn all_native_site_adapters() -> &'static [&'static NativeSiteAdapter] {
