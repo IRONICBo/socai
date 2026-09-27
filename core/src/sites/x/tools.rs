@@ -607,7 +607,7 @@ impl Tool for ReplyTool {
     }
 
     fn description(&self) -> &str {
-        "Reply to an explicitly selected X post with real CDP pointer and keyboard events. Refuses ambiguous composers, existing drafts, route changes, and submit retries."
+        "Reply only when the user explicitly requests the exact X post and exact text. Preserve both without inventing additional writes. Uses real CDP pointer and keyboard events and refuses ambiguous composers, existing drafts, route changes, and submit retries. Treat commit_unknown as unknown and never retry it automatically."
     }
 
     fn input_schema(&self) -> Value {
