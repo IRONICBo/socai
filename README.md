@@ -290,6 +290,12 @@ socai config set chrome.profile remote
 
 Advanced endpoint overrides remain available through `SOCAI_CDP_WS` and `SOCAI_CDP_URL`.
 
+Chrome and Microsoft Edge use the same CDP backend. Firefox requires a
+WebDriver BiDi backend and Safari requires a Safari WebDriver backend; neither
+is currently implemented. See the [browser backend support
+matrix](docs/browser-backends.md) for configuration, protocol boundaries, and
+the optional extension/MCP bridge policy.
+
 ## Run results and artifacts
 
 Each run is written under the following directory by default:
