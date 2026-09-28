@@ -1,0 +1,116 @@
+---
+import "../styles/global.css";
+import SiteHeader from "../components/SiteHeader.astro";
+import SiteFooter from "../components/SiteFooter.astro";
+import { message as messageFor } from "../lib/i18n";
+
+const currentYear = new Date().getFullYear();
+const canonicalUrl = "https://socai.io/book-demo";
+const apiBase = import.meta.env.PUBLIC_SOCAI_API_BASE_URL || "/api/server";
+const defaultLanguage = "zh";
+const messages = {
+    en: {
+        meta: { title: "socai · book a demo", description: "Book a focused socai product demo for your social research workflow." },
+        nav: { primaryAria: "primary navigation", homeAria: "socai home", linksAria: "site links", github: "github", contact: "contact", languageAria: "language" },
+        book: {
+            eyebrow: "BOOK A DEMO",
+            title: "See socai on your research workflow",
+            subtitle: "Tell us the platforms, evidence, and recurring questions your team works with. We will focus the demo on that workflow.",
+            name: "Name",
+            namePlaceholder: "Your name",
+            email: "Work email",
+            emailPlaceholder: "you@company.com",
+            company: "Company",
+            companyPlaceholder: "Company or team",
+            useCase: "What would you like to research?",
+            useCasePlaceholder: "Platforms, typical questions, expected sources, team size, and any access constraints.",
+            submit: "Request a demo",
+            privacy: "We use these details only to respond to this demo request.",
+            success: "Request received. We will follow up by email.",
+        },
+        footer: { linksAria: "footer links", blog: "blog", connect: "connect guide", contact: "contact" },
+    },
+    zh: {
+        meta: { title: "socai · 预约演示", description: "围绕你的社交媒体调研工作流预约一次 socai 产品演示。" },
+        nav: { primaryAria: "主导航", homeAria: "socai 首页", linksAria: "站点链接", github: "github", contact: "联系", languageAria: "语言" },
+        book: {
+            eyebrow: "BOOK A DEMO",
+            title: "用你的真实调研场景了解 socai",
+            subtitle: "告诉我们团队关注的平台、证据和重复性问题，我们会围绕这条工作流准备演示。",
+            name: "姓名",
+            namePlaceholder: "你的姓名",
+            email: "工作邮箱",
+            emailPlaceholder: "you@company.com",
+            company: "公司",
+            companyPlaceholder: "公司或团队",
+            useCase: "你希望调研什么？",
+            useCasePlaceholder: "请说明平台、常见问题、期望证据、团队规模和访问限制。",
+            submit: "提交预约",
+            privacy: "这些信息仅用于回复本次演示预约。",
+            success: "预约已收到，我们会通过邮箱联系你。",
+        },
+        footer: { linksAria: "页脚链接", blog: "博客", connect: "连接教程", contact: "联系" },
+    },
+};
+const message = (path: string, language = defaultLanguage) => messageFor(messages, path, language);
+---
+
+<html lang="zh-CN" data-language={defaultLanguage}>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>{message("meta.title")}</title>
+        <meta name="description" content={message("meta.description")} data-i18n-content="meta.description" />
+        <meta name="robots" content="index, follow" />
+        <link rel="canonical" href={canonicalUrl} />
+        <meta property="og:title" content={message("meta.title")} data-i18n-content="meta.title" />
+        <meta property="og:description" content={message("meta.description")} data-i18n-content="meta.description" />
+        <meta name="theme-color" content="#fafaf9" />
+        <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    </head>
+    <body>
+        <div class="site-shell">
+            <SiteHeader messages={messages} language={defaultLanguage} />
+            <main class="book-demo" data-book-demo data-api-base={apiBase}>
+                <header class="book-demo__head">
+                    <span class="page-eyebrow" data-i18n="book.eyebrow">{message("book.eyebrow")}</span>
+                    <h1 data-i18n="book.title">{message("book.title")}</h1>
+                    <p data-i18n="book.subtitle">{message("book.subtitle")}</p>
+                </header>
+                <form class="book-form" data-book-form>
+                    <div class="form-field">
+                        <label for="book-name" data-i18n="book.name">{message("book.name")}</label>
+                        <input id="book-name" name="name" minlength="2" maxlength="120" required autocomplete="name" placeholder={message("book.namePlaceholder")} data-i18n-placeholder="book.namePlaceholder" />
+                    </div>
+                    <div class="form-field">
+                        <label for="book-email" data-i18n="book.email">{message("book.email")}</label>
+                        <input id="book-email" name="email" type="email" required autocomplete="email" placeholder={message("book.emailPlaceholder")} data-i18n-placeholder="book.emailPlaceholder" />
+                    </div>
+                    <div class="form-field">
+                        <label for="book-company" data-i18n="book.company">{message("book.company")}</label>
+                        <input id="book-company" name="company" maxlength="160" autocomplete="organization" placeholder={message("book.companyPlaceholder")} data-i18n-placeholder="book.companyPlaceholder" />
+                    </div>
+                    <div class="form-field form-field--wide">
+                        <label for="book-use-case" data-i18n="book.useCase">{message("book.useCase")}</label>
+                        <textarea id="book-use-case" name="use_case" rows="6" minlength="20" maxlength="4000" required placeholder={message("book.useCasePlaceholder")} data-i18n-placeholder="book.useCasePlaceholder"></textarea>
+                    </div>
+                    <div class="honeypot" aria-hidden="true">
+                        <label for="book-website">Website</label>
+                        <input id="book-website" name="website" tabindex="-1" autocomplete="off" />
+                    </div>
+                    <div class="book-form__footer form-field--wide">
+                        <button class="button button--primary" type="submit" data-i18n="book.submit">{message("book.submit")}</button>
+                        <p data-i18n="book.privacy">{message("book.privacy")}</p>
+                    </div>
+                    <p class="form-alert form-field--wide" data-book-status role="status" hidden></p>
+                </form>
+            </main>
+            <SiteFooter messages={messages} language={defaultLanguage} currentYear={currentYear} />
+        </div>
+        <script id="site-i18n" type="application/json" set:html={JSON.stringify(messages)} />
+        <script>
+            import "../scripts/site.ts";
+            import "../scripts/book-demo.ts";
+        </script>
+    </body>
+</html>

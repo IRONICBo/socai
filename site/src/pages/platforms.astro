@@ -1,0 +1,160 @@
+---
+import "../styles/global.css";
+import SiteHeader from "../components/SiteHeader.astro";
+import SiteFooter from "../components/SiteFooter.astro";
+import { message as messageFor } from "../lib/i18n";
+
+const currentYear = new Date().getFullYear();
+const canonicalUrl = "https://socai.io/platforms";
+const defaultLanguage = "zh";
+const messages = {
+    en: {
+        meta: { title: "socai · social platform coverage", description: "Compare practical socai coverage for X, Instagram, LinkedIn, TikTok, Douyin, and Xiaohongshu." },
+        nav: { primaryAria: "primary navigation", homeAria: "socai home", linksAria: "site links", github: "github", contact: "contact", languageAria: "language" },
+        page: {
+            eyebrow: "PLATFORM COVERAGE",
+            title: "Choose the access path that matches the evidence",
+            subtitle: "Web Demo is the quickest path for public pages. Desktop and CLI use your own signed-in Chrome when a platform hides results behind login, region, or account context.",
+            matrixTitle: "Practical coverage",
+            platform: "Platform",
+            evidence: "Useful evidence",
+            access: "Best access",
+            limits: "Practical limits",
+            xEvidence: "Search results, profiles, posts, visible replies, media links",
+            xAccess: "Desktop / CLI; Web Demo for public pages",
+            xLimits: "Login walls and rate limits vary by account and region",
+            instagramEvidence: "Profiles, posts, Reels, captions, visible comments and replies",
+            instagramAccess: "Desktop / CLI with signed-in Chrome",
+            instagramLimits: "Logged-out search and comment depth are limited",
+            linkedinEvidence: "People, companies, experience, posts, visible comments",
+            linkedinAccess: "Desktop / CLI with signed-in Chrome",
+            linkedinLimits: "Search visibility and challenge screens depend on the account",
+            tiktokEvidence: "Search, videos, profiles, visible comments, downloadable public media",
+            tiktokAccess: "Desktop / CLI; Web Demo for public pages",
+            tiktokLimits: "Region, consent screens, and logged-out feeds change results",
+            douyinEvidence: "Search, videos, authors, visible comments and replies",
+            douyinAccess: "Desktop / CLI with signed-in Chrome",
+            douyinLimits: "Mainland account and region context often matter",
+            xhsEvidence: "Search, authors, notes, visible comments and replies, media, OCR and ASR",
+            xhsAccess: "Desktop / CLI with signed-in Chrome",
+            xhsLimits: "Account, region, and risk-control state affect visibility",
+            publicTitle: "Public-web extension",
+            publicText: "The Web Demo can inspect public YouTube, Reddit, news, forums, and other web pages through Browser Use. These are browser research sources, not guaranteed structured socai connectors.",
+            boundaryTitle: "Current product boundary",
+            boundaryText: "The Web Demo uses an isolated public browser without a signed-in profile, stored credentials, email, or wallet, and rejects login, write, and purchase requests. Live sites can return partial results; socai reports that limitation instead of inventing missing records.",
+            tryDemo: "try Web Demo",
+            install: "install Desktop / CLI",
+        },
+        footer: { linksAria: "footer links", blog: "blog", connect: "connect guide", contact: "contact" },
+    },
+    zh: {
+        meta: { title: "socai · 社交平台接入范围", description: "对比 X、Instagram、LinkedIn、TikTok、抖音和小红书在 socai 中的实际接入方式。" },
+        nav: { primaryAria: "主导航", homeAria: "socai 首页", linksAria: "站点链接", github: "github", contact: "联系", languageAria: "语言" },
+        page: {
+            eyebrow: "PLATFORM COVERAGE",
+            title: "根据证据范围选择合适的接入方式",
+            subtitle: "公开页面可以先用 Web Demo；当平台受登录、地区或账号上下文影响时，Desktop 和 CLI 会使用你自己的已登录 Chrome。",
+            matrixTitle: "实际覆盖范围",
+            platform: "平台",
+            evidence: "适合获取的证据",
+            access: "推荐接入",
+            limits: "实际限制",
+            xEvidence: "搜索结果、用户资料、帖子、可见回复和媒体链接",
+            xAccess: "Desktop / CLI；公开页面可用 Web Demo",
+            xLimits: "登录墙和限流会随账号、地区变化",
+            instagramEvidence: "主页、帖子、Reels、正文、可见评论和回复",
+            instagramAccess: "使用已登录 Chrome 的 Desktop / CLI",
+            instagramLimits: "未登录时搜索范围和评论深度有限",
+            linkedinEvidence: "人物、公司、经历、帖子和可见评论",
+            linkedinAccess: "使用已登录 Chrome 的 Desktop / CLI",
+            linkedinLimits: "搜索可见性和验证页面取决于账号状态",
+            tiktokEvidence: "搜索、视频、主页、可见评论和公开媒体下载",
+            tiktokAccess: "Desktop / CLI；公开页面可用 Web Demo",
+            tiktokLimits: "地区、同意页面和未登录推荐流会改变结果",
+            douyinEvidence: "搜索、视频、作者、可见评论和回复",
+            douyinAccess: "使用已登录 Chrome 的 Desktop / CLI",
+            douyinLimits: "大陆账号和地区上下文通常会影响结果",
+            xhsEvidence: "搜索、作者、笔记、可见评论和回复、媒体、OCR 与 ASR",
+            xhsAccess: "使用已登录 Chrome 的 Desktop / CLI",
+            xhsLimits: "账号、地区和风控状态会影响可见内容",
+            publicTitle: "公开网页扩展",
+            publicText: "Web Demo 可通过 Browser Use 调研公开的 YouTube、Reddit、新闻、论坛等网页。这些属于浏览器调研来源，不等同于已承诺稳定结构的 socai Connector。",
+            boundaryTitle: "当前产品边界",
+            boundaryText: "Web Demo 使用不挂载已登录账号、保存凭据、邮箱或钱包的隔离公开浏览器，并拒绝登录、写入和购买类请求。实时站点可能只返回部分结果，socai 会说明限制，不会补造缺失记录。",
+            tryDemo: "体验 Web Demo",
+            install: "安装 Desktop / CLI",
+        },
+        footer: { linksAria: "页脚链接", blog: "博客", connect: "连接教程", contact: "联系" },
+    },
+};
+const message = (path: string, language = defaultLanguage) => messageFor(messages, path, language);
+const platforms = [
+    ["X", "xEvidence", "xAccess", "xLimits"],
+    ["Instagram", "instagramEvidence", "instagramAccess", "instagramLimits"],
+    ["LinkedIn", "linkedinEvidence", "linkedinAccess", "linkedinLimits"],
+    ["TikTok", "tiktokEvidence", "tiktokAccess", "tiktokLimits"],
+    ["Douyin", "douyinEvidence", "douyinAccess", "douyinLimits"],
+    ["Xiaohongshu", "xhsEvidence", "xhsAccess", "xhsLimits"],
+];
+---
+
+<html lang="zh-CN" data-language={defaultLanguage}>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>{message("meta.title")}</title>
+        <meta name="description" content={message("meta.description")} data-i18n-content="meta.description" />
+        <meta name="robots" content="index, follow" />
+        <link rel="canonical" href={canonicalUrl} />
+        <meta property="og:title" content={message("meta.title")} data-i18n-content="meta.title" />
+        <meta property="og:description" content={message("meta.description")} data-i18n-content="meta.description" />
+        <meta name="theme-color" content="#fafaf9" />
+        <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    </head>
+    <body>
+        <div class="site-shell">
+            <SiteHeader messages={messages} language={defaultLanguage} />
+            <main class="platform-page">
+                <header class="platform-page__head">
+                    <span class="page-eyebrow" data-i18n="page.eyebrow">{message("page.eyebrow")}</span>
+                    <h1 data-i18n="page.title">{message("page.title")}</h1>
+                    <p data-i18n="page.subtitle">{message("page.subtitle")}</p>
+                </header>
+                <section class="platform-matrix" aria-labelledby="matrix-title">
+                    <h2 id="matrix-title" data-i18n="page.matrixTitle">{message("page.matrixTitle")}</h2>
+                    <div class="table-scroll">
+                        <table>
+                            <thead><tr>
+                                <th data-i18n="page.platform">{message("page.platform")}</th>
+                                <th data-i18n="page.evidence">{message("page.evidence")}</th>
+                                <th data-i18n="page.access">{message("page.access")}</th>
+                                <th data-i18n="page.limits">{message("page.limits")}</th>
+                            </tr></thead>
+                            <tbody>
+                                {platforms.map(([name, evidence, access, limits]) => (
+                                    <tr>
+                                        <th>{name}</th>
+                                        <td data-i18n={`page.${evidence}`}>{message(`page.${evidence}`)}</td>
+                                        <td data-i18n={`page.${access}`}>{message(`page.${access}`)}</td>
+                                        <td data-i18n={`page.${limits}`}>{message(`page.${limits}`)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+                <div class="platform-notes">
+                    <section><h2 data-i18n="page.publicTitle">{message("page.publicTitle")}</h2><p data-i18n="page.publicText">{message("page.publicText")}</p></section>
+                    <section><h2 data-i18n="page.boundaryTitle">{message("page.boundaryTitle")}</h2><p data-i18n="page.boundaryText">{message("page.boundaryText")}</p></section>
+                </div>
+                <div class="page-cta">
+                    <a class="button button--primary" href="/demo" data-i18n="page.tryDemo">{message("page.tryDemo")}</a>
+                    <a class="button button--secondary" href="/docs/installation/" data-i18n="page.install">{message("page.install")}</a>
+                </div>
+            </main>
+            <SiteFooter messages={messages} language={defaultLanguage} currentYear={currentYear} />
+        </div>
+        <script id="site-i18n" type="application/json" set:html={JSON.stringify(messages)} />
+        <script>import "../scripts/site.ts";</script>
+    </body>
+</html>

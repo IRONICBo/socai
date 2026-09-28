@@ -1,0 +1,207 @@
+---
+import "../styles/global.css";
+import SiteHeader from "../components/SiteHeader.astro";
+import SiteFooter from "../components/SiteFooter.astro";
+import { message as messageFor } from "../lib/i18n";
+
+const currentYear = new Date().getFullYear();
+const siteUrl = "https://socai.io";
+const canonicalUrl = `${siteUrl}/demo`;
+const apiBase = import.meta.env.PUBLIC_SOCAI_API_BASE_URL || "/api/server";
+const defaultLanguage = "zh";
+const messages = {
+    en: {
+        meta: {
+            title: "socai · web social research demo",
+            description: "Try a bounded public social media research task in your browser.",
+        },
+        nav: {
+            primaryAria: "primary navigation",
+            homeAria: "socai home",
+            linksAria: "site links",
+            github: "github",
+            contact: "contact",
+            languageAria: "language",
+        },
+        demo: {
+            eyebrow: "WEB DEMO",
+            title: "Research public social media from the web",
+            subtitle: "Sign in, describe one focused question, and watch an isolated public cloud browser collect source-linked evidence. Each account can run five iterations per UTC day.",
+            signInTitle: "Sign in to start",
+            signInNote: "Google, GitHub, or a one-time email link. No password is stored by socai.",
+            google: "Continue with Google",
+            github: "Continue with GitHub",
+            emailLabel: "Work email",
+            emailPlaceholder: "you@company.com",
+            emailSubmit: "Email me a sign-in link",
+            emailSent: "Check your inbox for the one-time sign-in link.",
+            workspaceTitle: "What should socai research?",
+            promptLabel: "Research question",
+            promptPlaceholder: "Compare how runners discuss daily trainers on Instagram, TikTok, X, and Reddit. Cite the public posts.",
+            submit: "Start research",
+            cancel: "Stop run",
+            signOut: "sign out",
+            liveTitle: "Live browser",
+            liveFrameTitle: "Public research live browser preview",
+            liveNote: "View only. No signed-in profile, stored credentials, email, or wallet is attached; login, write, and purchase requests are rejected.",
+            activityTitle: "Activity",
+            resultTitle: "Result",
+            continueTitle: "Need signed-in or deeper platform coverage?",
+            continueText: "Continue in the Desktop app or CLI with your own signed-in Chrome profile.",
+            download: "download Desktop",
+            cli: "CLI setup",
+        },
+        footer: { linksAria: "footer links", blog: "blog", connect: "connect guide", contact: "contact" },
+    },
+    zh: {
+        meta: {
+            title: "socai · Web 社交媒体调研体验",
+            description: "在浏览器中体验有边界的公开社交媒体调研任务。",
+        },
+        nav: {
+            primaryAria: "主导航",
+            homeAria: "socai 首页",
+            linksAria: "站点链接",
+            github: "github",
+            contact: "联系",
+            languageAria: "语言",
+        },
+        demo: {
+            eyebrow: "WEB DEMO",
+            title: "直接在网页调研公开社交媒体",
+            subtitle: "登录后输入一个明确问题，通过隔离的公开云浏览器收集可追溯到来源的证据。每个账号每天（UTC）最多运行 5 次。",
+            signInTitle: "登录后开始",
+            signInNote: "支持 Google、GitHub 或一次性邮箱链接，socai 不保存密码。",
+            google: "使用 Google 继续",
+            github: "使用 GitHub 继续",
+            emailLabel: "工作邮箱",
+            emailPlaceholder: "you@company.com",
+            emailSubmit: "发送一次性登录链接",
+            emailSent: "一次性登录链接已发送，请检查邮箱。",
+            workspaceTitle: "你想让 socai 调研什么？",
+            promptLabel: "调研问题",
+            promptPlaceholder: "对比跑者在 Instagram、TikTok、X 和 Reddit 如何讨论日常训练鞋，并引用公开帖子。",
+            submit: "开始调研",
+            cancel: "停止任务",
+            signOut: "退出登录",
+            liveTitle: "实时浏览器",
+            liveFrameTitle: "公开调研实时浏览器预览",
+            liveNote: "仅供查看。Web Demo 不挂载已登录账号、保存的凭据、邮箱或钱包，并会拒绝登录、写入和购买类请求。",
+            activityTitle: "执行动态",
+            resultTitle: "调研结果",
+            continueTitle: "需要登录后内容或更深的平台覆盖？",
+            continueText: "使用 Desktop 或 CLI 连接你自己的已登录 Chrome 继续调研。",
+            download: "下载 Desktop",
+            cli: "CLI 配置",
+        },
+        footer: { linksAria: "页脚链接", blog: "博客", connect: "连接教程", contact: "联系" },
+    },
+};
+const message = (path: string, language = defaultLanguage) => messageFor(messages, path, language);
+---
+
+<html lang="zh-CN" data-language={defaultLanguage}>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>{message("meta.title")}</title>
+        <meta name="description" content={message("meta.description")} data-i18n-content="meta.description" />
+        <meta name="robots" content="index, follow" />
+        <link rel="canonical" href={canonicalUrl} />
+        <meta property="og:type" content="website" />
+        <meta property="og:title" content={message("meta.title")} data-i18n-content="meta.title" />
+        <meta property="og:description" content={message("meta.description")} data-i18n-content="meta.description" />
+        <meta name="theme-color" content="#fafaf9" />
+        <meta http-equiv="Content-Security-Policy" content="frame-src 'self' https://live.browser-use.com" />
+        <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    </head>
+    <body>
+        <div class="site-shell">
+            <SiteHeader messages={messages} language={defaultLanguage} />
+            <main class="web-demo" data-web-demo data-api-base={apiBase}>
+                <header class="web-demo__head">
+                    <span class="page-eyebrow" data-i18n="demo.eyebrow">{message("demo.eyebrow")}</span>
+                    <h1 data-i18n="demo.title">{message("demo.title")}</h1>
+                    <p data-i18n="demo.subtitle">{message("demo.subtitle")}</p>
+                </header>
+
+                <p class="form-alert" data-demo-alert role="status" hidden></p>
+
+                <section class="auth-card" data-auth-panel aria-labelledby="sign-in-title">
+                    <h2 id="sign-in-title" data-i18n="demo.signInTitle">{message("demo.signInTitle")}</h2>
+                    <p data-i18n="demo.signInNote">{message("demo.signInNote")}</p>
+                    <div class="auth-card__providers">
+                        <a class="button button--secondary" data-provider="google" href={`${apiBase}/v1/web/auth/oauth/google/start`}>
+                            <span data-i18n="demo.google">{message("demo.google")}</span>
+                        </a>
+                        <a class="button button--secondary" data-provider="github" href={`${apiBase}/v1/web/auth/oauth/github/start`}>
+                            <span data-i18n="demo.github">{message("demo.github")}</span>
+                        </a>
+                    </div>
+                    <form class="stack-form" data-email-form data-provider="email">
+                        <label for="demo-email" data-i18n="demo.emailLabel">{message("demo.emailLabel")}</label>
+                        <div class="inline-form">
+                            <input id="demo-email" name="email" type="email" autocomplete="email" required data-i18n-placeholder="demo.emailPlaceholder" placeholder={message("demo.emailPlaceholder")} />
+                            <button class="button button--primary" type="submit" data-i18n="demo.emailSubmit">{message("demo.emailSubmit")}</button>
+                        </div>
+                        <p class="form-hint" data-email-status aria-live="polite"></p>
+                    </form>
+                </section>
+
+                <section class="research-workspace" data-workspace hidden aria-labelledby="workspace-title">
+                    <div class="workspace-toolbar">
+                        <div>
+                            <span data-account-name></span>
+                            <span class="quota-pill" data-quota></span>
+                        </div>
+                        <button class="text-button" type="button" data-sign-out data-i18n="demo.signOut">{message("demo.signOut")}</button>
+                    </div>
+                    <form class="research-form" data-research-form>
+                        <h2 id="workspace-title" data-i18n="demo.workspaceTitle">{message("demo.workspaceTitle")}</h2>
+                        <label for="research-prompt" data-i18n="demo.promptLabel">{message("demo.promptLabel")}</label>
+                        <textarea id="research-prompt" name="prompt" rows="5" minlength="10" maxlength="3000" required data-i18n-placeholder="demo.promptPlaceholder" placeholder={message("demo.promptPlaceholder")}></textarea>
+                        <div class="form-actions">
+                            <button class="button button--primary" type="submit" data-run-submit data-i18n="demo.submit">{message("demo.submit")}</button>
+                            <button class="button button--secondary" type="button" data-run-cancel hidden data-i18n="demo.cancel">{message("demo.cancel")}</button>
+                        </div>
+                    </form>
+
+                    <div class="research-grid" data-run-output hidden aria-busy="false">
+                        <section class="run-panel" data-live-panel hidden>
+                            <h3 data-i18n="demo.liveTitle">{message("demo.liveTitle")}</h3>
+                            <p data-i18n="demo.liveNote">{message("demo.liveNote")}</p>
+                            <div class="live-frame" inert>
+                                <iframe data-live-frame title={message("demo.liveFrameTitle")} data-i18n-title="demo.liveFrameTitle" tabindex="-1" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" allow="autoplay"></iframe>
+                            </div>
+                        </section>
+                        <section class="run-panel" aria-live="polite" aria-atomic="false">
+                            <h3 data-i18n="demo.activityTitle">{message("demo.activityTitle")}</h3>
+                            <ol class="activity-list" data-activity></ol>
+                        </section>
+                        <section class="run-panel run-panel--result" data-result-panel hidden aria-live="polite" aria-atomic="true" tabindex="-1">
+                            <h3 data-i18n="demo.resultTitle">{message("demo.resultTitle")}</h3>
+                            <pre data-result></pre>
+                        </section>
+                    </div>
+                </section>
+
+                <section class="continue-card">
+                    <div>
+                        <h2 data-i18n="demo.continueTitle">{message("demo.continueTitle")}</h2>
+                        <p data-i18n="demo.continueText">{message("demo.continueText")}</p>
+                    </div>
+                    <div class="form-actions">
+                        <a class="button button--primary" href="/download" data-i18n="demo.download">{message("demo.download")}</a>
+                        <a class="button button--secondary" href="/docs/installation/" data-i18n="demo.cli">{message("demo.cli")}</a>
+                    </div>
+                </section>
+            </main>
+            <SiteFooter messages={messages} language={defaultLanguage} currentYear={currentYear} />
+        </div>
+        <script id="site-i18n" type="application/json" set:html={JSON.stringify(messages)} />
+        <script>
+            import "../scripts/site.ts";
+            import "../scripts/demo.ts";
+        </script>
+    </body>
+</html>

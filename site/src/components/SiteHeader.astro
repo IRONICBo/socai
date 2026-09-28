@@ -12,6 +12,9 @@ const githubUrl = "/github";
 const contactPath = "/contact";
 
 const t = (path: string) => message(messages, path, language);
+const shared = language === "zh"
+    ? { platforms: "平台接入", demo: "网页体验", bookDemo: "预约演示" }
+    : { platforms: "platforms", demo: "web demo", bookDemo: "book a demo" };
 ---
 
 <header
@@ -58,6 +61,9 @@ const t = (path: string) => message(messages, path, language);
         data-i18n-aria-label="nav.linksAria"
     >
         <a class="nav-text-link" href="/docs/">docs</a>
+        <a class="nav-text-link" href="/platforms" data-i18n="nav.platforms">{shared.platforms}</a>
+        <a class="nav-text-link" href="/demo" data-i18n="nav.demo">{shared.demo}</a>
+        <a class="nav-text-link" href="/book-demo" data-i18n="nav.bookDemo">{shared.bookDemo}</a>
         <a class="nav-text-link" href="https://discord.gg/CpQdA7bwt8">discord</a>
         <a class="nav-text-link" href={contactPath} data-i18n="nav.contact"
             >{t("nav.contact")}</a

@@ -10,6 +10,10 @@
   },
   "rewrites": [
     {
+      "source": "/api/server/:path*",
+      "destination": "https://api.socai.work/:path*"
+    },
+    {
       "source": "/v1/events",
       "destination": "/api/telemetry"
     },

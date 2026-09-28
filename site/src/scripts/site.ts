@@ -13,6 +13,24 @@ const languageOptions = Array.from(
     document.querySelectorAll("[data-lang-option]"),
 );
 const supportedLanguages = Object.keys(dictionary);
+const sharedMessages = {
+    en: {
+        "nav.platforms": "platforms",
+        "nav.demo": "web demo",
+        "nav.bookDemo": "book a demo",
+        "footer.platforms": "platforms",
+        "footer.demo": "web demo",
+        "footer.bookDemo": "book a demo",
+    },
+    zh: {
+        "nav.platforms": "平台接入",
+        "nav.demo": "网页体验",
+        "nav.bookDemo": "预约演示",
+        "footer.platforms": "平台接入",
+        "footer.demo": "网页体验",
+        "footer.bookDemo": "预约演示",
+    },
+};
 const typewriter = document.querySelector("[data-typewriter]");
 const prefersReducedMotion = window.matchMedia(
     "(prefers-reduced-motion: reduce)",
@@ -26,7 +44,9 @@ const getMessage = (language, path) => {
     const value = path
         .split(".")
         .reduce((cursor, key) => cursor?.[key], table);
-    return typeof value === "string" ? value : "";
+    return typeof value === "string"
+        ? value
+        : sharedMessages[language]?.[path] || "";
 };
 
 const getValues = (element) => {
@@ -152,6 +172,8 @@ const applyLanguage = (language, shouldPersist = false) => {
         ["data-i18n-aria-label", "aria-label"],
         ["data-i18n-content", "content"],
         ["data-i18n-alt", "alt"],
+        ["data-i18n-placeholder", "placeholder"],
+        ["data-i18n-title", "title"],
     ].forEach(([marker, attribute]) => {
         document.querySelectorAll(`[${marker}]`).forEach((element) => {
             const path = element.getAttribute(marker);

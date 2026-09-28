@@ -45,6 +45,8 @@ const messages = {
             download: "download for macOS",
             downloadWindows: "download for Windows",
             github: "view on github",
+            demo: "try the web demo",
+            bookDemo: "book a demo",
         },
         preview: {
             sectionAria: "socai app preview",
@@ -122,6 +124,8 @@ const messages = {
             download: "下载 macOS 版",
             downloadWindows: "下载 Windows 版",
             github: "在 github 查看",
+            demo: "体验 Web Demo",
+            bookDemo: "预约演示",
         },
         preview: {
             sectionAria: "socai app 预览",
@@ -317,6 +321,19 @@ const socialImageAlt = message("meta.socialImageAlt");
                         aria-label={message("hero.actionsAria")}
                         data-i18n-aria-label="hero.actionsAria"
                     >
+                        <a class="button button--primary" href="/demo">
+                            <span data-i18n="hero.demo"
+                                >{message("hero.demo")}</span
+                            >
+                            <span class="button__external" aria-hidden="true"
+                                >→</span
+                            >
+                        </a>
+                        <a class="button button--secondary" href="/book-demo">
+                            <span data-i18n="hero.bookDemo"
+                                >{message("hero.bookDemo")}</span
+                            >
+                        </a>
                         <a
                             class="button button--primary"
                             href={downloadPath}
