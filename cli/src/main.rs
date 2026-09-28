@@ -1,3 +1,4 @@
+mod agent_integration;
 mod daemon;
 mod progress;
 mod task;
@@ -20,6 +21,7 @@ fn build_cli() -> clap::Command {
         .version(env!("CARGO_PKG_VERSION"))
         .after_help("External agents: call socai task begin with the user's original question once per new task. Subsequent site commands join the daemon's current task automatically.")
         .subcommand(task::command())
+        .subcommand(agent_integration::command())
         .subcommand(
             clap::Command::new("version")
                 .about("Print installed version and latest release status.")
@@ -253,7 +255,7 @@ async fn run_site_command(
 fn should_warn_for_update(subcommand: &str) -> bool {
     !matches!(
         subcommand,
-        "__daemon" | "update" | "version" | "status" | "config" | "pro" | "task"
+        "__daemon" | "update" | "version" | "status" | "config" | "pro" | "task" | "integrate"
     )
 }
 
@@ -295,6 +297,7 @@ async fn main() -> Result<()> {
         }
         "config" => run_config_command(sub_matches)?,
         "task" => task::run(sub_matches).await?,
+        "integrate" => agent_integration::run(sub_matches)?,
         "pro" => run_pro_command(sub_matches).await?,
         "stop" => {
             // Graceful shutdown reaches whoever owns the IPC endpoint; the

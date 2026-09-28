@@ -79,6 +79,18 @@ $installer = Join-Path $env:TEMP 'socai-install.ps1'; Invoke-WebRequest -UseBasi
 
 The installers download and verify the release archive, install socai at `~/.socai/bin/socai` on macOS or `%USERPROFILE%\.socai\bin\socai.exe` on Windows, and configure or explain the PATH update.
 
+Let a coding agent discover socai from ordinary requests such as “research how people discuss this product on Instagram and X”:
+
+```bash
+socai integrate install codex
+socai integrate install claude-code
+# Or install the same portable Skill for Codex, Claude Code, and Agent Skills hosts:
+socai integrate install all
+socai integrate status --json
+```
+
+Use `--scope project` to keep the integration inside the current repository. The installer writes only the `socai-social-research` Skill directory and refuses to replace different contents unless `--force` is explicit. The repository also exposes the same Skill as the `socai-social-research` plugin for marketplace-based installs.
+
 Start every new CLI task with `socai task begin`, passing the user’s original question, then run the platform commands. This workflow applies to all platforms:
 
 ```bash
@@ -131,6 +143,7 @@ All three interfaces share the same browser connection, site capabilities, and r
 | Platform | Research capabilities | Access |
 | --- | --- | --- |
 | RedNote (Xiaohongshu) | Search, authors, posts, comments and replies, media download, OCR, and transcription | Agent and structured CLI |
+| X | Search, profiles, posts, replies, media, and page-state diagnostics | Agent and structured CLI |
 | Douyin | Search, video details, authors, comments and replies, and media artifacts | Agent and structured CLI |
 | TikTok | Search, video details, author profiles, comments and replies, and video download | Agent and structured CLI |
 | Instagram | Keyword search, profiles, posts, reels, comments and replies, and playable video download | Agent and structured CLI |

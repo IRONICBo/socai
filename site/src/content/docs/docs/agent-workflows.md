@@ -5,6 +5,20 @@ description: Turn a market, creator, customer, or trend question into a bounded 
 
 Run `socai` without a subcommand when you want the agent to plan a multi-step investigation across platforms.
 
+## Install Agent discovery
+
+socai ships a portable social-research Skill whose description is visible to the agent before its full instructions are loaded. Install it once for the agent you use:
+
+```bash
+socai integrate install codex
+socai integrate install claude-code
+socai integrate install agents
+```
+
+`socai integrate install all` installs all three user-scoped copies. Add `--scope project` to write under the current repository instead, `--dry-run` to inspect destinations, or use `socai integrate status --json` to check whether every copy matches this CLI release.
+
+After installation, requests about social listening, creator or company research, post and comment evidence, trend validation, and cross-platform comparison can select socai automatically. Discovery never grants permission to like, follow, comment, reply, or publish; those actions still require an explicit target and content from the user.
+
 ## CLI task workflow
 
 For every new task using the structured CLI, first call `socai task begin` with

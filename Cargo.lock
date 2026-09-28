@@ -5383,6 +5383,7 @@ version = "0.6.1"
 dependencies = [
  "anyhow",
  "clap",
+ "dirs 5.0.1",
  "indicatif",
  "inquire",
  "libc",

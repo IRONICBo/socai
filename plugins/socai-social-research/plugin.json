@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "socai-social-research",
+  "version": "0.1.0",
+  "description": "Research public social-media content with the local socai CLI and the user's authenticated browser.",
+  "author": {
+    "name": "socai",
+    "url": "https://socai.io"
+  }
+}

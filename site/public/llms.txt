@@ -1,6 +1,6 @@
 # socai documentation
 
-> socai is a local agent that researches Xiaohongshu, Douyin, TikTok, Instagram, and LinkedIn through a signed-in Chrome session and returns source-linked evidence.
+> socai is a local agent and CLI that researches Xiaohongshu, X, Douyin, TikTok, Instagram, and LinkedIn through a signed-in Chrome session and returns structured, source-linked evidence. Coding agents can install its portable social-research Skill with `socai integrate install`.
 
 ## Start here
 
@@ -12,6 +12,7 @@
 ## Use socai
 
 - [Agent workflows](https://socai.io/docs/agent-workflows/)
+- [Install for Codex, Claude Code, and Agent Skills hosts](https://socai.io/docs/agent-workflows/#install-agent-discovery)
 - [CLI reference](https://socai.io/docs/cli/)
 - [Supported platforms](https://socai.io/docs/platforms/)
 - [Evidence and artifacts](https://socai.io/docs/evidence/)
