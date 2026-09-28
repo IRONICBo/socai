@@ -4,6 +4,51 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
+test('disabled-account route is a terminal access block, not a healthy page', () => {
+  const document = {
+    body: { innerText: 'Your account has been disabled' },
+    readyState: 'complete',
+    title: 'Instagram',
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const window = { getComputedStyle: () => ({ visibility: 'visible', display: 'block' }) };
+  const context = {
+    URL,
+    document,
+    location: {
+      href: 'https://www.instagram.com/accounts/disabled/',
+      pathname: '/accounts/disabled/',
+    },
+    window,
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'page_scripts.js'), 'utf8'), context);
+
+  const state = window.SocaiInstagramPageScripts.pageState();
+
+  assert.equal(state.ok, false);
+  assert.equal(state.status, 'account_disabled');
+  assert.equal(state.page_type, 'account_disabled');
+  assert.equal(state.access_blocked, true);
+  assert.equal(state.access_block_reason, 'account_disabled');
+  assert.equal(state.login_required, false);
+  assert.equal(state.blank_or_throttled, false);
+  assert.equal(state.hydrated, true);
+  for (const result of [
+    window.SocaiInstagramPageScripts.searchState({ query: 'running shoes' }),
+    window.SocaiInstagramPageScripts.openSearch(),
+    window.SocaiInstagramPageScripts.accountSuggestions({ query: 'running shoes' }),
+    window.SocaiInstagramPageScripts.profileDetail(),
+    window.SocaiInstagramPageScripts.postOpenState({ shortcode: 'Example123' }),
+    window.SocaiInstagramPageScripts.postDetail(),
+  ]) {
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'account_disabled');
+    assert.equal(result.access_blocked, true);
+    assert.equal(result.access_block_reason, 'account_disabled');
+  }
+});
+
 test('reel cover remains an image when no playable video URL is available', () => {
   const coverUrl = 'https://scontent.cdninstagram.com/reel-cover.jpg?token=fixture';
   const image = {

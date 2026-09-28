@@ -100,6 +100,7 @@
   function pageType() {
     const path = location.pathname;
     if (/^\/accounts\/(?:login|signup)/i.test(path)) return 'login';
+    if (/^\/accounts\/disabled(?:\/|$)/i.test(path)) return 'account_disabled';
     if (/^\/(?:challenge|accounts\/suspended|checkpoint)(?:\/|$)/i.test(path)) return 'challenge';
     if (SEARCH_PATH.test(path)) return 'search';
     if (POST_PATH.test(path)) return postIdentity(location.href).kind;
@@ -119,6 +120,20 @@
       'iframe[title*="captcha" i]',
       '[data-testid*="challenge" i]',
     ]);
+  }
+
+  function accountDisabled() {
+    return /^\/accounts\/disabled(?:\/|$)/i.test(location.pathname);
+  }
+
+  function accountDisabledResult(extra) {
+    return {
+      ok: false,
+      status: 'account_disabled',
+      access_blocked: true,
+      access_block_reason: 'account_disabled',
+      ...(extra || {}),
+    };
   }
 
   function loginRoute() {
@@ -354,6 +369,16 @@
   }
 
   function searchState(arg) {
+    if (accountDisabled()) {
+      return accountDisabledResult({
+        url: location.href,
+        canonical_url: canonicalPageUrl(),
+        expected_query: cleanText(arg && arg.query || '', 1000),
+        query: '',
+        result_count: 0,
+        hydrated: document.readyState !== 'loading',
+      });
+    }
     const expected = cleanText(arg && arg.query || '', 1000);
     const actual = currentSearchQuery();
     const challenge = challengeRequired();
@@ -396,6 +421,7 @@
   function setSearchQuery(arg) {
     const query = cleanText(arg && arg.query || '', 1000);
     if (!query) return { ok: false, status: 'invalid_query', query: '' };
+    if (accountDisabled()) return accountDisabledResult({ query: '' });
     if (loginRoute()) return { ok: false, status: 'login_required', query: '' };
     const input = searchInput();
     if (!input) return { ok: false, status: 'search_input_not_found', query: '' };
@@ -429,6 +455,7 @@
   }
 
   function openSearch() {
+    if (accountDisabled()) return accountDisabledResult();
     if (loginRoute()) return { ok: false, status: 'login_required' };
     if (searchInput()) return { ok: true, already_open: true, status: 'search_open' };
     const control = searchNavControl();
@@ -487,6 +514,9 @@
 
   function accountSuggestions(arg) {
     const expected = cleanText(arg && arg.query || '', 1000);
+    if (accountDisabled()) {
+      return accountDisabledResult({ query: '', expected_query: expected, count: 0, accounts: [] });
+    }
     if (loginRoute()) return { ok: false, status: 'login_required', query: '', count: 0, accounts: [] };
     const input = searchInput();
     if (!input) return { ok: false, status: 'search_input_not_found', query: '', count: 0, accounts: [] };
@@ -748,6 +778,16 @@
 
   function postOpenState(arg) {
     const expected = cleanText(arg && (arg.shortcode || arg.id) || '', 200);
+    if (accountDisabled()) {
+      return accountDisabledResult({
+        expected_shortcode: expected,
+        shortcode: '',
+        kind: '',
+        url: location.href,
+        has_dialog: false,
+        content_ready: false,
+      });
+    }
     const identity = activePostIdentity();
     const dialog = activePostDialog(identity);
     const matches = !!identity && (!expected || identity.shortcode === expected);
@@ -840,6 +880,9 @@
   function profileDetail() {
     const username = profileUsername(location.href);
     const state = pageState();
+    if (state.access_blocked) {
+      return accountDisabledResult({ url: location.href, page_state: state });
+    }
     if (!username) {
       return { ok: false, status: 'not_profile', url: location.href, page_state: state };
     }
@@ -1374,6 +1417,9 @@
       ? candidateUrl
       : instagramUrl(location.href);
     const state = pageState();
+    if (state.access_blocked) {
+      return accountDisabledResult({ url: location.href, page_state: state });
+    }
     if (!identity) {
       return { ok: false, status: 'not_post', url: location.href, page_state: state };
     }
@@ -1431,15 +1477,21 @@
 
   function pageState() {
     const bodyLength = cleanText(document.body, 200000).length;
+    const disabled = accountDisabled();
     const challenge = challengeRequired();
     const limited = rateLimited();
     const login = loginRoute();
     const loginGate = loginGatePresent();
     const searchCount = searchSurfaceActive() ? searchResultLinks().length : 0;
     const contentAvailable = hasPostContent() || hasProfileContent() || searchCount > 0;
-    const hydrated = document.readyState !== 'loading' && (bodyLength > 20 || challenge || limited);
+    const hydrated = document.readyState !== 'loading' && (bodyLength > 20 || disabled || challenge || limited);
     return {
-      ok: !challenge && !limited && !login && !loginGate,
+      ok: !disabled && !challenge && !limited && !login && !loginGate,
+      status: disabled ? 'account_disabled'
+        : login || loginGate ? 'login_required'
+          : challenge ? 'challenge_required'
+            : limited ? 'rate_limited'
+              : 'ready',
       site: 'instagram',
       url: location.href,
       canonical_url: canonicalPageUrl(),
@@ -1450,6 +1502,8 @@
       authenticated: authenticated(),
       login_required: login || loginGate,
       login_gate_present: loginGate,
+      access_blocked: disabled,
+      access_block_reason: disabled ? 'account_disabled' : '',
       challenge_required: challenge,
       rate_limited: limited,
       content_available: contentAvailable,
@@ -1457,7 +1511,8 @@
       search_query: searchSurfaceActive() ? currentSearchQuery() : '',
       profile_username: profileUsername(location.href),
       hydrated,
-      blank_or_throttled: document.readyState === 'loading' || (bodyLength < 20 && !challenge && !limited),
+      blank_or_throttled: document.readyState === 'loading'
+        || (bodyLength < 20 && !disabled && !challenge && !limited),
     };
   }
 

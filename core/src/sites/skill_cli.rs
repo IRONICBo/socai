@@ -147,6 +147,13 @@ pub fn gate_reason(state: &Value) -> Option<&'static str> {
     if state.get("rate_limited").and_then(Value::as_bool) == Some(true) {
         return Some("rate_limited");
     }
+    if state.get("access_blocked").and_then(Value::as_bool) == Some(true) {
+        return state
+            .get("access_block_reason")
+            .and_then(Value::as_str)
+            .and_then(classified_gate)
+            .or(Some("access_blocked"));
+    }
     None
 }
 
@@ -164,6 +171,8 @@ fn classified_gate(value: &str) -> Option<&'static str> {
         "login_required" => Some("login_required"),
         "challenge_required" => Some("challenge_required"),
         "rate_limited" => Some("rate_limited"),
+        "account_disabled" => Some("account_disabled"),
+        "access_blocked" => Some("access_blocked"),
         _ => None,
     }
 }
