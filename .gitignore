@@ -31,6 +31,7 @@ target/
 
 # Packaged marketplace uploads (regenerate with plugins/workbuddy/build.sh)
 plugins/workbuddy/dist/
+plugins/socai-social-research/dist/
 
 # Skill deliverables written into whatever workspace the skill runs in
 socai-reports/

@@ -1,21 +1,33 @@
 {
   "name": "socai-social-research",
-  "version": "0.1.0",
-  "description": "Research public social-media content with the local socai CLI and the user's authenticated browser.",
+  "version": "0.2.0+codex.20260929041822",
+  "description": "Research public posts, comments, creators, and trends on Xiaohongshu, X, Instagram, LinkedIn, TikTok, and Douyin with the local socai CLI and the user's authenticated Chrome session.",
   "author": {
     "name": "socai",
     "url": "https://socai.io"
   },
   "skills": "./skills/",
   "interface": {
-    "displayName": "socai social research",
-    "shortDescription": "Research social platforms through your browser.",
-    "longDescription": "Use Socai for evidence-backed research across Xiaohongshu, X, Instagram, LinkedIn, TikTok, and Douyin.",
+    "displayName": "Socai Social Research",
+    "shortDescription": "Research social platforms",
+    "longDescription": "Research public posts, comments, creators, and trends on Xiaohongshu (XHS/RedNote), Douyin, TikTok, Instagram, LinkedIn, and X through the locally installed Socai CLI and the user's authenticated Chrome session. Designed for local shell-enabled agent workflows. Socai social-platform research is read-only and returns source-linked evidence.",
     "developerName": "socai",
     "category": "Productivity",
-    "capabilities": ["social research", "browser automation", "structured evidence"],
+    "capabilities": [
+      "Research Xiaohongshu (XHS/RedNote) posts and comments",
+      "Analyze Douyin and TikTok videos, authors, and audience responses",
+      "Research Instagram, LinkedIn, and X profiles and posts",
+      "Return source-linked evidence for social listening and competitor research",
+      "Use the local Socai CLI and the user's authenticated Chrome session"
+    ],
+    "websiteURL": "https://socai.io/docs/agent-workflows/",
+    "brandColor": "#000000",
+    "composerIcon": "./assets/logo.svg",
+    "logo": "./assets/logo.svg",
     "defaultPrompt": [
-      "Research this topic across the relevant social platforms with socai and cite the source URLs."
+      "Research Xiaohongshu comments about Adidas running shoes and cite every source.",
+      "Compare TikTok and Instagram reactions to this product with source links.",
+      "Find recurring customer complaints across the relevant social platforms."
     ]
   }
 }

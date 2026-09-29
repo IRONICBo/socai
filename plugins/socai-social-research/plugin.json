@@ -1,10 +1,24 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "socai-social-research",
-  "version": "0.1.0",
-  "description": "Research public social-media content with the local socai CLI and the user's authenticated browser.",
+  "version": "0.2.0",
+  "description": "Research public posts, comments, creators, and trends on Xiaohongshu, X, Instagram, LinkedIn, TikTok, and Douyin with the local socai CLI and the user's authenticated Chrome session.",
   "author": {
     "name": "socai",
     "url": "https://socai.io"
-  }
+  },
+  "homepage": "https://socai.io/docs/agent-workflows/",
+  "repository": "https://github.com/socai-io/socai",
+  "license": "Apache-2.0",
+  "keywords": [
+    "xiaohongshu",
+    "xhs",
+    "rednote",
+    "social-listening",
+    "social-media-research",
+    "tiktok",
+    "instagram",
+    "linkedin",
+    "douyin"
+  ]
 }
