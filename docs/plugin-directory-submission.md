@@ -37,36 +37,41 @@ python3 plugins/socai-social-research/scripts/build_skills_only_zip.py
 python3 plugins/socai-social-research/scripts/build_host_packages.py
 ```
 
-The generated archives are written to `plugins/socai-social-research/dist/`. The skills-only Agent Plugin excludes marketplace files, local cache metadata, MCP configuration, and host compatibility manifests. Separate host archives put the required CodeBuddy, Gemini, Kimi, or Trae entry file at the archive root while reusing the same portable Skill content.
+The generated archives are written to `plugins/socai-social-research/dist/`. The skills-only Agent Plugin excludes marketplace files, local cache metadata, MCP configuration, and non-Codex host manifests; it retains `.codex-plugin/plugin.json` as a compatibility fallback. Separate host archives put the required CodeBuddy, Gemini, Kimi, or Trae entry file at the archive root while reusing the same portable Skill content.
 
-## OpenAI directory submission
+## OpenAI universal plugin directory submission
 
-1. Use an OpenAI organization with Apps Management write access and a verified `socai` business identity.
-2. Open the [OpenAI plugin submission portal](https://platform.openai.com/plugins), then select **Create plugin** and **Skills only**.
-3. Upload `socai-social-research-skills-only.zip`.
-4. Confirm that the normalized manifest contains no MCP or App configuration.
-5. Complete the public listing, availability, policy attestations, and skill scan.
-6. Because the core workflow requires local shell, application, and browser access, contact the OpenAI partner/review channel before final submission and state that unsupported web-only hosts fail closed with an installation/runtime prerequisite.
-7. Submit for review only after the clean-environment tests below pass.
+OpenAI now publishes one plugin listing to the universal directory shared by ChatGPT and Codex. The package uses the portable Agent Plugins manifest at root `plugin.json`; its OpenAI-specific presentation lives in `extensions.com.openai`. `.codex-plugin/plugin.json` remains only as a compatibility fallback.
 
-The four listing URLs are optional for a ZIP-uploaded skills-only plugin, but they are required for a future remote MCP submission and improve publisher readiness. As of 2026-09-29, `https://socai.io/privacy`, `https://socai.io/terms`, and `https://socai.io/support` return 404. Publish and review the appropriate legal and support pages before adding those fields; do not substitute unrelated project documentation.
+1. Use an OpenAI organization owner account, or an organization member with Apps Management Write, and complete the `socai` individual or business identity verification.
+2. Run the build and clean-environment validation below. The submitted archive is `plugins/socai-social-research/dist/socai-social-research-skills-only.zip`.
+3. Open the [OpenAI Plugins dashboard](https://platform.openai.com/plugins), select **Upload new or existing plugin**, choose the verified developer identity, and upload the ZIP.
+4. Wait for Metadata & Skills checks. Correct any required findings in source, rebuild the ZIP, and upload the new `0.5.0` package.
+5. Confirm that the normalized package is skills-only: it contains no MCP server, app mapping, lifecycle hook, credential, or user browser data.
+6. Submit the validated draft for review and complete the policy attestations. After approval, explicitly select **Publish plugin**.
+
+The source package is ready for steps 2–5. Steps 1, 3, 6, and final publication require the verified Socai OpenAI organization account in the dashboard and therefore cannot be completed from a repository checkout alone.
+
+The plugin requires a shell-enabled local runtime, an installed Socai CLI, and the user's authenticated Chrome session. Unsupported hosts must fail closed with the installation/runtime prerequisite. This dependency is stated in the skill itself; no MCP server or hidden remote execution path is claimed.
+
+Privacy, terms, and support URLs are intentionally omitted from the manifest until the corresponding public pages are deployed and reviewed. Do not add 404 or unrelated documentation URLs merely to fill optional metadata.
 
 Suggested listing:
 
 - Display name: `Socai Social Research`
-- Short description: `Research social platforms`
+- Short description: `Research six social platforms`
 - Category: `Productivity`
 - Website: `https://socai.io/docs/agent-workflows/`
 - Repository: `https://github.com/socai-io/socai`
 
-Reviewer fixture required for every positive case:
+Clean-environment acceptance fixture for every positive case:
 
-- a local, shell-enabled Codex environment accepted by the OpenAI partner/review contact;
+- a local, shell-enabled Codex environment;
 - the current released Socai CLI installed and reachable as `socai`;
 - supported Chrome with dedicated reviewer-owned test accounts already authenticated for the platforms named by the case, with no MFA, SMS, email confirmation, or private-network dependency during the run;
 - permission for read-only access to public pages from those accounts.
 
-Do not submit the draft until OpenAI confirms that this local reviewer fixture is acceptable. Never provide employee or production-user sessions as review credentials.
+Never provide employee or production-user sessions as review credentials. If the dashboard requests reviewer credentials or a walkthrough despite the skills-only package, use a dedicated test profile with sample data and no MFA, SMS, email, or private-network dependency during the test.
 
 Positive review cases:
 

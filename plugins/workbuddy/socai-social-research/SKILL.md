@@ -9,7 +9,7 @@ description: >
 description_zh: 使用本机 Socai 与已登录的 Chrome 调研六个社交平台的公开帖子、评论、账号和趋势，输出可溯源的跨平台洞察。
 description_en: Researches public posts, comments, creators, companies, and trends across Xiaohongshu, Douyin, TikTok, Instagram, LinkedIn, and X/Twitter through the local Socai CLI and authenticated Chrome session.
 category: writing
-version: 0.4.0
+version: 0.5.0
 author: socai
 allowed-tools: Bash,Read,Write,Glob,Grep
 ---

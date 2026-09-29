@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "socai-social-research",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Research public posts, comments, creators, and trends on Xiaohongshu, Douyin, TikTok, Instagram, LinkedIn, and X/Twitter with the local socai CLI and the user's authenticated Chrome session.",
   "author": {
     "name": "socai",
@@ -25,5 +25,28 @@
     "douyin",
     "x",
     "twitter"
-  ]
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Socai Social Research",
+        "shortDescription": "Research six social platforms",
+        "longDescription": "Research public posts, comments, creators, and trends on Xiaohongshu (XHS/RedNote/Redbook), Douyin, TikTok, Instagram, LinkedIn, and X (Twitter) through the locally installed Socai CLI and the user's authenticated Chrome session. Socai social-platform research is read-only and returns source-linked evidence.",
+        "developerName": "socai",
+        "category": "Productivity",
+        "capabilities": [
+          "Read"
+        ],
+        "websiteURL": "https://socai.io/docs/agent-workflows/",
+        "brandColor": "#000000",
+        "composerIcon": "./assets/logo.svg",
+        "logo": "./assets/logo.svg",
+        "defaultPrompt": [
+          "Research Xiaohongshu comments about Adidas running shoes and cite every source.",
+          "Compare TikTok and Instagram reactions to this product with source links.",
+          "Compare LinkedIn and X/Twitter discussion about this company announcement."
+        ]
+      }
+    }
+  }
 }
