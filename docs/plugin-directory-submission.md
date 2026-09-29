@@ -2,7 +2,7 @@
 
 ## Scope
 
-Submit `socai-social-research` as a skills-only plugin. It deliberately has no MCP server. The skill uses an already installed local Socai CLI and the user's authenticated Chrome session.
+Submit `socai-social-research` as a skills-only plugin. It deliberately has no MCP server. The skill uses an already installed local Socai CLI and the user's authenticated Chrome session. The public listing and reviewer cases cover all six supported platforms: Xiaohongshu (XHS/RedNote/Redbook), Douyin, TikTok, Instagram, LinkedIn, and X (Twitter).
 
 Supported execution surfaces:
 
@@ -74,7 +74,7 @@ The same repository contains `.claude-plugin/plugin.json` and the portable skill
 
 Validate with a clean host where Socai is not named in the prompt:
 
-1. Search the platform plugin directory for `Xiaohongshu`, `XHS`, `RedNote`, `social listening`, and `social media research`.
+1. Search the platform plugin directory for `Xiaohongshu`, `XHS`, `RedNote`, `Redbook`, `Douyin`, `TikTok`, `Instagram`, `LinkedIn`, `X`, `Twitter`, `social listening`, `consumer insights`, `competitor research`, and `social media research`.
 2. Confirm that Socai appears for relevant data-research queries and does not rank for social-content creation.
 3. Install the plugin, start a new conversation, and run all five positive and three negative cases.
 4. Repeat once with Socai installed and connected, and once without the local CLI, to validate both success and fail-closed behavior.

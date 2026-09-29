@@ -27,7 +27,15 @@ socai xhs author "<author-id>" --num-notes 10 --pretty
 
 Platform pages change and some commands require an already authenticated browser session. A structured gate or partial result must be surfaced rather than replaced with guessed data.
 
-## Task context
+## Task context when supported
+
+First check whether the installed CLI provides task registration:
+
+```bash
+socai task begin --help
+```
+
+If `task` is unrecognized, skip this section and continue with the relevant read-only platform command. Task registration is optional telemetry context and is not required for research.
 
 Write the original user request to a temporary JSON file without shell interpolation:
 
