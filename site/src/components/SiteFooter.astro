@@ -18,8 +18,8 @@ const contactPath = "/contact";
 
 const t = (path: string) => message(messages, path, language);
 const shared = language === "zh"
-    ? { platforms: "平台接入", demo: "网页体验", bookDemo: "预约演示" }
-    : { platforms: "platforms", demo: "web demo", bookDemo: "book a demo" };
+    ? { platforms: "平台接入", demo: "网页体验", bookDemo: "预约演示", privacy: "隐私", terms: "条款", support: "支持" }
+    : { platforms: "platforms", demo: "web demo", bookDemo: "book a demo", privacy: "privacy", terms: "terms", support: "support" };
 ---
 
 <footer class="site-footer">
@@ -33,6 +33,9 @@ const shared = language === "zh"
         <a href="/platforms" data-i18n="footer.platforms">{shared.platforms}</a>
         <a href="/demo" data-i18n="footer.demo">{shared.demo}</a>
         <a href="/book-demo" data-i18n="footer.bookDemo">{shared.bookDemo}</a>
+        <a href="/privacy" data-i18n="footer.privacy">{shared.privacy}</a>
+        <a href="/terms" data-i18n="footer.terms">{shared.terms}</a>
+        <a href="/support" data-i18n="footer.support">{shared.support}</a>
         <a href="https://discord.gg/CpQdA7bwt8">discord</a>
         <a href={blogPath} data-i18n="footer.blog">{t("footer.blog")}</a>
         <a href={connectPath} data-i18n="footer.connect">{t("footer.connect")}</a

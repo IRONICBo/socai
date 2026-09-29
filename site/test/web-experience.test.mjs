@@ -79,3 +79,30 @@ test("platform page separates structured connectors from public browser research
   assert.match(page, /不等同于已承诺稳定结构的 socai Connector/u);
   assert.match(page, /isolated public browser without a signed-in profile/u);
 });
+
+test("privacy, terms, and support pages document the demo boundary", async () => {
+  const [privacy, terms, support, footer, runtime] = await Promise.all([
+    read("src/pages/privacy.astro"),
+    read("src/pages/terms.astro"),
+    read("src/pages/support.astro"),
+    read("src/components/SiteFooter.astro"),
+    read("src/scripts/site.ts"),
+  ]);
+
+  assert.match(privacy, /调研任务记录默认保留 7 天/u);
+  assert.match(privacy, /预约记录默认最长保留 90 天/u);
+  assert.match(privacy, /24 小时后丢弃每日访客标识/u);
+  assert.match(terms, /每天（UTC）最多提交 5 次/u);
+  assert.match(terms, /只读边界/u);
+  assert.match(support, /请求删除 Browser Use 或 Kernel 资源/u);
+  for (const path of ["docs/installation/", "connect", "demo", "book-demo"]) {
+    assert.match(support, new RegExp(`href: "/${path}"`, "u"));
+  }
+  assert.match(support, /https:\/\/github\.com\/socai-io\/socai\/issues/u);
+  assert.match(support, /https:\/\/discord\.gg\/CpQdA7bwt8/u);
+  for (const path of ["privacy", "terms", "support"]) {
+    assert.match(footer, new RegExp(`href="/${path}"`, "u"));
+    assert.match(footer, new RegExp(`data-i18n="footer\\.${path}"`, "u"));
+    assert.match(runtime, new RegExp(`"footer\\.${path}"`, "u"));
+  }
+});

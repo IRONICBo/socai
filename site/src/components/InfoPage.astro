@@ -1,0 +1,74 @@
+---
+import "../styles/global.css";
+import SiteHeader from "./SiteHeader.astro";
+import SiteFooter from "./SiteFooter.astro";
+import { message as messageFor } from "../lib/i18n";
+
+interface Props {
+    canonicalPath: string;
+    messages: Record<string, Record<string, unknown>>;
+    pageKey: string;
+    sectionIds: string[];
+    sectionLinks?: Record<string, Array<{ href: string; labelKey: string }>>;
+}
+
+const { canonicalPath, messages, pageKey, sectionIds, sectionLinks = {} } = Astro.props;
+const defaultLanguage = "zh";
+const currentYear = new Date().getFullYear();
+const canonicalUrl = `https://socai.io${canonicalPath}`;
+const message = (path: string, language = defaultLanguage) =>
+    messageFor(messages, path, language);
+const key = (suffix: string) => `${pageKey}.${suffix}`;
+---
+
+<html lang="zh-CN" data-language={defaultLanguage}>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>{message("meta.title")}</title>
+        <meta name="description" content={message("meta.description")} data-i18n-content="meta.description" />
+        <meta name="robots" content="index, follow" />
+        <link rel="canonical" href={canonicalUrl} />
+        <meta property="og:type" content="website" />
+        <meta property="og:url" content={canonicalUrl} />
+        <meta property="og:title" content={message("meta.title")} data-i18n-content="meta.title" />
+        <meta property="og:description" content={message("meta.description")} data-i18n-content="meta.description" />
+        <meta name="theme-color" content="#fafaf9" />
+        <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    </head>
+    <body>
+        <div class="site-shell">
+            <SiteHeader messages={messages} language={defaultLanguage} />
+            <main class="info-page">
+                <header class="info-page__head">
+                    <span class="page-eyebrow" data-i18n={key("eyebrow")}>{message(key("eyebrow"))}</span>
+                    <h1 data-i18n={key("title")}>{message(key("title"))}</h1>
+                    <p data-i18n={key("intro")}>{message(key("intro"))}</p>
+                    <p class="info-page__updated" data-i18n={key("updated")}>{message(key("updated"))}</p>
+                </header>
+                <div class="info-page__sections">
+                    {sectionIds.map((sectionId) => (
+                        <section>
+                            <h2 data-i18n={key(`sections.${sectionId}.title`)}>{message(key(`sections.${sectionId}.title`))}</h2>
+                            <p data-i18n={key(`sections.${sectionId}.text`)}>{message(key(`sections.${sectionId}.text`))}</p>
+                            {sectionLinks[sectionId]?.length > 0 && (
+                                <nav class="info-page__links" aria-label={message(key(`sections.${sectionId}.title`))}>
+                                    {sectionLinks[sectionId].map((link) => (
+                                        <a href={link.href} data-i18n={key(link.labelKey)}>
+                                            {message(key(link.labelKey))}
+                                        </a>
+                                    ))}
+                                </nav>
+                            )}
+                        </section>
+                    ))}
+                </div>
+            </main>
+            <SiteFooter messages={messages} language={defaultLanguage} currentYear={currentYear} />
+        </div>
+        <script id="site-i18n" type="application/json" set:html={JSON.stringify(messages)} />
+        <script>
+            import "../scripts/site.ts";
+        </script>
+    </body>
+</html>

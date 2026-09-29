@@ -19,6 +19,9 @@ const sharedMessages = {
         "footer.platforms": "platforms",
         "footer.demo": "web demo",
         "footer.bookDemo": "book a demo",
+        "footer.privacy": "privacy",
+        "footer.terms": "terms",
+        "footer.support": "support",
     },
     zh: {
         "nav.platforms": "平台接入",
@@ -27,6 +30,9 @@ const sharedMessages = {
         "footer.platforms": "平台接入",
         "footer.demo": "网页体验",
         "footer.bookDemo": "预约演示",
+        "footer.privacy": "隐私",
+        "footer.terms": "条款",
+        "footer.support": "支持",
     },
 };
 const typewriter = document.querySelector("[data-typewriter]");

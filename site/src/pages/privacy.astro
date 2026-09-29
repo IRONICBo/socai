@@ -1,0 +1,54 @@
+---
+import InfoPage from "../components/InfoPage.astro";
+
+const messages = {
+    en: {
+        meta: { title: "socai · privacy", description: "How socai handles website accounts, demo requests, research runs, and cloud browser sessions." },
+        nav: { primaryAria: "primary navigation", homeAria: "socai home", linksAria: "site links", github: "github", contact: "contact", languageAria: "language" },
+        privacy: {
+            eyebrow: "PRIVACY",
+            title: "Privacy at socai",
+            intro: "This notice covers the socai.io website, Web Demo, and Book a Demo form. It does not replace the policies of social platforms or cloud-browser providers you choose to use.",
+            updated: "Last updated: September 30, 2026",
+            sections: {
+                account: { title: "Account information", text: "Google and GitHub sign-in use the provider's verified email. Email sign-in uses a one-time link. socai does not receive or store your provider password." },
+                analytics: { title: "Website analytics", text: "Public pages use Vercel Web Analytics to understand aggregate page usage and performance. Vercel states that it does not use cookies for this product, stores anonymized data, and discards the daily visitor identifier after 24 hours. Aggregate reporting availability follows the project's Vercel plan and provider policy." },
+                research: { title: "Research runs", text: "The Web Demo stores the question, selected platform, status, activity, result, and operational identifiers needed to run and diagnose the task. Demo run records are retained for seven days by default." },
+                browser: { title: "Cloud browser sessions", text: "A research run may use Browser Use or Kernel. Live-view and CDP addresses stay server-side or are shown only to the signed-in user. Terminal, cancelled, and expired runs request browser deletion; provider processing remains subject to the provider's terms." },
+                requests: { title: "Demo requests", text: "Book a Demo collects the name, work email, company, and use case you submit so the team can respond. Requests are retained for up to ninety days by default." },
+                control: { title: "Your choices", text: "Use a dedicated test account for any platform login shown inside the demo browser. You can stop a run at any time, sign out, or contact socai through the support page about access or deletion requests." },
+                analyticsPolicy: "Vercel analytics privacy information",
+            },
+        },
+        footer: { linksAria: "footer links", blog: "blog", connect: "connect guide", contact: "contact" },
+    },
+    zh: {
+        meta: { title: "socai · 隐私说明", description: "了解 socai 如何处理网站账号、演示预约、调研任务和云浏览器会话。" },
+        nav: { primaryAria: "主导航", homeAria: "socai 首页", linksAria: "站点链接", github: "github", contact: "联系", languageAria: "语言" },
+        privacy: {
+            eyebrow: "隐私说明",
+            title: "socai 如何处理你的数据",
+            intro: "本说明适用于 socai.io 网站、Web Demo 和预约演示表单，不替代你选择使用的社交平台或云浏览器服务商政策。",
+            updated: "最后更新：2026 年 9 月 30 日",
+            sections: {
+                account: { title: "账号信息", text: "Google 和 GitHub 登录只使用服务商返回的已验证邮箱；邮箱登录使用一次性链接。socai 不接收或保存你的服务商密码。" },
+                analytics: { title: "网站分析", text: "公开页面使用 Vercel Web Analytics 了解汇总的页面访问与性能情况。Vercel 说明该产品不使用 Cookie、保存匿名化数据，并在 24 小时后丢弃每日访客标识；汇总报表的可用期限以项目的 Vercel 套餐和服务商政策为准。" },
+                research: { title: "调研任务", text: "Web Demo 会保存完成任务和故障诊断所需的问题、所选平台、状态、执行动态、结果和运行标识。调研任务记录默认保留 7 天。" },
+                browser: { title: "云浏览器会话", text: "调研任务可能使用 Browser Use 或 Kernel。实时浏览器与 CDP 地址仅保留在服务端或展示给当前登录用户。任务完成、取消或过期后会请求删除浏览器资源；服务商处理仍受其自身条款约束。" },
+                requests: { title: "演示预约", text: "预约演示会收集你主动提交的姓名、工作邮箱、公司和使用场景，用于后续联系。预约记录默认最长保留 90 天。" },
+                control: { title: "你的选择", text: "如果需要在演示浏览器中登录平台，请使用专用测试账号。你可以随时停止任务、退出登录，或通过支持页面提出访问与删除请求。" },
+                analyticsPolicy: "Vercel 分析隐私说明",
+            },
+        },
+        footer: { linksAria: "页脚链接", blog: "博客", connect: "连接教程", contact: "联系" },
+    },
+};
+---
+
+<InfoPage
+    canonicalPath="/privacy"
+    messages={messages}
+    pageKey="privacy"
+    sectionIds={["account", "analytics", "research", "browser", "requests", "control"]}
+    sectionLinks={{ analytics: [{ href: "https://vercel.com/docs/analytics/privacy-policy", labelKey: "sections.analyticsPolicy" }] }}
+/>

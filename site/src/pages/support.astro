@@ -1,0 +1,76 @@
+---
+import InfoPage from "../components/InfoPage.astro";
+
+const messages = {
+    en: {
+        meta: { title: "socai · support", description: "Get help with socai Desktop, CLI, platform login, Web Demo, and Book a Demo." },
+        nav: { primaryAria: "primary navigation", homeAria: "socai home", linksAria: "site links", github: "github", contact: "contact", languageAria: "language" },
+        support: {
+            eyebrow: "SUPPORT",
+            title: "Get help with socai",
+            intro: "Start with the installation and connection guides. For a reproducible problem, include the socai version, platform, time, and the exact non-sensitive error state.",
+            updated: "Support channels checked: September 30, 2026",
+            sections: {
+                docs: { title: "Installation and connection", text: "Use the installation guide for CLI setup and the connection guide for Chrome. The Web Demo is available when the public deployment is enabled." },
+                login: { title: "Platform login or verification", text: "Complete login only inside the browser session you intentionally selected. Use a dedicated test account. A login-required or challenge-required result is an access gate, not an empty research result." },
+                browser: { title: "Stopping a cloud run", text: "Use Stop run in the control page. socai cancels the task, clears the live URL, terminates its CLI child process, and requests deletion of the Browser Use or Kernel resource. A transient deletion failure is retried by the server." },
+                report: { title: "Report a problem", text: "Use GitHub Issues for reproducible bugs or the Contact page and Discord for product questions. Never post API keys, cookies, CDP URLs, live-view URLs, or account credentials." },
+                demo: { title: "Talk to the team", text: "Request a walkthrough built around your platforms, evidence needs, access constraints, and team workflow." },
+                installationLink: "Installation guide",
+                connectionLink: "Chrome connection guide",
+                webDemoLink: "Open Web Demo",
+                bookDemoLink: "Book a demo",
+                issuesLink: "GitHub Issues",
+                contactLink: "Contact",
+                discordLink: "Discord",
+            },
+        },
+        footer: { linksAria: "footer links", blog: "blog", connect: "connect guide", contact: "contact" },
+    },
+    zh: {
+        meta: { title: "socai · 支持", description: "获取 socai Desktop、CLI、平台登录、Web Demo 和预约演示的使用帮助。" },
+        nav: { primaryAria: "主导航", homeAria: "socai 首页", linksAria: "站点链接", github: "github", contact: "联系", languageAria: "语言" },
+        support: {
+            eyebrow: "支持",
+            title: "获取 socai 使用帮助",
+            intro: "请先查看安装和连接指南。反馈可复现问题时，请提供 socai 版本、平台、发生时间和不含敏感信息的准确错误状态。",
+            updated: "支持渠道确认时间：2026 年 9 月 30 日",
+            sections: {
+                docs: { title: "安装与连接", text: "CLI 安装请查看安装指南，Chrome 接入请查看连接指南。公开部署启用后即可使用 Web Demo。" },
+                login: { title: "平台登录或安全验证", text: "只在你主动选择的浏览器会话中完成登录，并使用专用测试账号。login_required 或 challenge_required 表示访问门槛，不代表调研结果为空。" },
+                browser: { title: "停止云端任务", text: "在控制页选择“停止任务”。socai 会取消任务、清除实时地址、终止 CLI 子进程，并请求删除 Browser Use 或 Kernel 资源；临时删除失败会由服务端重试。" },
+                report: { title: "反馈问题", text: "可通过 GitHub Issues 提交可复现 bug，也可使用联系页面或 Discord 咨询产品问题。禁止公开 API key、Cookie、CDP 地址、实时浏览器地址或账号凭据。" },
+                demo: { title: "联系团队", text: "预约围绕平台、证据需求、访问限制和团队工作流的产品演示。" },
+                installationLink: "安装指南",
+                connectionLink: "Chrome 连接指南",
+                webDemoLink: "打开 Web Demo",
+                bookDemoLink: "预约演示",
+                issuesLink: "GitHub Issues",
+                contactLink: "联系页面",
+                discordLink: "Discord",
+            },
+        },
+        footer: { linksAria: "页脚链接", blog: "博客", connect: "连接教程", contact: "联系" },
+    },
+};
+---
+
+<InfoPage
+    canonicalPath="/support"
+    messages={messages}
+    pageKey="support"
+    sectionIds={["docs", "login", "browser", "report", "demo"]}
+    sectionLinks={{
+        docs: [
+            { href: "/docs/installation/", labelKey: "sections.installationLink" },
+            { href: "/connect", labelKey: "sections.connectionLink" },
+            { href: "/demo", labelKey: "sections.webDemoLink" },
+        ],
+        report: [
+            { href: "https://github.com/socai-io/socai/issues", labelKey: "sections.issuesLink" },
+            { href: "/contact", labelKey: "sections.contactLink" },
+            { href: "https://discord.gg/CpQdA7bwt8", labelKey: "sections.discordLink" },
+        ],
+        demo: [{ href: "/book-demo", labelKey: "sections.bookDemoLink" }],
+    }}
+/>

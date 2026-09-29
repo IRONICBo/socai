@@ -1,0 +1,44 @@
+---
+import InfoPage from "../components/InfoPage.astro";
+
+const messages = {
+    en: {
+        meta: { title: "socai · terms", description: "Basic terms for the socai website and bounded social research demo." },
+        nav: { primaryAria: "primary navigation", homeAria: "socai home", linksAria: "site links", github: "github", contact: "contact", languageAria: "language" },
+        terms: {
+            eyebrow: "TERMS",
+            title: "Website and demo terms",
+            intro: "These terms describe the current public website and evaluation demo. A separate signed agreement may govern paid or enterprise use.",
+            updated: "Last updated: September 30, 2026",
+            sections: {
+                use: { title: "Permitted use", text: "Use the service for lawful research of content you are permitted to access. Follow applicable law and each platform's rules, and do not use the demo to evade access controls or collect private information." },
+                readOnly: { title: "Read-only boundary", text: "The public Web Demo is designed for bounded research and does not offer publishing, liking, following, messaging, purchasing, or other account mutations." },
+                limits: { title: "Evaluation limits", text: "Each account may submit up to five accepted iterations per UTC day. Limits, supported platforms, and provider availability may change while the demo is evaluated." },
+                accounts: { title: "Accounts and access", text: "You are responsible for any test account used in an interactive browser and for keeping its credentials secure. Do not enter a primary or production account into the evaluation demo." },
+                availability: { title: "Availability", text: "Social platforms can require login, present verification, rate-limit access, or change their interfaces. socai reports these gates but cannot guarantee that every requested source will be available." },
+            },
+        },
+        footer: { linksAria: "footer links", blog: "blog", connect: "connect guide", contact: "contact" },
+    },
+    zh: {
+        meta: { title: "socai · 使用条款", description: "socai 网站与有边界社交媒体调研体验的基本使用条款。" },
+        nav: { primaryAria: "主导航", homeAria: "socai 首页", linksAria: "站点链接", github: "github", contact: "联系", languageAria: "语言" },
+        terms: {
+            eyebrow: "使用条款",
+            title: "网站与体验版使用条款",
+            intro: "本条款适用于当前公开网站和评估版 Web Demo；付费或企业使用可能以双方另行签署的协议为准。",
+            updated: "最后更新：2026 年 9 月 30 日",
+            sections: {
+                use: { title: "允许的用途", text: "请仅用于你有权访问内容的合法调研，并遵守适用法律和各平台规则。不得使用体验版绕过访问控制或收集非公开信息。" },
+                readOnly: { title: "只读边界", text: "公开 Web Demo 用于有边界的调研，不提供发布、点赞、关注、私信、购买或其他账号写操作。" },
+                limits: { title: "体验限制", text: "每个账号每天（UTC）最多提交 5 次被接受的任务。体验期间，限额、支持平台和服务商可用性可能调整。" },
+                accounts: { title: "账号与访问", text: "你需要对交互式浏览器中使用的测试账号及其凭据安全负责。请勿在评估版 Web Demo 中输入主账号或生产账号。" },
+                availability: { title: "可用性", text: "社交平台可能要求登录、安全验证、限制访问或调整页面结构。socai 会如实报告这些门槛，但无法保证每个请求来源始终可用。" },
+            },
+        },
+        footer: { linksAria: "页脚链接", blog: "博客", connect: "连接教程", contact: "联系" },
+    },
+};
+---
+
+<InfoPage canonicalPath="/terms" messages={messages} pageKey="terms" sectionIds={["use", "readOnly", "limits", "accounts", "availability"]} />
