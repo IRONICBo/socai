@@ -2248,6 +2248,14 @@ a.contact-alt__row:hover {
   pointer-events: none;
 }
 
+.live-frame[data-interactive] iframe {
+  pointer-events: auto;
+}
+
+.live-actions {
+  margin-top: 12px;
+}
+
 .activity-list {
   margin: 0;
   padding-left: 20px;

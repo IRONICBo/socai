@@ -13,6 +13,8 @@ if (root instanceof HTMLElement) {
     const runOutput = root.querySelector("[data-run-output]");
     const livePanel = root.querySelector("[data-live-panel]");
     const liveFrame = root.querySelector("[data-live-frame]");
+    const liveLink = root.querySelector("[data-live-link]");
+    const startButton = root.querySelector("[data-run-start]");
     const activityList = root.querySelector("[data-activity]");
     const resultPanel = root.querySelector("[data-result-panel]");
     const resultElement = root.querySelector("[data-result]");
@@ -22,8 +24,10 @@ if (root instanceof HTMLElement) {
     let currentRunId = "";
     let currentConversationId = "";
     let pollTimer = 0;
+    let pollController = null;
     let pollFailures = 0;
     let lastRunWasTerminal = true;
+    let stateGeneration = 0;
 
     const copy = {
         en: {
@@ -86,8 +90,21 @@ if (root instanceof HTMLElement) {
         alert.hidden = !message;
     };
 
-    const clearAccountState = () => {
+    const stopPolling = () => {
         window.clearTimeout(pollTimer);
+        pollTimer = 0;
+        pollController?.abort();
+        pollController = null;
+        stateGeneration += 1;
+    };
+
+    const schedulePoll = (delay) => {
+        window.clearTimeout(pollTimer);
+        pollTimer = window.setTimeout(pollRun, delay);
+    };
+
+    const clearAccountState = () => {
+        stopPolling();
         pollFailures = 0;
         currentRunId = "";
         currentConversationId = "";
@@ -98,7 +115,17 @@ if (root instanceof HTMLElement) {
             runOutput.setAttribute("aria-busy", "false");
         }
         if (livePanel instanceof HTMLElement) livePanel.hidden = true;
-        if (liveFrame instanceof HTMLIFrameElement) liveFrame.removeAttribute("src");
+        if (liveFrame instanceof HTMLIFrameElement) {
+            liveFrame.removeAttribute("src");
+            liveFrame.tabIndex = -1;
+            liveFrame.parentElement?.setAttribute("inert", "");
+            liveFrame.parentElement?.removeAttribute("data-interactive");
+        }
+        if (liveLink instanceof HTMLAnchorElement) {
+            liveLink.hidden = true;
+            liveLink.removeAttribute("href");
+        }
+        if (startButton instanceof HTMLElement) startButton.hidden = true;
         if (activityList instanceof HTMLOListElement) activityList.replaceChildren();
         if (resultPanel instanceof HTMLElement) resultPanel.hidden = true;
         if (resultElement instanceof HTMLElement) resultElement.textContent = "";
@@ -136,8 +163,12 @@ if (root instanceof HTMLElement) {
     const safeLiveUrl = (value) => {
         try {
             const parsed = new URL(value);
-            return parsed.protocol === "https:" &&
-                parsed.hostname === "live.browser-use.com"
+            const hostname = parsed.hostname.toLowerCase();
+            const trustedHost =
+                hostname === "live.browser-use.com" ||
+                hostname.endsWith(".kernel.sh") ||
+                hostname.endsWith(".onkernel.com");
+            return parsed.protocol === "https:" && trustedHost
                 ? parsed.toString()
                 : "";
         } catch {
@@ -166,10 +197,23 @@ if (root instanceof HTMLElement) {
         if (runOutput instanceof HTMLElement) runOutput.hidden = false;
 
         const liveUrl = safeLiveUrl(run.live_view_url || "");
+        const interactive = Boolean(liveUrl && run.live_view_read_only === false);
         if (livePanel instanceof HTMLElement) livePanel.hidden = !liveUrl;
         if (liveFrame instanceof HTMLIFrameElement) {
             if (liveUrl && liveFrame.src !== liveUrl) liveFrame.src = liveUrl;
             if (!liveUrl) liveFrame.removeAttribute("src");
+            liveFrame.tabIndex = interactive ? 0 : -1;
+            liveFrame.parentElement?.toggleAttribute("inert", !interactive);
+            liveFrame.parentElement?.toggleAttribute("data-interactive", interactive);
+        }
+        if (liveLink instanceof HTMLAnchorElement) {
+            liveLink.hidden = !liveUrl;
+            if (liveUrl) liveLink.href = liveUrl;
+            else liveLink.removeAttribute("href");
+        }
+        if (startButton instanceof HTMLButtonElement) {
+            startButton.hidden = !run.requires_browser_confirmation;
+            startButton.disabled = false;
         }
 
         if (activityList instanceof HTMLOListElement) {
@@ -210,14 +254,29 @@ if (root instanceof HTMLElement) {
 
     const pollRun = async () => {
         if (!currentRunId) return;
+        const runId = currentRunId;
+        const generation = stateGeneration;
+        const controller = new AbortController();
+        pollController?.abort();
+        pollController = controller;
         try {
-            const run = await request(`/v1/web/runs/${currentRunId}`);
+            const run = await request(`/v1/web/runs/${runId}`, {
+                signal: controller.signal,
+            });
+            if (
+                controller !== pollController ||
+                generation !== stateGeneration ||
+                runId !== currentRunId
+            ) {
+                return;
+            }
             pollFailures = 0;
             showAlert("");
             if (!renderRun(run)) {
-                pollTimer = window.setTimeout(pollRun, 2000);
+                schedulePoll(2000);
             }
         } catch (error) {
+            if (error.name === "AbortError" || generation !== stateGeneration) return;
             if (error.status === 401) {
                 showSignedOut();
                 showAlert(error.message || labels().failed);
@@ -225,17 +284,18 @@ if (root instanceof HTMLElement) {
             }
             showAlert(error.message || labels().failed);
             pollFailures += 1;
-            pollTimer = window.setTimeout(
-                pollRun,
-                Math.min(15000, 1000 * 2 ** pollFailures),
-            );
+            schedulePoll(Math.min(15000, 1000 * 2 ** pollFailures));
+        } finally {
+            if (pollController === controller) pollController = null;
         }
     };
 
     const restoreLatestRun = async () => {
+        const generation = stateGeneration;
         if (submitButton instanceof HTMLButtonElement) submitButton.disabled = true;
         try {
             const runs = await request("/v1/web/runs");
+            if (generation !== stateGeneration) return;
             pollFailures = 0;
             const run =
                 runs.find((candidate) => !isTerminal(candidate)) || runs[0];
@@ -247,15 +307,17 @@ if (root instanceof HTMLElement) {
             }
             lastRunWasTerminal = isTerminal(run);
             if (!renderRun(run)) {
-                pollTimer = window.setTimeout(pollRun, 1200);
+                schedulePoll(1200);
             }
         } catch (error) {
+            if (generation !== stateGeneration) return;
             if (error.status === 401) {
                 showSignedOut();
                 return;
             }
             showAlert(error.message || labels().failed);
             pollFailures += 1;
+            window.clearTimeout(pollTimer);
             pollTimer = window.setTimeout(
                 restoreLatestRun,
                 Math.min(15000, 1000 * 2 ** pollFailures),
@@ -303,6 +365,8 @@ if (root instanceof HTMLElement) {
 
     researchForm?.addEventListener("submit", async (event) => {
         event.preventDefault();
+        stopPolling();
+        const generation = stateGeneration;
         const data = new FormData(researchForm);
         if (submitButton instanceof HTMLButtonElement) submitButton.disabled = true;
         showAlert("");
@@ -314,10 +378,12 @@ if (root instanceof HTMLElement) {
                 headers: { "X-CSRF-Token": csrfToken },
                 body: JSON.stringify(body),
             });
+            if (generation !== stateGeneration) return;
             lastRunWasTerminal = false;
             renderRun(run);
-            pollTimer = window.setTimeout(pollRun, 1200);
+            schedulePoll(1200);
         } catch (error) {
+            if (generation !== stateGeneration) return;
             if (submitButton instanceof HTMLButtonElement) submitButton.disabled = false;
             showAlert(error.message || labels().failed);
         }
@@ -325,19 +391,47 @@ if (root instanceof HTMLElement) {
 
     cancelButton?.addEventListener("click", async () => {
         if (!currentRunId) return;
+        stopPolling();
+        const generation = stateGeneration;
         try {
-            renderRun(
-                await request(`/v1/web/runs/${currentRunId}/cancel`, {
-                    method: "POST",
-                    headers: { "X-CSRF-Token": csrfToken },
-                }),
-            );
+            const runId = currentRunId;
+            const run = await request(`/v1/web/runs/${runId}/cancel`, {
+                method: "POST",
+                headers: { "X-CSRF-Token": csrfToken },
+            });
+            if (generation !== stateGeneration || runId !== currentRunId) return;
+            renderRun(run);
         } catch (error) {
+            if (generation !== stateGeneration) return;
             showAlert(error.message || labels().failed);
+            schedulePoll(1500);
+        }
+    });
+
+    startButton?.addEventListener("click", async () => {
+        if (!currentRunId || !(startButton instanceof HTMLButtonElement)) return;
+        stopPolling();
+        const generation = stateGeneration;
+        const runId = currentRunId;
+        startButton.disabled = true;
+        try {
+            const run = await request(`/v1/web/runs/${runId}/start`, {
+                method: "POST",
+                headers: { "X-CSRF-Token": csrfToken },
+            });
+            if (generation !== stateGeneration || runId !== currentRunId) return;
+            renderRun(run);
+            schedulePoll(800);
+        } catch (error) {
+            if (generation !== stateGeneration) return;
+            startButton.disabled = false;
+            showAlert(error.message || labels().failed);
+            schedulePoll(1500);
         }
     });
 
     root.querySelector("[data-sign-out]")?.addEventListener("click", async () => {
+        stopPolling();
         try {
             await request("/v1/web/auth/logout", {
                 method: "POST",

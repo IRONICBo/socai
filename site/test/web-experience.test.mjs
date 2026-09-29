@@ -4,7 +4,7 @@ import test from "node:test";
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
-test("web demo uses same-origin authenticated API with bounded read-only runs", async () => {
+test("web demo uses same-origin auth with bounded Browser Use and Kernel runs", async () => {
   const [page, runtime, vercel] = await Promise.all([
     read("src/pages/demo.astro"),
     read("src/scripts/demo.ts"),
@@ -20,9 +20,18 @@ test("web demo uses same-origin authenticated API with bounded read-only runs", 
   assert.match(page, /sandbox="allow-scripts allow-same-origin"/u);
   assert.match(page, /referrerpolicy="no-referrer"/u);
   assert.match(page, /frame-src 'self' https:\/\/live\.browser-use\.com/u);
+  assert.match(page, /https:\/\/\*\.kernel\.sh:\*/u);
+  assert.match(page, /https:\/\/\*\.onkernel\.com:\*/u);
+  assert.match(page, /data-run-start/u);
+  assert.match(page, /data-live-link/u);
   assert.match(runtime, /credentials: "include"/u);
   assert.match(runtime, /"X-CSRF-Token"/u);
-  assert.match(runtime, /parsed\.hostname === "live\.browser-use\.com"/u);
+  assert.match(runtime, /hostname === "live\.browser-use\.com"/u);
+  assert.match(runtime, /hostname\.endsWith\("\.kernel\.sh"\)/u);
+  assert.match(runtime, /\/v1\/web\/runs\/\$\{runId\}\/start/u);
+  assert.match(runtime, /new AbortController\(\)/u);
+  assert.match(runtime, /generation !== stateGeneration/u);
+  assert.match(page, /analytics=\{false\}/u);
   assert.match(runtime, /clearAccountState/u);
   assert.match(runtime, /request\("\/v1\/web\/runs"\)/u);
   assert.match(runtime, /Math\.min\(15000, 1000 \* 2 \*\* pollFailures\)/u);

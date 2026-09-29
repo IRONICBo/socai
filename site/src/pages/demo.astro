@@ -43,7 +43,9 @@ const messages = {
             signOut: "sign out",
             liveTitle: "Live browser",
             liveFrameTitle: "Public research live browser preview",
-            liveNote: "View only. No signed-in profile, stored credentials, email, or wallet is attached; login, write, and purchase requests are rejected.",
+            liveNote: "Kernel test runs open an isolated interactive browser. Sign in there only if Xiaohongshu requires it, then confirm that the browser is ready. Never use a primary account.",
+            openBrowser: "Open live browser",
+            browserReady: "Browser ready — start XHS collection",
             activityTitle: "Activity",
             resultTitle: "Result",
             continueTitle: "Need signed-in or deeper platform coverage?",
@@ -86,7 +88,9 @@ const messages = {
             signOut: "退出登录",
             liveTitle: "实时浏览器",
             liveFrameTitle: "公开调研实时浏览器预览",
-            liveNote: "仅供查看。Web Demo 不挂载已登录账号、保存的凭据、邮箱或钱包，并会拒绝登录、写入和购买类请求。",
+            liveNote: "Kernel 测试任务会打开隔离的可操作浏览器。如小红书要求登录，请仅在该浏览器中登录测试账号，完成后再确认开始抓取；不要使用主账号。",
+            openBrowser: "打开实时浏览器",
+            browserReady: "浏览器已就绪，开始抓取小红书",
             activityTitle: "执行动态",
             resultTitle: "调研结果",
             continueTitle: "需要登录后内容或更深的平台覆盖？",
@@ -112,7 +116,7 @@ const message = (path: string, language = defaultLanguage) => messageFor(message
         <meta property="og:title" content={message("meta.title")} data-i18n-content="meta.title" />
         <meta property="og:description" content={message("meta.description")} data-i18n-content="meta.description" />
         <meta name="theme-color" content="#fafaf9" />
-        <meta http-equiv="Content-Security-Policy" content="frame-src 'self' https://live.browser-use.com" />
+        <meta http-equiv="Content-Security-Policy" content="frame-src 'self' https://live.browser-use.com https://*.kernel.sh:* https://*.onkernel.com:*" />
         <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     </head>
     <body>
@@ -173,6 +177,10 @@ const message = (path: string, language = defaultLanguage) => messageFor(message
                             <div class="live-frame" inert>
                                 <iframe data-live-frame title={message("demo.liveFrameTitle")} data-i18n-title="demo.liveFrameTitle" tabindex="-1" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" allow="autoplay"></iframe>
                             </div>
+                            <div class="form-actions live-actions">
+                                <a class="button button--secondary" data-live-link hidden target="_blank" rel="noopener noreferrer" data-i18n="demo.openBrowser">{message("demo.openBrowser")}</a>
+                                <button class="button button--primary" type="button" data-run-start hidden data-i18n="demo.browserReady">{message("demo.browserReady")}</button>
+                            </div>
                         </section>
                         <section class="run-panel" aria-live="polite" aria-atomic="false">
                             <h3 data-i18n="demo.activityTitle">{message("demo.activityTitle")}</h3>
@@ -196,7 +204,7 @@ const message = (path: string, language = defaultLanguage) => messageFor(message
                     </div>
                 </section>
             </main>
-            <SiteFooter messages={messages} language={defaultLanguage} currentYear={currentYear} />
+            <SiteFooter messages={messages} language={defaultLanguage} currentYear={currentYear} analytics={false} />
         </div>
         <script id="site-i18n" type="application/json" set:html={JSON.stringify(messages)} />
         <script>

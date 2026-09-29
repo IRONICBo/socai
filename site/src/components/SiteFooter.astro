@@ -6,9 +6,10 @@ interface Props {
     messages: Record<string, Record<string, unknown>>;
     language: string;
     currentYear: number;
+    analytics?: boolean;
 }
 
-const { messages, language, currentYear } = Astro.props;
+const { messages, language, currentYear, analytics = true } = Astro.props;
 
 const githubUrl = "/github";
 const blogPath = "/blog";
@@ -40,4 +41,4 @@ const shared = language === "zh"
         >
     </nav>
 </footer>
-<Analytics />
+{analytics && <Analytics />}
