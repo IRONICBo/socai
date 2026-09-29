@@ -6,7 +6,7 @@ Submit `socai-social-research` as a skills-only plugin. It deliberately has no M
 
 Supported execution surfaces:
 
-- Codex CLI, Claude Code, Cursor, Gemini CLI, OpenCode, GitHub Copilot, WorkBuddy, and other local shell-enabled Agent Skills hosts;
+- Codex CLI, Claude Code, Cursor, Gemini CLI, Kimi Code, Qwen Code, TraeCode, OpenCode, GitHub Copilot, WorkBuddy/CodeBuddy, and other local shell-enabled Agent Skills hosts;
 - Coze/扣子 environments only when the selected runtime can reach the locally installed Socai CLI and authenticated Chrome session.
 
 Unsupported execution surfaces must return an explicit prerequisite message. The plugin must not claim that it collected social-platform data when the host cannot access the local Socai CLI or Chrome session.
@@ -19,9 +19,13 @@ Unsupported execution surfaces must return an explicit prerequisite message. The
 | Claude Code | `.claude-plugin/marketplace.json` and per-plugin manifest | `claude plugin validate`, install, component inventory | Submit the public repository through Anthropic's plugin directory form |
 | Cursor | `.cursor-plugin/marketplace.json` and per-plugin manifest | JSON/path validation and local Skill install | Submit the public repository through Cursor Marketplace review |
 | WorkBuddy | `plugins/workbuddy/dist/socai-social-research.zip` | WorkBuddy frontmatter validation and archive inspection | Upload, review, and publish in the Skill Marketplace |
+| CodeBuddy | `.codebuddy-plugin/marketplace.json` and per-plugin manifest | JSON/path validation, host archive inspection, and direct Skill install | Add the Git repository marketplace or submit it to the applicable CodeBuddy catalog |
 | Coze/扣子 | `plugins/socai-social-research/dist/socai-social-research-skills-only.zip` | Import-format validation only; local execution bridge not implemented | Blocked until an approved local application/device bridge is implemented and reviewed |
 | Doubao | Same Coze source package | Not applicable for new channel publication | No new low-code Agent channel submission is currently available |
-| Gemini CLI | Standard Skill installed by `socai integrate` | Isolated workspace installation/status check | No global marketplace is implied; distribute through CLI or repository |
+| Gemini CLI | Standard Skill plus `gemini-extension.json` host archive | Isolated workspace installation/status check and archive inspection | Publish a dedicated public extension repository/release and add the `gemini-cli-extension` topic for Gallery indexing |
+| Kimi Code | `kimi.plugin.json` host archive plus direct Skill install | Manifest/archive inspection and isolated workspace installation | Install by URL/ZIP; curated directory inclusion requires Kimi partner review |
+| Qwen Code | Agent Plugin v1 ZIP plus direct Skill install | Agent Plugin schema and isolated workspace installation | Install from Git/archive; it can also consume Gemini and Claude extension catalogs |
+| TraeCode | Portable Skill upload ZIP plus direct Skill install | Archive inspection and isolated workspace installation | Import the ZIP or enable the project `.agents/skills/` directory; public community listing remains platform-controlled |
 | OpenCode | Standard Skill installed by `socai integrate` | Isolated workspace installation/status check | No global marketplace is implied; distribute through CLI or repository |
 | GitHub Copilot | Standard Skill installed by `socai integrate` | Isolated workspace installation/status check | Repository or personal Skill installation; no Socai marketplace claim |
 | Generic Agent Skills | Standard Skill under `.agents/skills/` | Isolated workspace installation/status check | Host-specific directory or catalog publication |
@@ -30,9 +34,10 @@ Unsupported execution surfaces must return an explicit prerequisite message. The
 
 ```bash
 python3 plugins/socai-social-research/scripts/build_skills_only_zip.py
+python3 plugins/socai-social-research/scripts/build_host_packages.py
 ```
 
-The generated archive is written to `plugins/socai-social-research/dist/` and excludes marketplace files, local cache metadata, MCP configuration, and the Claude compatibility manifest. The archive normalizes the Codex manifest to the public version from the portable root manifest.
+The generated archives are written to `plugins/socai-social-research/dist/`. The skills-only Agent Plugin excludes marketplace files, local cache metadata, MCP configuration, and host compatibility manifests. Separate host archives put the required CodeBuddy, Gemini, Kimi, or Trae entry file at the archive root while reusing the same portable Skill content.
 
 ## OpenAI directory submission
 
@@ -118,6 +123,22 @@ cd plugins/workbuddy
 
 Upload `dist/socai-social-research.zip` from 【专家·技能·连接器】→【技能】→【添加技能】→【创建技能】. Keep all six platform names plus `社媒聆听`, `消费者洞察`, and `竞品研究` in the listing. Public search requires WorkBuddy review and publication; the existing Xiaohongshu-only skill and expert remain separate packages.
 
+## CodeBuddy, Kimi, Gemini, Qwen, and Trae distribution
+
+- CodeBuddy can add this repository as a marketplace because the root now contains `.codebuddy-plugin/marketplace.json`; its plugin uses `plugins/socai-social-research/.codebuddy-plugin/plugin.json`.
+- Kimi Code can install `socai-social-research-kimi.zip`, whose root contains `kimi.plugin.json` and `skills/`.
+- Gemini CLI can install `socai-social-research-gemini.zip` as an extension. Global Gallery indexing still requires a dedicated public repository or release whose archive root contains `gemini-extension.json`, plus the `gemini-cli-extension` GitHub topic.
+- Qwen Code can install `socai-social-research-skills-only.zip` directly as Agent Plugins v1; it can also consume compatible Gemini or Claude distribution sources.
+- TraeCode can import `socai-social-research-trae.zip`, or discover the project copy installed under `.trae/skills/` or `.agents/skills/`.
+
+Build all host archives with:
+
+```bash
+python3 plugins/socai-social-research/scripts/build_host_packages.py
+```
+
+These entry points make the Skill installable and locally discoverable. Public search still depends on the relevant platform crawler, marketplace, account, and review status.
+
 ## Coze and Doubao distribution
 
 Coze/扣子 can import a ZIP that follows Agent Plugins 1.0.0, so the same archive can be used to validate metadata and Skill parsing:
@@ -137,6 +158,10 @@ The CLI installer writes the same portable skill into each host's documented dis
 ```bash
 socai integrate install cursor
 socai integrate install gemini-cli
+socai integrate install kimi-code
+socai integrate install qwen-code
+socai integrate install trae-code
+socai integrate install codebuddy
 socai integrate install opencode
 socai integrate install github-copilot
 socai integrate install all

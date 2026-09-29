@@ -2,6 +2,10 @@
 
 WorkBuddy / CodeBuddy 市场用的技能与专家包。每个目录是一个可独立上架的单元。
 
+仓库根目录还提供 `.codebuddy-plugin/marketplace.json`，用于 CodeBuddy CLI
+直接添加 Git marketplace；其中的多平台插件复用
+`plugins/socai-social-research/`，与本目录的 WorkBuddy 上传包互不覆盖。
+
 | 包 | 类型 | 上架位置 | 状态 |
 |---|---|---|---|
 | `socai-social-research` | 技能 | 【技能】→【添加技能】 | 就绪（小红书、抖音、TikTok、Instagram、LinkedIn、X/Twitter） |
@@ -98,6 +102,11 @@ SKILL.md 正文控制在 5000 词以内，细节一律下沉到 `references/`。
 **技能**：WorkBuddy 左侧【专家·技能·连接器】→【技能】→ 右上角【添加技能】→【创建技能】，按提示提交 zip。提交 `socai-social-research.zip` 后，在展示名称、简介和检索词中保留六个平台名称与“社媒聆听 / 消费者洞察 / 竞品研究”，完成审核发布后才会在技能市场中被其他用户检索到。
 
 **专家**：同一入口 →【专家】→【我的专家】→【创建专家】，补全创建提示词后上传 zip。
+
+**CodeBuddy CLI marketplace**：代码进入公开分支后运行
+`codebuddy plugin marketplace add socai-io/socai`，再安装
+`socai-social-research@socai`。仓库 manifest 只提供安装入口，是否出现在公共目录
+仍以 CodeBuddy 平台审核或索引结果为准。
 
 解析失败时对照开放平台文档的「基础结构 / 配置文件」排查；仍失败则邮件 `openworkbuddy@tencent.com`，或扫开放平台首页二维码进开发者群。
 

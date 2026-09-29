@@ -60,6 +60,13 @@ pub fn command() -> Command {
                             "cursor",
                             "gemini",
                             "gemini-cli",
+                            "kimi",
+                            "kimi-code",
+                            "qwen",
+                            "qwen-code",
+                            "trae",
+                            "trae-code",
+                            "codebuddy",
                             "opencode",
                             "github-copilot",
                             "copilot",
@@ -190,6 +197,9 @@ fn target_paths(scope: Scope, requested: &str) -> Result<Vec<(&'static str, Path
     let requested = match requested {
         "claude" => "claude-code",
         "gemini" => "gemini-cli",
+        "kimi" => "kimi-code",
+        "qwen" => "qwen-code",
+        "trae" => "trae-code",
         "copilot" => "github-copilot",
         value => value,
     };
@@ -231,6 +241,24 @@ fn all_target_paths(scope: Scope) -> Result<Vec<(&'static str, PathBuf)>> {
                     home.join(".gemini").join("skills").join(SKILL_NAME),
                 ),
                 (
+                    "kimi-code",
+                    configured_root("KIMI_CODE_HOME", ".kimi-code")
+                        .join("skills")
+                        .join(SKILL_NAME),
+                ),
+                (
+                    "qwen-code",
+                    home.join(".qwen").join("skills").join(SKILL_NAME),
+                ),
+                (
+                    "trae-code",
+                    home.join(".trae-cn").join("skills").join(SKILL_NAME),
+                ),
+                (
+                    "codebuddy",
+                    home.join(".codebuddy").join("skills").join(SKILL_NAME),
+                ),
+                (
                     "opencode",
                     home.join(".config")
                         .join("opencode")
@@ -257,6 +285,10 @@ fn all_target_paths(scope: Scope) -> Result<Vec<(&'static str, PathBuf)>> {
                 ("claude-code", scoped(".claude")),
                 ("cursor", scoped(".cursor")),
                 ("gemini-cli", scoped(".gemini")),
+                ("kimi-code", scoped(".kimi-code")),
+                ("qwen-code", scoped(".qwen")),
+                ("trae-code", scoped(".trae")),
+                ("codebuddy", scoped(".codebuddy")),
                 ("opencode", scoped(".opencode")),
                 ("github-copilot", scoped(".github")),
                 ("agents", scoped(".agents")),
@@ -496,25 +528,26 @@ fn with_rollback(primary: anyhow::Error, items: &[CommittedInstall]) -> anyhow::
 }
 
 fn reject_symlink_components(path: &Path) -> Result<()> {
+    let configured_root = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "KIMI_CODE_HOME"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .find(|root| path.starts_with(root));
+    let has_named_integration_root = configured_root.is_none()
+        && path
+            .components()
+            .any(|component| is_integration_root_component(component.as_os_str().to_str()));
     let mut current = PathBuf::new();
-    let mut inside_integration_root = false;
+    let mut inside_integration_root = configured_root.is_none() && !has_named_integration_root;
     for component in path.components() {
         let component = component.as_os_str();
         current.push(component);
-        if matches!(
-            component.to_str(),
-            Some(
-                ".agents"
-                    | ".claude"
-                    | ".codex"
-                    | ".config"
-                    | ".cursor"
-                    | ".gemini"
-                    | ".opencode"
-                    | ".copilot"
-                    | ".github"
-            )
-        ) {
+        if configured_root
+            .as_ref()
+            .is_some_and(|root| current == *root)
+            || is_integration_root_component(component.to_str())
+        {
             inside_integration_root = true;
         }
         if !inside_integration_root {
@@ -536,6 +569,28 @@ fn reject_symlink_components(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn is_integration_root_component(component: Option<&str>) -> bool {
+    matches!(
+        component,
+        Some(
+            ".agents"
+                | ".claude"
+                | ".codex"
+                | ".config"
+                | ".cursor"
+                | ".gemini"
+                | ".kimi-code"
+                | ".qwen"
+                | ".trae-cn"
+                | ".trae"
+                | ".codebuddy"
+                | ".opencode"
+                | ".copilot"
+                | ".github"
+        )
+    )
 }
 
 fn path_exists(path: &Path) -> Result<bool> {

@@ -1,0 +1,5 @@
+{
+  "name": "socai-social-research",
+  "version": "0.4.0",
+  "description": "Research Xiaohongshu, Douyin, TikTok, Instagram, LinkedIn, and X/Twitter with source-linked evidence through the local socai CLI."
+}

@@ -14,12 +14,16 @@ socai integrate install codex
 socai integrate install claude-code
 socai integrate install cursor
 socai integrate install gemini-cli
+socai integrate install kimi-code
+socai integrate install qwen-code
+socai integrate install trae-code
+socai integrate install codebuddy
 socai integrate install opencode
 socai integrate install github-copilot
 socai integrate install agents
 ```
 
-`socai integrate install all` installs every supported user-scoped copy. Add `--scope project` to write under the current repository instead, `--dry-run` to inspect destinations, or use `socai integrate status --json` to check whether every copy matches this CLI release. `claude`, `gemini`, and `copilot` are accepted as shorter aliases.
+`socai integrate install all` installs every supported user-scoped copy. Add `--scope project` to write under the current repository instead, `--dry-run` to inspect destinations, or use `socai integrate status --json` to check whether every copy matches this CLI release. `claude`, `gemini`, `kimi`, `qwen`, `trae`, and `copilot` are accepted as shorter aliases.
 
 | Host | User scope | Project scope |
 | --- | --- | --- |
@@ -27,11 +31,15 @@ socai integrate install agents
 | Claude Code | `${CLAUDE_CONFIG_DIR:-~/.claude}/skills/` | `.claude/skills/` |
 | Cursor | `~/.cursor/skills/` | `.cursor/skills/` |
 | Gemini CLI | `~/.gemini/skills/` | `.gemini/skills/` |
+| Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/skills/` | `.kimi-code/skills/` |
+| Qwen Code | `~/.qwen/skills/` | `.qwen/skills/` |
+| TraeCode | `~/.trae-cn/skills/` | `.trae/skills/` |
+| CodeBuddy | `~/.codebuddy/skills/` | `.codebuddy/skills/` |
 | OpenCode | `~/.config/opencode/skills/` | `.opencode/skills/` |
 | GitHub Copilot | `~/.copilot/skills/` | `.github/skills/` |
 | Generic Agent Skills | `~/.agents/skills/` | `.agents/skills/` |
 
-WorkBuddy uses the uploadable `socai-social-research.zip` under `plugins/workbuddy/dist/`. Claude and Cursor also have repository marketplace manifests. Coze/扣子 can parse the standards-based skills-only Agent Plugin ZIP, but the local application/device bridge required to reach Socai and Chrome is not implemented yet, so it is not ready to publish as an operational connector. Marketplace search visibility begins only after the corresponding platform review and publication; a local install does not create a public listing.
+WorkBuddy uses the uploadable `socai-social-research.zip` under `plugins/workbuddy/dist/`. Claude, Cursor, and CodeBuddy also have repository marketplace manifests. Kimi, Gemini, CodeBuddy, and Trae upload archives are built with `plugins/socai-social-research/scripts/build_host_packages.py`; Qwen Code installs the standards-based Agent Plugin ZIP directly. Coze/扣子 can parse that ZIP, but the local application/device bridge required to reach Socai and Chrome is not implemented yet, so it is not ready to publish as an operational connector. Marketplace search visibility begins only after the corresponding platform review and publication; a local install does not create a public listing.
 
 After installation, requests about social listening, creator or company research, post and comment evidence, trend validation, and cross-platform comparison can select socai automatically. Discovery never grants permission to like, follow, comment, reply, or publish; those actions still require an explicit target and content from the user.
 

@@ -111,13 +111,15 @@ Layout, packaging, and upload paths are documented in
 
 Rules:
 
-- **The skill source of truth is `plugins/workbuddy/xiaohongshu-socai/`.**
+- **The Xiaohongshu skill source of truth is `plugins/workbuddy/xiaohongshu-socai/`.**
   `xiaohongshu-research-expert/skills/` is a build artifact injected by
-  `build.sh` — never edit it by hand.
+  `build.sh` — never edit it by hand. The multi-platform WorkBuddy skill has
+  its own source at `plugins/workbuddy/socai-social-research/`.
 - **Run `plugins/workbuddy/build.sh` after any skill change.** It validates
   frontmatter / `plugin.json` against the open-platform spec before zipping, so
-  a spec violation fails the build instead of failing upload. Two zips are
-  produced: the skill, and the expert (with the skill inlined).
+  a spec violation fails the build instead of failing upload. Three zips are
+  produced: the Xiaohongshu skill, the multi-platform skill, and the expert
+  (with the Xiaohongshu skill inlined).
 - Expert display copy has hard constraints the validator enforces:
   `displayDescription.zh` must be 40–50 characters, `tags` and `quickPrompts`
   must each have exactly 3 entries, `defaultInitPrompt` must equal

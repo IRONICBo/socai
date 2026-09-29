@@ -86,6 +86,10 @@ socai integrate install codex
 socai integrate install claude-code
 socai integrate install cursor
 socai integrate install gemini-cli
+socai integrate install kimi-code
+socai integrate install qwen-code
+socai integrate install trae-code
+socai integrate install codebuddy
 socai integrate install opencode
 socai integrate install github-copilot
 # Or install the same portable Skill for every supported local Agent Skills host:
@@ -93,7 +97,7 @@ socai integrate install all
 socai integrate status --json
 ```
 
-Use `--scope project` to keep the integration inside the current repository. `claude`, `gemini`, and `copilot` are accepted as aliases. The installer writes only the `socai-social-research` Skill directory and refuses to replace different contents unless `--force` is explicit. The repository also exposes the same Skill as the `socai-social-research` plugin for Codex, Claude, Cursor, WorkBuddy, and Agent Plugins-compatible distribution.
+Use `--scope project` to keep the integration inside the current repository. `claude`, `gemini`, `kimi`, `qwen`, `trae`, and `copilot` are accepted as aliases. The installer writes only the `socai-social-research` Skill directory and refuses to replace different contents unless `--force` is explicit. The repository also exposes the same Skill as the `socai-social-research` plugin for Codex, Claude, Cursor, WorkBuddy/CodeBuddy, Kimi Code, Gemini CLI, Qwen Code, TraeCode, and Agent Plugins-compatible distribution.
 
 Start every new CLI task with `socai task begin`, passing the user’s original question, then run the platform commands. This workflow applies to all platforms:
 
