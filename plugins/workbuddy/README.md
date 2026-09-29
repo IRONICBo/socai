@@ -4,28 +4,32 @@ WorkBuddy / CodeBuddy 市场用的技能与专家包。每个目录是一个可�
 
 | 包 | 类型 | 上架位置 | 状态 |
 |---|---|---|---|
+| `socai-social-research` | 技能 | 【技能】→【添加技能】 | 就绪（小红书、抖音、TikTok、Instagram、LinkedIn、X/Twitter） |
 | `xiaohongshu-socai` | 技能 | 【技能】→【添加技能】 | 就绪 |
 | `xiaohongshu-research-expert` | 专家 | 【专家】→【我的专家】→【创建专家】 | 就绪 |
 
-专家包内联了技能包（打包时自动注入），所以只上专家也能用；技能单独上架则覆盖所有 agent 场景。
+多平台技能用于用户按“小红书、抖音、TikTok、Instagram、LinkedIn、X/Twitter、社媒聆听、消费者洞察、竞品研究”等任务描述在技能市场检索并调用 Socai。小红书专家包仍内联专门的小红书技能，因此不会改变已有专家行为。
 
 ## 打包
 
 ```bash
 cd plugins/workbuddy
 ./build.sh              # 全部
-./build.sh skill        # 只打技能
+./build.sh skill        # 打包两个技能
+./build.sh xhs-skill    # 只打小红书技能
+./build.sh social-skill # 只打多平台技能
 ./build.sh expert       # 只打专家
 ```
 
 `build.sh` 会先做规范校验再打包，不合规直接失败：
 
-- 技能：`SKILL.md` frontmatter 必填 `description` / `description_zh` / `description_en` / `version` / `author`
+- 技能：解析受支持的 frontmatter 结构，校验名称与目录一致、必填字段、语义化版本、展示字段长度、工具白名单，并检查 ZIP 根目录、必需文件、越界路径、符号链接和压缩完整性
 - 专家：`plugin.json` 必填 16 个字段、`displayDescription.zh` 必须 40–50 字、`tags` 与 `quickPrompts` 各正好 3 条、`defaultInitPrompt` 必须等于 `quickPrompts[0]`、头像 ≤500KB
 
 产出在 `dist/`（不进 git，随用随打）：
 
 - `dist/xiaohongshu-socai.zip`
+- `dist/socai-social-research.zip`
 - `dist/xiaohongshu-research-expert.zip`
 
 ## 目录约定
@@ -34,6 +38,9 @@ cd plugins/workbuddy
 plugins/workbuddy/
 ├── build.sh
 ├── dist/                             # 构建产物，gitignored
+├── socai-social-research/             # 六个平台的通用调研技能
+│   ├── SKILL.md
+│   └── references/
 ├── xiaohongshu-socai/                # 技能源码（唯一真源）
 │   ├── SKILL.md
 │   ├── references/
@@ -47,7 +54,7 @@ plugins/workbuddy/
     └── skills/                       # 构建产物，勿手工编辑
 ```
 
-**技能源码只在 `xiaohongshu-socai/`。** 专家目录下的 `skills/` 由 `build.sh` 从源码拷贝，直接改它会在下次打包时被覆盖。
+**小红书专家内联的技能源码只在 `xiaohongshu-socai/`。** 专家目录下的 `skills/` 由 `build.sh` 从源码拷贝，直接改它会在下次打包时被覆盖。多平台市场技能的源码在 `socai-social-research/`，两者独立维护。
 
 ### 技能结构
 
@@ -88,7 +95,7 @@ SKILL.md 正文控制在 5000 词以内，细节一律下沉到 `references/`。
 
 ## 上架路径
 
-**技能**：WorkBuddy 左侧【专家·技能·连接器】→【技能】→ 右上角【添加技能】→【创建技能】，按提示提交 zip。
+**技能**：WorkBuddy 左侧【专家·技能·连接器】→【技能】→ 右上角【添加技能】→【创建技能】，按提示提交 zip。提交 `socai-social-research.zip` 后，在展示名称、简介和检索词中保留六个平台名称与“社媒聆听 / 消费者洞察 / 竞品研究”，完成审核发布后才会在技能市场中被其他用户检索到。
 
 **专家**：同一入口 →【专家】→【我的专家】→【创建专家】，补全创建提示词后上传 zip。
 

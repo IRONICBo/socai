@@ -53,7 +53,19 @@ pub fn command() -> Command {
                 .arg(
                     Arg::new("agent")
                         .required(true)
-                        .value_parser(["codex", "claude-code", "agents", "all"])
+                        .value_parser([
+                            "codex",
+                            "claude",
+                            "claude-code",
+                            "cursor",
+                            "gemini",
+                            "gemini-cli",
+                            "opencode",
+                            "github-copilot",
+                            "copilot",
+                            "agents",
+                            "all",
+                        ])
                         .help("Agent host to configure."),
                 )
                 .arg(
@@ -175,6 +187,12 @@ fn target_paths(scope: Scope, requested: &str) -> Result<Vec<(&'static str, Path
     if requested == "all" {
         return Ok(targets);
     }
+    let requested = match requested {
+        "claude" => "claude-code",
+        "gemini" => "gemini-cli",
+        "copilot" => "github-copilot",
+        value => value,
+    };
     Ok(targets
         .into_iter()
         .filter(|(agent, _)| *agent == requested)
@@ -205,6 +223,25 @@ fn all_target_paths(scope: Scope) -> Result<Vec<(&'static str, PathBuf)>> {
                         .join(SKILL_NAME),
                 ),
                 (
+                    "cursor",
+                    home.join(".cursor").join("skills").join(SKILL_NAME),
+                ),
+                (
+                    "gemini-cli",
+                    home.join(".gemini").join("skills").join(SKILL_NAME),
+                ),
+                (
+                    "opencode",
+                    home.join(".config")
+                        .join("opencode")
+                        .join("skills")
+                        .join(SKILL_NAME),
+                ),
+                (
+                    "github-copilot",
+                    home.join(".copilot").join("skills").join(SKILL_NAME),
+                ),
+                (
                     "agents",
                     home.join(".agents").join("skills").join(SKILL_NAME),
                 ),
@@ -218,6 +255,10 @@ fn all_target_paths(scope: Scope) -> Result<Vec<(&'static str, PathBuf)>> {
             vec![
                 ("codex", scoped(".agents")),
                 ("claude-code", scoped(".claude")),
+                ("cursor", scoped(".cursor")),
+                ("gemini-cli", scoped(".gemini")),
+                ("opencode", scoped(".opencode")),
+                ("github-copilot", scoped(".github")),
                 ("agents", scoped(".agents")),
             ]
         }
@@ -460,7 +501,20 @@ fn reject_symlink_components(path: &Path) -> Result<()> {
     for component in path.components() {
         let component = component.as_os_str();
         current.push(component);
-        if matches!(component.to_str(), Some(".agents" | ".claude" | ".codex")) {
+        if matches!(
+            component.to_str(),
+            Some(
+                ".agents"
+                    | ".claude"
+                    | ".codex"
+                    | ".config"
+                    | ".cursor"
+                    | ".gemini"
+                    | ".opencode"
+                    | ".copilot"
+                    | ".github"
+            )
+        ) {
             inside_integration_root = true;
         }
         if !inside_integration_root {

@@ -6,10 +6,25 @@ Submit `socai-social-research` as a skills-only plugin. It deliberately has no M
 
 Supported execution surfaces:
 
-- Codex CLI and other local, shell-enabled Codex environments;
-- Claude Code and other local Agent Skills-compatible hosts.
+- Codex CLI, Claude Code, Cursor, Gemini CLI, OpenCode, GitHub Copilot, WorkBuddy, and other local shell-enabled Agent Skills hosts;
+- Coze/扣子 environments only when the selected runtime can reach the locally installed Socai CLI and authenticated Chrome session.
 
 Unsupported execution surfaces must return an explicit prerequisite message. The plugin must not claim that it collected social-platform data when the host cannot access the local Socai CLI or Chrome session.
+
+## Distribution readiness
+
+| Host | Repository artifact | Local validation | Public search requirement |
+| --- | --- | --- | --- |
+| Codex | `plugin.json`, `.codex-plugin/plugin.json`, `.agents/plugins/marketplace.json` | Plugin schema, local reinstall, Skill validation | OpenAI organization submission and review |
+| Claude Code | `.claude-plugin/marketplace.json` and per-plugin manifest | `claude plugin validate`, install, component inventory | Submit the public repository through Anthropic's plugin directory form |
+| Cursor | `.cursor-plugin/marketplace.json` and per-plugin manifest | JSON/path validation and local Skill install | Submit the public repository through Cursor Marketplace review |
+| WorkBuddy | `plugins/workbuddy/dist/socai-social-research.zip` | WorkBuddy frontmatter validation and archive inspection | Upload, review, and publish in the Skill Marketplace |
+| Coze/扣子 | `plugins/socai-social-research/dist/socai-social-research-skills-only.zip` | Import-format validation only; local execution bridge not implemented | Blocked until an approved local application/device bridge is implemented and reviewed |
+| Doubao | Same Coze source package | Not applicable for new channel publication | No new low-code Agent channel submission is currently available |
+| Gemini CLI | Standard Skill installed by `socai integrate` | Isolated workspace installation/status check | No global marketplace is implied; distribute through CLI or repository |
+| OpenCode | Standard Skill installed by `socai integrate` | Isolated workspace installation/status check | No global marketplace is implied; distribute through CLI or repository |
+| GitHub Copilot | Standard Skill installed by `socai integrate` | Isolated workspace installation/status check | Repository or personal Skill installation; no Socai marketplace claim |
+| Generic Agent Skills | Standard Skill under `.agents/skills/` | Isolated workspace installation/status check | Host-specific directory or catalog publication |
 
 ## Build
 
@@ -68,13 +83,73 @@ Negative review cases:
 
 ## Claude distribution
 
-The same repository contains `.claude-plugin/plugin.json` and the portable skill. It can be distributed immediately through a public Git repository marketplace for Claude Code, or uploaded to an organization marketplace. Inclusion in Anthropic's global directory is a separate review and publication process; a Git marketplace alone does not guarantee global proactive discovery.
+The same repository contains `.claude-plugin/plugin.json` and the portable skill. It can be distributed immediately through a public Git repository marketplace for Claude Code, or uploaded to an organization marketplace. Inclusion in Anthropic's global directory is a separate review and publication process; a Git marketplace alone does not guarantee global proactive discovery. After the public branch is available, the repository owner submits it through `https://platform.claude.com/plugins/submit`.
+
+Validate and install the repository marketplace locally before submission:
+
+```bash
+claude plugin validate .
+claude plugin marketplace add https://github.com/socai-io/socai.git
+claude plugin install socai-social-research@socai
+claude plugin list
+```
+
+## Cursor distribution
+
+The root `.cursor-plugin/marketplace.json` lists `plugins/socai-social-research`, and that plugin contains both the open-standard root `plugin.json` and a Cursor manifest. This lets a checked-out repository act as a marketplace and gives Cursor's public review the platform-specific discovery metadata.
+
+Before public submission:
+
+1. Install the repository as a local plugin and test the discovery prompts below in a new Cursor conversation.
+2. Confirm the six platform names and research-intent keywords find the plugin in Customize.
+3. Push the branch to a public repository revision.
+4. Submit the repository at `https://cursor.com/marketplace/publish`.
+
+Cursor reviews marketplace submissions. The manifest and branch alone do not make the plugin publicly searchable.
+
+## WorkBuddy distribution
+
+Run:
+
+```bash
+cd plugins/workbuddy
+./build.sh social-skill
+```
+
+Upload `dist/socai-social-research.zip` from 【专家·技能·连接器】→【技能】→【添加技能】→【创建技能】. Keep all six platform names plus `社媒聆听`, `消费者洞察`, and `竞品研究` in the listing. Public search requires WorkBuddy review and publication; the existing Xiaohongshu-only skill and expert remain separate packages.
+
+## Coze and Doubao distribution
+
+Coze/扣子 can import a ZIP that follows Agent Plugins 1.0.0, so the same archive can be used to validate metadata and Skill parsing:
+
+```bash
+python3 plugins/socai-social-research/scripts/build_skills_only_zip.py
+```
+
+This archive is not yet an operational Coze integration. It contains no Coze local-application/device bridge, so a hosted Coze runtime cannot reach the user's local Socai CLI or authenticated Chrome session. Do not publish it as a working data connector. First implement and obtain review for the local execution bridge, declare that dependency in Coze, then test both connected execution and fail-closed cloud-only behavior before submitting it to a team or enterprise store.
+
+As of 2026-09-29, Coze's official update notes state that newly created low-code agents can no longer be published to the Doubao channel. Therefore this repository can prepare and validate the Coze plugin, but it must not claim a new public Doubao-client listing. A future direct Doubao channel requires ByteDance to restore or replace that publication route.
+
+## Direct Agent Skills hosts
+
+The CLI installer writes the same portable skill into each host's documented discovery directory:
+
+```bash
+socai integrate install cursor
+socai integrate install gemini-cli
+socai integrate install opencode
+socai integrate install github-copilot
+socai integrate install all
+socai integrate status --json
+```
+
+These installs make Socai discoverable to that user's local agent. They do not publish a global marketplace listing.
 
 ## Discovery validation
 
 Validate with a clean host where Socai is not named in the prompt:
 
-1. Search the platform plugin directory for `Xiaohongshu`, `XHS`, `RedNote`, `Redbook`, `Douyin`, `TikTok`, `Instagram`, `LinkedIn`, `X`, `Twitter`, `social listening`, `consumer insights`, `competitor research`, and `social media research`.
+1. Search each available platform plugin or skill directory for `Xiaohongshu`, `XHS`, `RedNote`, `Redbook`, `Douyin`, `TikTok`, `Instagram`, `LinkedIn`, `X`, `Twitter`, `social listening`, `consumer insights`, `competitor research`, and `social media research`.
 2. Confirm that Socai appears for relevant data-research queries and does not rank for social-content creation.
 3. Install the plugin, start a new conversation, and run all five positive and three negative cases.
 4. Repeat once with Socai installed and connected, and once without the local CLI, to validate both success and fail-closed behavior.
