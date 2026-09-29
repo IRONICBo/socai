@@ -24,6 +24,11 @@ test("web demo uses same-origin auth with bounded Browser Use and Kernel runs", 
   assert.match(page, /https:\/\/\*\.onkernel\.com:\*/u);
   assert.match(page, /data-run-start/u);
   assert.match(page, /data-live-link/u);
+  assert.match(page, /data-platform-field hidden/u);
+  assert.match(page, /data-prompt-limit/u);
+  for (const platform of ["xhs", "dy", "tiktok", "instagram", "linkedin", "x"]) {
+    assert.match(page, new RegExp(`value="${platform}"`, "u"));
+  }
   assert.match(runtime, /credentials: "include"/u);
   assert.match(runtime, /"X-CSRF-Token"/u);
   assert.match(runtime, /hostname === "live\.browser-use\.com"/u);
@@ -34,6 +39,13 @@ test("web demo uses same-origin auth with bounded Browser Use and Kernel runs", 
   assert.match(page, /analytics=\{false\}/u);
   assert.match(runtime, /clearAccountState/u);
   assert.match(runtime, /request\("\/v1\/web\/runs"\)/u);
+  assert.match(runtime, /request\("\/v1\/web\/capabilities"\)/u);
+  assert.match(runtime, /platformSelectionSupported/u);
+  assert.match(runtime, /\.some\(\(option\) =>/u);
+  assert.match(runtime, /run\.platform !== requestedPlatform/u);
+  assert.match(runtime, /body\.platform = requestedPlatform/u);
+  assert.match(runtime, /queueMicrotask\(updatePromptLimit\)/u);
+  assert.match(runtime, /await loadCapabilities\(\);[\s\S]*await loadMe\(\);/u);
   assert.match(runtime, /Math\.min\(15000, 1000 \* 2 \*\* pollFailures\)/u);
   assert.match(runtime, /\["localhost", "127\.0\.0\.1", "::1"\]/u);
   assert.doesNotMatch(`${page}\n${runtime}`, /BROWSER_USE_API_KEY/u);

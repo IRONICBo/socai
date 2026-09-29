@@ -8,6 +8,10 @@ if (root instanceof HTMLElement) {
     const emailForm = root.querySelector("[data-email-form]");
     const emailStatus = root.querySelector("[data-email-status]");
     const researchForm = root.querySelector("[data-research-form]");
+    const platformField = root.querySelector("[data-platform-field]");
+    const platformSelect = root.querySelector("[name='platform']");
+    const promptInput = root.querySelector("[name='prompt']");
+    const promptLimit = root.querySelector("[data-prompt-limit]");
     const submitButton = root.querySelector("[data-run-submit]");
     const cancelButton = root.querySelector("[data-run-cancel]");
     const runOutput = root.querySelector("[data-run-output]");
@@ -28,6 +32,8 @@ if (root instanceof HTMLElement) {
     let pollFailures = 0;
     let lastRunWasTerminal = true;
     let stateGeneration = 0;
+    let platformSelectionSupported = false;
+    let promptLimits = {};
 
     const copy = {
         en: {
@@ -38,6 +44,8 @@ if (root instanceof HTMLElement) {
             running: "Research is running…",
             cancelled: "Cancelled.",
             logoutFailed: "Sign out failed. Your server session may still be active.",
+            platformMismatch: "The server did not start the selected platform. Please refresh and try again.",
+            promptLimit: (value) => `Maximum ${value} characters for this platform.`,
             remaining: (value) => `${value} iterations left today`,
         },
         zh: {
@@ -48,6 +56,8 @@ if (root instanceof HTMLElement) {
             running: "正在调研…",
             cancelled: "任务已取消。",
             logoutFailed: "退出登录失败，服务端会话可能仍然有效。",
+            platformMismatch: "服务端未按所选平台启动，请刷新页面后重试。",
+            promptLimit: (value) => `当前平台最多输入 ${value} 个字符。`,
             remaining: (value) => `今天还可运行 ${value} 次`,
         },
     };
@@ -90,6 +100,63 @@ if (root instanceof HTMLElement) {
         alert.hidden = !message;
     };
 
+    const selectedPlatformOption = (value) => {
+        if (!(platformSelect instanceof HTMLSelectElement)) return null;
+        return [...platformSelect.options].find(
+            (option) => option.value === value && !option.disabled,
+        );
+    };
+
+    const updatePromptLimit = () => {
+        if (!(promptInput instanceof HTMLTextAreaElement)) return;
+        const platform =
+            platformSelect instanceof HTMLSelectElement ? platformSelect.value : "";
+        const configured = Number(promptLimits[platform]);
+        const limit = Number.isInteger(configured) && configured >= 10 ? configured : 3000;
+        promptInput.maxLength = limit;
+        if (promptLimit instanceof HTMLElement) {
+            promptLimit.textContent = labels().promptLimit(limit);
+        }
+    };
+
+    const loadCapabilities = async () => {
+        try {
+            const capabilities = await request("/v1/web/capabilities");
+            const supported = new Set(
+                Array.isArray(capabilities?.platforms) ? capabilities.platforms : [],
+            );
+            promptLimits =
+                capabilities?.max_prompt_chars_by_platform &&
+                typeof capabilities.max_prompt_chars_by_platform === "object"
+                    ? capabilities.max_prompt_chars_by_platform
+                    : {};
+            if (platformSelect instanceof HTMLSelectElement) {
+                platformSelectionSupported =
+                    capabilities?.platform_selection === true &&
+                    [...platformSelect.options].some((option) =>
+                        supported.has(option.value),
+                    );
+                for (const option of platformSelect.options) {
+                    option.disabled =
+                        !platformSelectionSupported || !supported.has(option.value);
+                }
+                if (!selectedPlatformOption(platformSelect.value)) {
+                    const fallback = [...platformSelect.options].find(
+                        (option) => !option.disabled,
+                    );
+                    if (fallback) platformSelect.value = fallback.value;
+                }
+            }
+        } catch {
+            platformSelectionSupported = false;
+            promptLimits = {};
+        }
+        if (platformField instanceof HTMLElement) {
+            platformField.hidden = !platformSelectionSupported;
+        }
+        updatePromptLimit();
+    };
+
     const stopPolling = () => {
         window.clearTimeout(pollTimer);
         pollTimer = 0;
@@ -110,6 +177,7 @@ if (root instanceof HTMLElement) {
         currentConversationId = "";
         lastRunWasTerminal = true;
         if (researchForm instanceof HTMLFormElement) researchForm.reset();
+        updatePromptLimit();
         if (runOutput instanceof HTMLElement) {
             runOutput.hidden = true;
             runOutput.setAttribute("aria-busy", "false");
@@ -193,6 +261,14 @@ if (root instanceof HTMLElement) {
     const renderRun = (run) => {
         currentRunId = run.id;
         currentConversationId = run.conversation_id;
+        if (
+            platformSelectionSupported &&
+            platformSelect instanceof HTMLSelectElement &&
+            selectedPlatformOption(run.platform)
+        ) {
+            platformSelect.value = run.platform;
+            updatePromptLimit();
+        }
         updateQuota(run.iterations_remaining);
         if (runOutput instanceof HTMLElement) runOutput.hidden = false;
 
@@ -371,7 +447,11 @@ if (root instanceof HTMLElement) {
         if (submitButton instanceof HTMLButtonElement) submitButton.disabled = true;
         showAlert("");
         try {
+            const requestedPlatform = platformSelectionSupported
+                ? String(data.get("platform") || "")
+                : "";
             const body = { prompt: data.get("prompt") };
+            if (requestedPlatform) body.platform = requestedPlatform;
             if (currentConversationId) body.conversation_id = currentConversationId;
             const run = await request("/v1/web/runs", {
                 method: "POST",
@@ -379,6 +459,17 @@ if (root instanceof HTMLElement) {
                 body: JSON.stringify(body),
             });
             if (generation !== stateGeneration) return;
+            if (requestedPlatform && run.platform !== requestedPlatform) {
+                try {
+                    await request(`/v1/web/runs/${run.id}/cancel`, {
+                        method: "POST",
+                        headers: { "X-CSRF-Token": csrfToken },
+                    });
+                } catch {
+                    // The mismatch remains visible even if best-effort cleanup fails.
+                }
+                throw new Error(labels().platformMismatch);
+            }
             lastRunWasTerminal = false;
             renderRun(run);
             schedulePoll(1200);
@@ -387,6 +478,11 @@ if (root instanceof HTMLElement) {
             if (submitButton instanceof HTMLButtonElement) submitButton.disabled = false;
             showAlert(error.message || labels().failed);
         }
+    });
+
+    platformSelect?.addEventListener("change", updatePromptLimit);
+    document.querySelectorAll("[data-lang-option]").forEach((option) => {
+        option.addEventListener("click", () => queueMicrotask(updatePromptLimit));
     });
 
     cancelButton?.addEventListener("click", async () => {
@@ -462,5 +558,9 @@ if (root instanceof HTMLElement) {
     if (query.has("auth") || query.has("auth_error")) {
         window.history.replaceState({}, "", window.location.pathname);
     }
-    loadMe();
+    const initialize = async () => {
+        await loadCapabilities();
+        await loadMe();
+    };
+    initialize();
 }

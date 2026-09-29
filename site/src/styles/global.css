@@ -2077,6 +2077,7 @@ a.contact-alt__row:hover {
 }
 
 .stack-form input,
+.research-form select,
 .research-form textarea,
 .form-field input,
 .form-field textarea {
@@ -2089,6 +2090,7 @@ a.contact-alt__row:hover {
 }
 
 .stack-form input,
+.research-form select,
 .form-field input {
   min-height: 52px;
   padding: 0 14px;
@@ -2102,7 +2104,14 @@ a.contact-alt__row:hover {
   resize: vertical;
 }
 
+.research-platform-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .stack-form input:focus,
+.research-form select:focus,
 .research-form textarea:focus,
 .form-field input:focus,
 .form-field textarea:focus {

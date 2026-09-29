@@ -36,16 +36,18 @@ const messages = {
             emailSubmit: "Email me a sign-in link",
             emailSent: "Check your inbox for the one-time sign-in link.",
             workspaceTitle: "What should socai research?",
+            platformLabel: "Platform",
             promptLabel: "Research question",
-            promptPlaceholder: "Compare how runners discuss daily trainers on Instagram, TikTok, X, and Reddit. Cite the public posts.",
+            promptLimit: "Up to the platform limit shown below.",
+            promptPlaceholder: "How do runners discuss daily trainers? Return the public posts and visible comments.",
             submit: "Start research",
             cancel: "Stop run",
             signOut: "sign out",
-            liveTitle: "Live browser",
+            liveTitle: "Target-platform browser",
             liveFrameTitle: "Public research live browser preview",
-            liveNote: "Kernel test runs open an isolated interactive browser. Sign in there only if Xiaohongshu requires it, then confirm that the browser is ready. Never use a primary account.",
+            liveNote: "This page is the socai control console. The browser below opens the selected platform directly; if login or verification is required, complete it there before confirming that the browser is ready. Never use a primary account.",
             openBrowser: "Open live browser",
-            browserReady: "Browser ready — start XHS collection",
+            browserReady: "Browser ready — start collection",
             activityTitle: "Activity",
             resultTitle: "Result",
             continueTitle: "Need signed-in or deeper platform coverage?",
@@ -81,16 +83,18 @@ const messages = {
             emailSubmit: "发送一次性登录链接",
             emailSent: "一次性登录链接已发送，请检查邮箱。",
             workspaceTitle: "你想让 socai 调研什么？",
+            platformLabel: "调研平台",
             promptLabel: "调研问题",
-            promptPlaceholder: "对比跑者在 Instagram、TikTok、X 和 Reddit 如何讨论日常训练鞋，并引用公开帖子。",
+            promptLimit: "请按下方所示的平台字数上限填写。",
+            promptPlaceholder: "跑者如何讨论日常训练鞋？请返回公开帖子和可见评论。",
             submit: "开始调研",
             cancel: "停止任务",
             signOut: "退出登录",
-            liveTitle: "实时浏览器",
+            liveTitle: "目标平台浏览器",
             liveFrameTitle: "公开调研实时浏览器预览",
-            liveNote: "Kernel 测试任务会打开隔离的可操作浏览器。如小红书要求登录，请仅在该浏览器中登录测试账号，完成后再确认开始抓取；不要使用主账号。",
+            liveNote: "当前页面是 socai 控制台；下方隔离浏览器会直接打开所选平台。如需登录或安全验证，请仅在该浏览器中使用测试账号完成，然后再确认开始抓取；不要使用主账号。",
             openBrowser: "打开实时浏览器",
-            browserReady: "浏览器已就绪，开始抓取小红书",
+            browserReady: "浏览器已就绪，开始抓取",
             activityTitle: "执行动态",
             resultTitle: "调研结果",
             continueTitle: "需要登录后内容或更深的平台覆盖？",
@@ -162,8 +166,20 @@ const message = (path: string, language = defaultLanguage) => messageFor(message
                     </div>
                     <form class="research-form" data-research-form>
                         <h2 id="workspace-title" data-i18n="demo.workspaceTitle">{message("demo.workspaceTitle")}</h2>
+                        <div class="research-platform-field" data-platform-field hidden>
+                            <label for="research-platform" data-i18n="demo.platformLabel">{message("demo.platformLabel")}</label>
+                            <select id="research-platform" name="platform" required>
+                                <option value="xhs">小红书 / Xiaohongshu</option>
+                                <option value="dy">抖音 / Douyin</option>
+                                <option value="tiktok">TikTok</option>
+                                <option value="instagram">Instagram</option>
+                                <option value="linkedin">LinkedIn</option>
+                                <option value="x">X / Twitter</option>
+                            </select>
+                        </div>
                         <label for="research-prompt" data-i18n="demo.promptLabel">{message("demo.promptLabel")}</label>
-                        <textarea id="research-prompt" name="prompt" rows="5" minlength="10" maxlength="3000" required data-i18n-placeholder="demo.promptPlaceholder" placeholder={message("demo.promptPlaceholder")}></textarea>
+                        <textarea id="research-prompt" name="prompt" rows="5" minlength="10" maxlength="3000" required aria-describedby="research-prompt-limit" data-i18n-placeholder="demo.promptPlaceholder" placeholder={message("demo.promptPlaceholder")}></textarea>
+                        <p id="research-prompt-limit" class="form-hint" data-prompt-limit data-i18n="demo.promptLimit">{message("demo.promptLimit")}</p>
                         <div class="form-actions">
                             <button class="button button--primary" type="submit" data-run-submit data-i18n="demo.submit">{message("demo.submit")}</button>
                             <button class="button button--secondary" type="button" data-run-cancel hidden data-i18n="demo.cancel">{message("demo.cancel")}</button>
