@@ -1,0 +1,30 @@
+{
+  "name": "socai-social-research",
+  "version": "0.5.0",
+  "description": "Research public posts, comments, creators, and trends across Xiaohongshu, Douyin, TikTok, Instagram, LinkedIn, and X/Twitter with the local socai CLI.",
+  "keywords": [
+    "xiaohongshu",
+    "xhs",
+    "rednote",
+    "douyin",
+    "tiktok",
+    "instagram",
+    "linkedin",
+    "twitter",
+    "social-listening",
+    "consumer-insights"
+  ],
+  "author": {
+    "name": "socai"
+  },
+  "homepage": "https://socai.io/docs/agent-workflows/",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Socai Social Research",
+    "shortDescription": "Research six social platforms",
+    "longDescription": "Collect source-linked, read-only social research from Xiaohongshu, Douyin, TikTok, Instagram, LinkedIn, and X/Twitter through the local socai CLI.",
+    "developerName": "socai",
+    "websiteURL": "https://socai.io/docs/agent-workflows/"
+  }
+}

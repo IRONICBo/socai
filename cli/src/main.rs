@@ -1,5 +1,7 @@
+mod agent_integration;
 mod daemon;
 mod progress;
+mod task;
 mod tui;
 mod version;
 
@@ -17,6 +19,9 @@ fn build_cli() -> clap::Command {
     let mut root = clap::Command::new("socai")
         .about("socai — site-savvy browser agent")
         .version(env!("CARGO_PKG_VERSION"))
+        .after_help("External agents: call socai task begin with the user's original question once per new task. Subsequent site commands join the daemon's current task automatically.")
+        .subcommand(task::command())
+        .subcommand(agent_integration::command())
         .subcommand(
             clap::Command::new("version")
                 .about("Print installed version and latest release status.")
@@ -268,7 +273,15 @@ async fn run_site_command(
 fn should_warn_for_update(subcommand: &str) -> bool {
     !matches!(
         subcommand,
-        "__daemon" | "update" | "version" | "status" | "config" | "pro" | "capabilities"
+        "__daemon"
+            | "update"
+            | "version"
+            | "status"
+            | "config"
+            | "pro"
+            | "task"
+            | "integrate"
+            | "capabilities"
     )
 }
 
@@ -310,6 +323,8 @@ async fn main() -> Result<()> {
             }
         }
         "config" => run_config_command(sub_matches)?,
+        "task" => task::run(sub_matches).await?,
+        "integrate" => agent_integration::run(sub_matches)?,
         "pro" => run_pro_command(sub_matches).await?,
         "capabilities" => print_capabilities(
             sub_matches.get_one::<String>("site").map(String::as_str),
@@ -391,7 +406,11 @@ fn print_capabilities(site_filter: Option<&str>, pretty: bool) -> Result<()> {
             "domains": [],
             "browser_tools": [],
             "native_cli": true,
-            "commands": adapter.commands.iter().map(command_capability).collect::<Vec<_>>(),
+            "commands": adapter
+                .commands
+                .iter()
+                .map(command_capability)
+                .collect::<Vec<_>>(),
         }));
     }
 
@@ -418,14 +437,18 @@ fn command_capability(command: &SiteCommand) -> Value {
         "name": command.name,
         "tool_name": command.tool_name,
         "description": command.about,
-        "arguments": command.args.iter().map(|arg| json!({
-            "key": arg.key,
-            "long": arg.long,
-            "value_name": arg.value_name,
-            "description": arg.help,
-            "required": arg.required,
-            "kind": arg_kind_name(&arg.kind),
-        })).collect::<Vec<_>>(),
+        "arguments": command
+            .args
+            .iter()
+            .map(|arg| json!({
+                "key": arg.key,
+                "long": arg.long,
+                "value_name": arg.value_name,
+                "description": arg.help,
+                "required": arg.required,
+                "kind": arg_kind_name(&arg.kind),
+            }))
+            .collect::<Vec<_>>(),
         "common_flags": ["pretty", "debug-snapshot"],
     })
 }

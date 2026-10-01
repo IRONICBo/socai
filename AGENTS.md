@@ -5,9 +5,9 @@ app (`app/`). The Rust core is the active shared implementation for
 CLI/TUI/Tauri.
 
 Build, run, local-dev workflows, and the reference-docs index live in
-[DEVELOPMENT.md](./DEVELOPMENT.md). The [README](./README.md) is user-facing
-only (CLI install + usage, desktop download); keep developer material out of it
-and in DEVELOPMENT.md instead.
+[DEVELOPMENT.md](./DEVELOPMENT.md). The [README](./README.md) is the user-facing
+product pitch. Install, commands, and browser setup live in
+[docs/guide.md](./docs/guide.md). Keep developer material in DEVELOPMENT.md.
 
 ## Engineering rules
 
@@ -102,6 +102,31 @@ Gotchas:
 - The Vite dev server ignores `src-tauri/**` (see `vite.config.ts`) so Rust
   file changes don't cause spurious frontend reloads. Rust edits trigger a
   full Tauri shell restart instead.
+
+## WorkBuddy ecosystem packages — `plugins/workbuddy/`
+
+Skill and expert packages published to the WorkBuddy / CodeBuddy marketplace.
+Layout, packaging, and upload paths are documented in
+[`plugins/workbuddy/README.md`](./plugins/workbuddy/README.md).
+
+Rules:
+
+- **The Xiaohongshu skill source of truth is `plugins/workbuddy/xiaohongshu-socai/`.**
+  `xiaohongshu-research-expert/skills/` is a build artifact injected by
+  `build.sh` — never edit it by hand. The multi-platform WorkBuddy skill has
+  its own source at `plugins/workbuddy/socai-social-research/`.
+- **Run `plugins/workbuddy/build.sh` after any skill change.** It validates
+  frontmatter / `plugin.json` against the open-platform spec before zipping, so
+  a spec violation fails the build instead of failing upload. Three zips are
+  produced: the Xiaohongshu skill, the multi-platform skill, and the expert
+  (with the Xiaohongshu skill inlined).
+- Expert display copy has hard constraints the validator enforces:
+  `displayDescription.zh` must be 40–50 characters, `tags` and `quickPrompts`
+  must each have exactly 3 entries, `defaultInitPrompt` must equal
+  `quickPrompts[0]`, and the avatar must be ≤500KB.
+- Keep the expert's product category at `05-MarketingGrowth`. Do not move it to
+  `02-Engineering` — WorkBuddy's audience is office knowledge workers, and that
+  category gets no traffic.
 
 ## WeChat group QR maintenance
 

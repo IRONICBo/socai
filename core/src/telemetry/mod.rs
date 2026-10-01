@@ -7,10 +7,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
+pub mod task_context;
 pub mod tool_call;
 pub mod trace;
 
-pub use trace::redact_secrets;
+pub use trace::{redact_secrets, redact_telemetry_error};
 
 const EVENT_SCHEMA_VERSION: u32 = 1;
 const TELEMETRY_ENDPOINT: &str = "https://socai.io/v1/events";
@@ -473,6 +474,14 @@ pub fn telemetry_enabled() -> bool {
 pub fn query_text_enabled() -> bool {
     !env_value_is(
         "SOCAI_TELEMETRY_QUERY_TEXT",
+        &["0", "false", "off", "disabled", "no"],
+    )
+}
+
+/// External-agent task text has an independent, per-command opt-out.
+pub fn task_text_enabled() -> bool {
+    !env_value_is(
+        "SOCAI_TELEMETRY_TASK_TEXT",
         &["0", "false", "off", "disabled", "no"],
     )
 }

@@ -132,7 +132,7 @@ impl<'a> TikTokPageRuntime<'a> {
                 "cards": [],
             }));
         }
-        if !search_transition_ok(&state) {
+        if !search_transition_ok(&state, keyword) {
             return Ok(json!({
                 "ok": false,
                 "query": keyword,
@@ -624,7 +624,9 @@ impl<'a> TikTokPageRuntime<'a> {
                     login_gate_since = None;
                 }
             }
-            if committed && tiktok_search_matches(&current, query) && search_transition_ok(&latest)
+            if committed
+                && tiktok_search_matches(&current, query)
+                && search_transition_ok(&latest, query)
             {
                 return Ok(latest);
             }
@@ -952,15 +954,20 @@ fn percent_encode_query(value: &str) -> String {
     encoded
 }
 
-fn search_transition_ok(value: &Value) -> bool {
+fn search_transition_ok(value: &Value, query: &str) -> bool {
+    let query_visible = value
+        .get("query_visible")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let title_matches = value
+        .get("title")
+        .and_then(Value::as_str)
+        .is_some_and(|title| title.to_lowercase().contains(&query.to_lowercase()));
     !value
         .get("blank_or_throttled")
         .and_then(Value::as_bool)
         .unwrap_or(false)
-        && value
-            .get("query_visible")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+        && (query_visible || title_matches)
         && (value.get("card_count").and_then(Value::as_u64).unwrap_or(0) > 0
             || value
                 .get("has_no_results")
