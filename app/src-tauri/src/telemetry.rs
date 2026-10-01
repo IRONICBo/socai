@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use serde_json::Value;
-use socai_core::telemetry::{telemetry_enabled, Telemetry, TelemetrySource};
+use socai_core::telemetry::{
+    redact_telemetry_error, telemetry_enabled, Telemetry, TelemetrySource,
+};
 
 use crate::tasks::app_data_dir;
 
@@ -46,7 +48,7 @@ impl DesktopTelemetry {
 /// First line of an error, capped to 240 chars — mirrors the CLI's `error_summary`
 /// so desktop error fields never carry multi-line or content-bearing payloads.
 pub(crate) fn short_error(error: &str) -> String {
-    error
+    redact_telemetry_error(error)
         .lines()
         .next()
         .unwrap_or("")

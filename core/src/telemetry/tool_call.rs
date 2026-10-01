@@ -1,8 +1,8 @@
 //! Shared summarization of a site tool call for the `socai_tool_call` telemetry
 //! event. Both the CLI daemon and the desktop app feed their tool invocations
 //! through here, so every site (xhs, dy, and any future site) is reported
-//! through one code path — there is no per-site or per-arg whitelist to keep in
-//! sync, and newly-added commands/params are captured automatically.
+//! through one code path. Newly-added commands and parameters are captured as
+//! privacy-safe shapes by default instead of forwarding arbitrary text.
 
 use serde_json::{json, Map, Value};
 
@@ -10,10 +10,11 @@ const PAGE_OCR_MAX_CHARS: usize = 200;
 
 /// Summarize a tool call's input arguments. The search `query` is the one gated
 /// arg: its character length is always reported, but the raw text only when
-/// `include_query_text` is on. Every other arg flows into a nested `metadata`
-/// object as-is, so newly-added params/commands/sites are captured
-/// automatically. Only the arguments are summarized here — ordinary tool
-/// output (note bodies, comments) is never included; see
+/// `include_query_text` is on. Other booleans and numbers are retained, while
+/// strings, arrays, and objects become lengths/counts so post locators,
+/// usernames, comments, and future free-text fields cannot enter telemetry by
+/// default. Only the arguments are summarized here — ordinary tool output
+/// (note bodies, comments) is never included; see
 /// [`summarize_tool_result`] for bounded failure-page OCR diagnostics.
 pub fn summarize_tool_args(args: &Value, include_query_text: bool) -> Map<String, Value> {
     let mut props = Map::new();
@@ -38,10 +39,7 @@ pub fn summarize_tool_args(args: &Value, include_query_text: bool) -> Map<String
             }
             continue;
         }
-        if let Some(mut value) = meaningful_metadata_value(value) {
-            super::trace::redact_secrets_in_value(&mut value);
-            metadata.insert(key.clone(), value);
-        }
+        summarize_metadata_value(&mut metadata, key, value);
     }
     if !metadata.is_empty() {
         props.insert("metadata".into(), Value::Object(metadata));
@@ -49,24 +47,28 @@ pub fn summarize_tool_args(args: &Value, include_query_text: bool) -> Map<String
     props
 }
 
-/// Normalize an arg value for `metadata`, returning `None` for the
-/// "unset"/default shapes that shouldn't be reported: `null`, `false`,
-/// empty/whitespace-only strings, and empty arrays/objects. Strings are trimmed;
-/// every other value is reported verbatim.
-fn meaningful_metadata_value(value: &Value) -> Option<Value> {
+/// Keep useful parameter shape without retaining arbitrary user/platform text.
+/// Derived keys remain shallow primitives so the telemetry proxy can enforce
+/// its existing bounded `metadata` contract.
+fn summarize_metadata_value(metadata: &mut Map<String, Value>, key: &str, value: &Value) {
     match value {
-        Value::Null | Value::Bool(false) => None,
+        Value::Null | Value::Bool(false) => {}
+        Value::Bool(true) | Value::Number(_) => {
+            metadata.insert(key.to_string(), value.clone());
+        }
         Value::String(text) => {
             let text = text.trim();
-            if text.is_empty() {
-                None
-            } else {
-                Some(json!(text))
+            if !text.is_empty() {
+                metadata.insert(format!("{key}_len"), json!(text.chars().count()));
             }
         }
-        Value::Array(items) if items.is_empty() => None,
-        Value::Object(map) if map.is_empty() => None,
-        other => Some(other.clone()),
+        Value::Array(items) if !items.is_empty() => {
+            metadata.insert(format!("{key}_count"), json!(items.len()));
+        }
+        Value::Object(fields) if !fields.is_empty() => {
+            metadata.insert(format!("{key}_field_count"), json!(fields.len()));
+        }
+        Value::Array(_) | Value::Object(_) => {}
     }
 }
 
@@ -146,7 +148,7 @@ pub fn summarize_tool_result(value: &Value) -> Map<String, Value> {
     if let Some(error) = find_string(data, "page_ocr_error") {
         props.insert(
             "page_ocr_error".into(),
-            json!(super::trace::redact_secrets(error)
+            json!(super::trace::redact_telemetry_error(error)
                 .chars()
                 .take(PAGE_OCR_MAX_CHARS)
                 .collect::<String>()),
@@ -155,21 +157,17 @@ pub fn summarize_tool_result(value: &Value) -> Map<String, Value> {
     if let Some(error) = find_string(data, "page_error") {
         props.insert(
             "page_error".into(),
-            json!(super::trace::redact_secrets(error)
+            json!(super::trace::redact_telemetry_error(error)
                 .chars()
                 .take(240)
                 .collect::<String>()),
         );
     }
     if let Some(url) = find_string(data, "page_url") {
-        let path_only = url.split(['?', '#']).next().unwrap_or(url);
-        props.insert(
-            "page_url".into(),
-            json!(super::trace::redact_secrets(path_only)
-                .chars()
-                .take(500)
-                .collect::<String>()),
-        );
+        if let Some((origin, path_depth)) = page_url_shape(url) {
+            props.insert("page_url".into(), json!(origin));
+            props.insert("page_path_depth".into(), json!(path_depth));
+        }
     }
     if data.get("ok").and_then(Value::as_bool) == Some(false) {
         if let Some(reason) = data.get("reason").and_then(Value::as_str) {
@@ -180,6 +178,20 @@ pub fn summarize_tool_result(value: &Value) -> Map<String, Value> {
         }
     }
     props
+}
+
+fn page_url_shape(value: &str) -> Option<(String, usize)> {
+    let url = reqwest::Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return None;
+    }
+    let path_depth = url
+        .path_segments()
+        .into_iter()
+        .flatten()
+        .filter(|segment| !segment.is_empty())
+        .count();
+    Some((url.origin().ascii_serialization(), path_depth))
 }
 
 /// Summarize the model-visible content blocks emitted by a trusted site tool.
@@ -297,18 +309,20 @@ mod tests {
             .and_then(Value::as_object)
             .expect("metadata object");
         assert!(!metadata.contains_key("query"));
-        assert_eq!(metadata.get("author_id"), Some(&json!("abc")));
+        assert_eq!(metadata.get("author_id_len"), Some(&json!(3)));
+        assert!(!metadata.contains_key("author_id"));
         assert_eq!(metadata.get("num_notes"), Some(&json!(12)));
         assert_eq!(metadata.get("debug_snapshot"), Some(&json!(true)));
     }
 
     #[test]
-    fn reports_arbitrary_params_without_a_whitelist() {
-        // `author_id` (xhs) and any future site's params flow through generically;
+    fn reports_arbitrary_param_shapes_without_forwarding_text() {
+        // Future params flow through generically as safe scalar/count metadata;
         // defaulted flags (`preview: false`) stay out of the payload.
         let props = summarize_tool_args(
             &json!({
                 "author_id": "5ff00000000000000000abcd",
+                "posts": ["https://www.instagram.com/p/private-shortcode/"],
                 "num_notes": 8,
                 "preview": false,
                 "download_media": true
@@ -319,10 +333,10 @@ mod tests {
             .get("metadata")
             .and_then(Value::as_object)
             .expect("metadata object");
-        assert_eq!(
-            metadata.get("author_id"),
-            Some(&json!("5ff00000000000000000abcd"))
-        );
+        assert_eq!(metadata.get("author_id_len"), Some(&json!(24)));
+        assert_eq!(metadata.get("posts_count"), Some(&json!(1)));
+        assert!(!metadata.contains_key("author_id"));
+        assert!(!metadata.contains_key("posts"));
         assert_eq!(metadata.get("num_notes"), Some(&json!(8)));
         assert_eq!(metadata.get("download_media"), Some(&json!(true)));
         assert!(!metadata.contains_key("preview"), "defaulted false dropped");
@@ -385,8 +399,9 @@ mod tests {
         assert_eq!(props.get("page_error"), Some(&json!("not_profile_page")));
         assert_eq!(
             props.get("page_url"),
-            Some(&json!("https://www.xiaohongshu.com/explore/abc"))
+            Some(&json!("https://www.xiaohongshu.com"))
         );
+        assert_eq!(props.get("page_path_depth"), Some(&json!(2)));
         assert_eq!(
             props
                 .get("page_ocr_text")

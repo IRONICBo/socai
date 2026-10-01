@@ -147,15 +147,16 @@ a filter the proxy enforces). Any new client field reaches Axiom automatically.
 | `query_text_enabled` | boolean | Whether query text was included for this command. |
 | `query_text` | string | Search query text when enabled. Omitted when redacted. |
 | `query_len` | number | Query length in Unicode scalar values. Kept even when text is redacted. |
-| `metadata` | object | Explicit optional CLI parameters only. Defaults are omitted. |
+| `metadata` | object | Privacy-safe shapes of explicit optional CLI parameters. Defaults are omitted. Booleans/numbers retain their values; arbitrary strings, arrays, and objects become lengths/counts. |
 
 Current metadata keys:
 
 | Metadata key | Type | Source CLI flag | Omitted when |
 | --- | --- | --- | --- |
-| `metadata.tab` | string | `search --tab <value>` | `--tab` is not passed or is empty. |
+| `metadata.tab_len` | number | Character length of `search --tab <value>`; the value itself is not sent. | `--tab` is not passed or is empty. |
 | `metadata.num_notes` | number | `search --num-notes <n>` | `--num-notes` is not passed. |
 | `metadata.debug_snapshot` | boolean | `--debug-snapshot` | `--debug-snapshot` is not passed / false. |
+| `metadata.posts_count` | number | Number of entries supplied to a multi-post command; post locators are not sent. | The list is missing or empty. |
 
 ### Duration, status, and safe result metrics
 
@@ -164,7 +165,7 @@ Current metadata keys:
 | `duration_ms` | number | Command runtime in milliseconds. |
 | `outcome` | string | Terminal state: `completed` or `failed` on `socai_tool_call`, and `interrupted` on `socai_tool_call_interrupted`; browser events additionally use `requested` and `disconnected`. |
 | `ok` | boolean | Whether the command returned successfully. |
-| `error` | string | Secret-redacted, first-line command error when `ok=false`; browser failures use a path-free summary. |
+| `error` | string | Secret-redacted, first-line command error when `ok=false`; URL paths, queries, and fragments are replaced by an origin-level marker. |
 | `error_type` | string | Stable failure class when available; interrupted commands use `command_interrupted`, and browser failures use a browser-specific category. |
 | `attempt` | number | Browser connection attempt number on `socai_browser_connect` requested events. |
 | `result_ok` | boolean | Safe `data.ok` result flag when present. |
@@ -176,7 +177,8 @@ Current metadata keys:
 | `has_run_dir` | boolean | Whether the command returned a run directory. |
 | `failure_reason` | string | Semantic failure reason when a tool returns `ok=false`. |
 | `page_error` | string | Error or reason associated with the unexpected page/control diagnostic, for example `not_profile_page` or `search_input_not_found`. |
-| `page_url` | string | Unexpected page URL without query or fragment, so access failures can be identified without reporting XHS tokens. |
+| `page_url` | string | Origin of an unexpected page URL; path, query, fragment, account, and post locators are omitted. |
+| `page_path_depth` | number | Number of non-empty URL path segments, retained without their values. |
 | `page_ocr_text` | string | Secret-redacted OCR from the center 70% when XHS has an unexpected page state or a required page control is missing, capped at 200 Unicode characters. |
 | `page_ocr_region` | string | OCR crop identifier; currently `center_70_percent`. |
 | `page_ocr_truncated` | boolean | Whether the recognized page text exceeded 200 characters. |
@@ -332,14 +334,15 @@ forms back to the agent turn shown in the trace viewer. Neither form includes
 the exported content, document URL/ID, chat ID, or Feishu account/profile.
 
 `socai_tool_call` mirrors the CLI tool trace's argument summary: the tool's
-`query` argument is lifted to `query_text` + `query_len`, a `note_id` argument
-collapses to a `note_id_present` boolean (the raw id is not sent), and any other
-scalar arguments go under `metadata` — with the `tab_label` arg renamed to `tab`
-and empty strings dropped, matching the CLI. Note bodies, comments, and normal
-scraped content are never included. The sole output-text exception is a
-secret-redacted, 200-character OCR excerpt from the center 70% of the viewport
-when XHS lands on an unexpected page or a required page control cannot be
-found; this is accompanied by the page URL with its query and fragment removed.
+`query` argument is lifted to `query_text` + `query_len`; other boolean/number
+arguments go under `metadata`, while strings, arrays, and objects become
+`*_len`, `*_count`, and `*_field_count`. This secure default covers newly-added
+parameters without forwarding note ids, usernames, post locators, comments, or
+other free text. Note bodies, comments, and normal scraped content are never
+included. The sole output-text exception is a secret-redacted, 200-character
+OCR excerpt from the center 70% of the viewport when XHS lands on an unexpected
+page or a required page control cannot be found; its URL is reduced to origin
+and path depth.
 
 Unlike the CLI's `query_text`, **the desktop has no opt-out for `task_text`**: it
 is sent whenever desktop telemetry is enabled. `SOCAI_TELEMETRY=off` is the only
@@ -426,6 +429,9 @@ pipeline for reading what an agent actually did:
   previous LLM call), `gen_ai.output.messages` (that call's full response,
   including reasoning/thinking content and tool calls), and
   `gen_ai.system_instructions` (once per run, again when it changes).
+  Tool-call arguments inside these messages use the same privacy-safe summary
+  as event telemetry instead of the original argument object. Tool-result text
+  remains part of content-bearing chat telemetry and follows the chat-text gate.
 - `execute_tool` spans — the argument summary (query text under the
   `SOCAI_TELEMETRY_QUERY_TEXT` gate), count-only result metrics, and
   `socai.notes`: id/title/caption/stats summaries of notes the tool returned.
@@ -442,9 +448,10 @@ pipeline for reading what an agent actually did:
   `socai.pro_subscribed` when logged in. No device token or server user id is
   included.
 
-Never uploaded, regardless of settings: image bytes/screenshots, Anthropic
-thinking signatures, encrypted reasoning items, and browser cookies/session
-storage. For secrets, every uploaded text field — chat content, the root
+Never uploaded, regardless of settings: raw structured tool arguments (except
+explicitly enabled query text), image bytes/screenshots, Anthropic thinking
+signatures, encrypted reasoning items, and browser cookies/session storage.
+For secrets, every uploaded text field — chat content, the root
 `socai.task_text`, and `query_text` on both pipelines — passes a client-side
 scrubber for secret-shaped values before upload: `sk-`-prefixed api keys,
 JWT-shaped tokens, `Bearer` header values, and sensitive JSON fields
@@ -472,8 +479,8 @@ note summaries. It is **not** a text-free trace: the root span still carries
 `socai.task_text` (only `SOCAI_TELEMETRY=off` suppresses it), and tool spans
 still carry the `socai.query_text` / `socai.metadata` argument summaries.
 Query text has its own gate — `SOCAI_TELEMETRY_QUERY_TEXT=off` — which also
-redacts the `query` argument inside chat tool-call parts (tool *results* can
-still echo the query; removing those requires the chat gate).
+omits query text from the safe summaries inside chat tool-call parts (tool
+*results* can still echo the query; removing those requires the chat gate).
 `SOCAI_TELEMETRY=off` disables the desktop telemetry pipeline entirely,
 including trace upload.
 
@@ -500,8 +507,9 @@ Proxy behavior in `site/api/telemetry.js`:
 
 CLI behavior in `cli/src/daemon.rs`:
 
-- Error summaries are first-line strings capped to 240 characters before proxy
-  sanitization.
+- Error summaries are secret-redacted first-line strings capped to 240
+  characters before proxy sanitization. HTTP(S)/WebSocket URLs retain only the
+  origin plus a `<redacted>` marker.
 - Safe result metrics are counts/booleans only, not raw XHS content.
 
 ## Example: normal `search` trace
@@ -539,7 +547,7 @@ Representative Axiom row after proxy sanitization:
   "query_len": 6,
   "metadata": {
     "num_notes": 12,
-    "tab": "latest"
+    "tab_len": 6
   },
   "duration_ms": 42130,
   "ok": true,
