@@ -238,6 +238,9 @@ impl AgentRunRecorder {
             .map_err(std::io::Error::other)?;
         value["text_blocks"] = json!([text]);
         value["tool_calls"] = json!([]);
+        value["reasoning_content"] = json!("");
+        value["thinking_blocks"] = json!([]);
+        value["reasoning_items"] = json!([]);
         value["user_visible"] = json!(true);
         write_json_atomic(&path, &value)
     }
