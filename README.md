@@ -110,6 +110,15 @@ CLI on macOS:
 curl -fsSL https://github.com/socai-io/socai/releases/latest/download/install.sh | sh
 ```
 
+Connect the installed CLI to Codex, Claude Code, Cursor, Gemini CLI, OpenCode, GitHub Copilot, and other local Agent Skills hosts:
+
+```bash
+socai integrate install all
+socai integrate status --json
+```
+
+The portable [`socai-social-research` Skill](https://skills.sh/socai-io/socai/socai-social-research) keeps agent-driven research read-only and covers all six supported platforms.
+
 Windows install, agent setup, platform commands, Chrome profiles, and artifacts are in the [user guide](docs/guide.md). Development notes are in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Built with socai
