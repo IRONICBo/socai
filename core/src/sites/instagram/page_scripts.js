@@ -105,7 +105,7 @@
     if (POST_PATH.test(path)) return postIdentity(location.href).kind;
     if (/^\/explore\/tags\//i.test(path)) return 'hashtag';
     if (/^\/explore\/locations\//i.test(path)) return 'location';
-    if (profileUsername(location.href)) return 'profile';
+    if (profilePageUsername()) return 'profile';
     if (/^\/(?:reels|explore)(?:\/|$)/i.test(path)) return 'explore';
     if (path === '/' || path === '') return 'home';
     return 'unknown';
@@ -201,7 +201,7 @@
   }
 
   function hasProfileContent() {
-    if (!profileUsername(location.href)) return false;
+    if (!profilePageUsername()) return false;
     const title = metaContent('og:title');
     return !!title || !!document.querySelector('main h1, main h2');
   }
@@ -581,7 +581,7 @@
   }
 
   function scrollPosts(arg) {
-    if (!profileUsername(location.href) || postIdentity(location.href)) {
+    if (!profilePageUsername() || postIdentity(location.href)) {
       return { ok: false, status: 'not_profile', url: location.href };
     }
     const input = arg || {};
@@ -642,7 +642,7 @@
     const output = [];
     const seen = new Set();
     const main = document.querySelector('main') || document;
-    const activeUsername = profileUsername(location.href);
+    const activeUsername = profilePageUsername();
     for (const link of main.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]')) {
       if (viewportOnly && !inViewport(link)) continue;
       const url = instagramUrl(link.href || link.getAttribute('href'));
@@ -662,10 +662,37 @@
         title: description,
         thumbnail_url: image && (image.currentSrc || image.src) || '',
         position: output.length + 1,
+        ...profileViews(link),
       });
       if (output.length >= limit) break;
     }
     return output;
+  }
+
+  function profilePageUsername() {
+    const match = location.pathname.match(/^\/([A-Za-z0-9._]+)(?:\/reels)?\/?$/i);
+    return match ? profileUsername(`/${match[1]}/`) : '';
+  }
+
+  function profileViews(link) {
+    const missing = { view_count: null, view_count_source: 'unavailable' };
+    let node = link.querySelector('svg[aria-label="View Count Icon" i]');
+    if (!visible(node)) return missing;
+    for (; node && node !== link; node = node.parentElement) {
+      const sibling = node.nextElementSibling;
+      if (!visible(sibling) || sibling.querySelector('svg')) continue;
+      const text = cleanText(sibling, 100);
+      // The shared metric parser also accepts labelled likes/comments. The
+      // Reels overlay observed beside this icon is a bare numeric reading, so
+      // reject any other text instead of borrowing an ancestor's metric.
+      if (!/^[\d.,]+\s*[KMB万亿]?$/i.test(text)) continue;
+      const metric = postMetric(text, 'visible_reels_grid');
+      if (metric.value !== null) return {
+        view_count: metric.value, view_count_text: text,
+        view_count_approximate: metric.approximate, view_count_source: metric.source,
+      };
+    }
+    return missing;
   }
 
   function ownedClickPoint(node) {
@@ -892,10 +919,14 @@
   }
 
   function profileDetail() {
-    const username = profileUsername(location.href);
+    const username = profilePageUsername();
     const state = pageState();
     if (!username) {
-      return { ok: false, status: 'not_profile', url: location.href, page_state: state };
+      return {
+        ok: false, status: 'not_profile', url: location.href, page_state: state,
+        login_required: state.login_required || state.login_gate_present,
+        challenge_required: state.challenge_required, rate_limited: state.rate_limited,
+      };
     }
     const description = metaContent('description') || metaContent('og:description');
     const title = metaContent('og:title') || document.title || '';
@@ -915,13 +946,15 @@
     const privateNotice = profilePrivateNotice();
     const contentAvailable = hasProfileContent() && !!(title || description || visiblePosts.length || privateNotice);
     const stableFor = searchResultStability(visiblePosts.length, `profile-grid:${username}`);
-    const gridReady = !!privateNotice || (stableFor >= 800 && (visiblePosts.length > 0 || stats.post_count === 0));
+    const reelsTab = /^\/[A-Za-z0-9._]+\/reels\/?$/i.test(location.pathname);
+    const gridReady = !!privateNotice || (stableFor >= 800 &&
+      (visiblePosts.length > 0 || stats.post_count === 0 || reelsTab));
     const detail = {
-      ok: contentAvailable && gridReady && !state.challenge_required && !state.rate_limited,
+      ok: contentAvailable && gridReady && !state.login_required && !state.login_gate_present && !state.challenge_required && !state.rate_limited,
       status: !contentAvailable ? (state.login_required ? 'login_required' : 'unhydrated') : gridReady ? 'profile' : 'hydrating',
       id: username,
       username,
-      url: canonicalPageUrl(),
+      url: instagramUrl(`/${username}/`),
       display_name: cleanText(nameMatch && nameMatch[1] || '', 500),
       bio: cleanText(bioMatch && bioMatch[1] || '', 5000),
       followers: stats.followers,
@@ -931,6 +964,12 @@
       external_url: external,
       visible_post_count: visiblePosts.length,
       login_gate_present: state.login_gate_present,
+      login_required: state.login_required || state.login_gate_present,
+      challenge_required: state.challenge_required,
+      rate_limited: state.rate_limited,
+      reels_url: main && Array.from(main.querySelectorAll('a[href]')).some((link) =>
+        instagramUrl(link.href) === instagramUrl(`/${username}/reels/`))
+        ? instagramUrl(`/${username}/reels/`) : '',
     };
     if (privateNotice) {
       detail.private = true;
@@ -1517,7 +1556,7 @@
       content_available: contentAvailable,
       result_count: searchCount,
       search_query: searchSurfaceActive() ? currentSearchQuery() : '',
-      profile_username: profileUsername(location.href),
+      profile_username: profilePageUsername(),
       hydrated,
       blank_or_throttled: document.readyState === 'loading' || (bodyLength < 20 && !challenge && !limited),
     };

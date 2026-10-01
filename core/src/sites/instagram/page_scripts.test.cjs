@@ -608,3 +608,92 @@ test('loginState reads the observed Instagram shell', () => {
   const unknown = load([], '/explore/');
   assert.equal(unknown.window.SocaiInstagramPageScripts.loginState().login, 'unknown');
 });
+
+test('profile Reel counts come only from the visible View Count Icon and retain display precision', () => {
+  const rect = { width: 100, height: 100, top: 0, left: 0, bottom: 100, right: 100 };
+  function card(id, text, hidden = false) {
+    const count = { innerText: text, getBoundingClientRect: () => hidden ? { width: 0, height: 0 } : rect, querySelector: () => null };
+    const wrapper = { nextElementSibling: count };
+    const icon = { parentElement: wrapper, getBoundingClientRect: () => rect };
+    const link = {
+      href: `https://www.instagram.com/creator/reel/${id}/`,
+      innerText: '414\n73\n' + text, // Hidden hover likes/comments must never become views.
+      getBoundingClientRect: () => rect,
+      querySelector: selector => selector.includes('View Count Icon') && text !== null ? icon : null,
+    };
+    wrapper.parentElement = link;
+    icon.parentElement = wrapper;
+    return link;
+  }
+  const cards = [card('First123', '26.5K'), card('Second123', '268K'), card('Exact123', '1,234'), card('Zero123', '0'), card('Unknown123', null), card('Hidden123', '999', true), card('Bad123', 'Unavailable'), card('Comments123', '73 comments'), card('Likes123', '414 likes')];
+  const main = { querySelectorAll: selector => selector.includes('/reel/') ? cards : [] };
+  const document = { querySelector: selector => selector === 'main' ? main : null, querySelectorAll: () => [] };
+  const window = { getComputedStyle: () => ({ visibility: 'visible', display: 'block' }) };
+  const location = { href: 'https://www.instagram.com/creator/reels/', pathname: '/creator/reels/' };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'page_scripts.js'), 'utf8'), { URL, document, window, location });
+  const posts = window.SocaiInstagramPageScripts.profilePosts({ limit: 10 });
+  assert.equal(window.SocaiInstagramPageScripts.pageState().page_type, 'profile');
+  assert.equal(window.SocaiInstagramPageScripts.pageState().profile_username, 'creator');
+  assert.equal(posts[0].view_count, 26500);
+  assert.equal(posts[0].view_count_text, '26.5K');
+  assert.equal(posts[0].view_count_approximate, true);
+  assert.equal(posts[0].view_count_source, 'visible_reels_grid');
+  assert.equal(posts[1].view_count, 268000);
+  assert.equal(posts[2].view_count, 1234);
+  assert.equal(posts[2].view_count_approximate, false);
+  assert.equal(posts[3].view_count, 0);
+  for (const post of posts.slice(4)) {
+    assert.equal(post.view_count, null);
+    assert.equal(post.view_count_source, 'unavailable');
+    assert.equal(post.is_pinned, undefined);
+  }
+});
+
+test('empty Reels tab settles independently from the account post count', () => {
+  let now = 0;
+  const metadata = {
+    'og:title': 'Creator (@creator)',
+    description: '10 posts, 100 followers, 2 following',
+  };
+  const main = { querySelector: () => null, querySelectorAll: () => [] };
+  const document = {
+    body: { innerText: 'Hydrated profile with an empty Reels tab' },
+    readyState: 'complete',
+    title: 'Creator',
+    querySelector: selector => {
+      const meta = selector.match(/^meta\[property="([^"]+)"\], meta\[name="\1"\]$/);
+      if (meta && metadata[meta[1]]) return { getAttribute: () => metadata[meta[1]] };
+      if (selector === 'main') return main;
+      return null;
+    },
+    querySelectorAll: () => [],
+  };
+  const window = { getComputedStyle: () => ({ visibility: 'visible', display: 'block' }) };
+  const location = { href: 'https://www.instagram.com/creator/reels/', pathname: '/creator/reels/' };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'page_scripts.js'), 'utf8'), {
+    URL, Date: { now: () => now }, document, window, location,
+  });
+
+  assert.equal(window.SocaiInstagramPageScripts.profileDetail().status, 'hydrating');
+  now = 1000;
+  const detail = window.SocaiInstagramPageScripts.profileDetail();
+  assert.equal(detail.ok, true);
+  assert.equal(detail.status, 'profile');
+  assert.equal(detail.post_count, 10);
+  assert.equal(detail.visible_post_count, 0);
+});
+
+test('profile detail exposes redirected login and challenge gates at the top level', () => {
+  const document = { querySelector: () => null, querySelectorAll: () => [] };
+  const window = { getComputedStyle: () => ({ visibility: 'visible', display: 'block' }) };
+  const location = { href: 'https://www.instagram.com/challenge/fixture/', pathname: '/challenge/fixture/' };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'page_scripts.js'), 'utf8'), { URL, document, window, location });
+  let detail = window.SocaiInstagramPageScripts.profileDetail();
+  assert.equal(detail.challenge_required, true);
+  assert.equal(detail.ok, false);
+  location.href = 'https://www.instagram.com/accounts/login/';
+  location.pathname = '/accounts/login/';
+  detail = window.SocaiInstagramPageScripts.profileDetail();
+  assert.equal(detail.login_required, true);
+  assert.equal(detail.ok, false);
+});

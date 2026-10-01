@@ -22,6 +22,12 @@ use crate::sites::skill_cli::{
 };
 
 const SITE_ID: &str = "instagram";
+const VIEW_COUNT_FIELDS: [&str; 4] = [
+    "view_count",
+    "view_count_text",
+    "view_count_approximate",
+    "view_count_source",
+];
 const HOME_URL: &str = "https://www.instagram.com/";
 const HOST_ROOT: &str = "instagram.com";
 const RESERVED_PROFILE_NAMES: &[&str] = &[
@@ -845,7 +851,7 @@ impl Tool for ProfileTool {
                 json!({ "profile": locator, "url": url, "state": state }),
             )));
         }
-        let posts = invoke_browser_tool(
+        let mut posts = invoke_browser_tool(
             &self.page,
             ctx,
             SITE_ID,
@@ -861,6 +867,76 @@ impl Tool for ProfileTool {
                 "profile_posts_unavailable",
                 json!({ "profile": locator, "url": url }),
             )));
+        }
+        // The Posts grid has no view overlay. Read only the observed same-profile
+        // Reels tab and attach counts by id, retaining the original post sample.
+        if let Some(reels_url) = state
+            .get("reels_url")
+            .and_then(Value::as_str)
+            .filter(|tab| {
+                !tab.is_empty()
+                    && *tab != url
+                    && state.get("private").and_then(Value::as_bool) != Some(true)
+            })
+        {
+            let enrichment: anyhow::Result<Option<&str>> = async {
+                let reels_url = instagram_profile_url(reels_url)?;
+                navigate_https(&self.page, &reels_url).await?;
+                let reels_state =
+                    wait_for_browser_tool(&self.page, SITE_ID, "profileDetail", None, wait_seconds)
+                        .await?;
+                if let Some(reason) = gate_reason(&reels_state) {
+                    return Ok(Some(reason));
+                }
+                if reels_state.get("ok").and_then(Value::as_bool) == Some(true) {
+                    let reels = invoke_browser_tool(
+                        &self.page,
+                        ctx,
+                        SITE_ID,
+                        "profilePosts",
+                        Some(&json!({ "limit": num })),
+                        true,
+                    )
+                    .await?;
+                    if let (Some(cards), Some(readings)) = (posts.as_array_mut(), reels.as_array())
+                    {
+                        for card in cards {
+                            if let Some(reading) = readings.iter().find(|reel| {
+                                reel.get("id") == card.get("id")
+                                    && reel.get("view_count").and_then(Value::as_u64).is_some()
+                            }) {
+                                for key in VIEW_COUNT_FIELDS {
+                                    if let Some(value) = reading.get(key) {
+                                        card[key] = value.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                navigate_https(&self.page, &url).await?;
+                let restored =
+                    wait_for_browser_tool(&self.page, SITE_ID, "profileDetail", None, wait_seconds)
+                        .await?;
+                if let Some(reason) = gate_reason(&restored) {
+                    return Ok(Some(reason));
+                }
+                if restored.get("ok").and_then(Value::as_bool) != Some(true) {
+                    return Ok(Some("profile_reload_unavailable"));
+                }
+                Ok(None)
+            }
+            .await;
+            let reason = match enrichment {
+                Ok(reason) => reason,
+                Err(_) => Some("profile_views_unavailable"),
+            };
+            if let Some(reason) = reason {
+                return Ok(json_result(&failure_payload(
+                    reason,
+                    compact_profile(&state, &posts),
+                )));
+            }
         }
         let mut payload = compact_profile(&state, &posts);
         if deep > 0 {
@@ -2269,6 +2345,11 @@ fn compact_profile_posts(posts: &Value) -> Value {
                 {
                     item["thumbnail_url"] = json!(thumb);
                 }
+                for key in VIEW_COUNT_FIELDS {
+                    if let Some(value) = post.get(key) {
+                        item[key] = value.clone();
+                    }
+                }
                 item
             })
             .collect(),
@@ -2422,8 +2503,8 @@ fn instagram_profile_url(locator: &str) -> anyhow::Result<String> {
             .flatten()
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>();
-        if parts.len() != 1 || !valid_instagram_username(parts[0]) {
-            anyhow::bail!("Instagram profile URL must identify exactly one profile");
+        if !matches!(parts.as_slice(), [_] | [_, "reels"]) || !valid_instagram_username(parts[0]) {
+            anyhow::bail!("Instagram profile URL must identify one profile or its Reels tab");
         }
         url.set_query(None);
         url.set_fragment(None);
@@ -2495,4 +2576,48 @@ fn instagram_post_shortcode(raw_url: &str) -> Option<String> {
         return None;
     }
     Some(shortcode.to_string())
+}
+
+#[cfg(test)]
+mod view_count_tests {
+    use super::*;
+
+    #[test]
+    fn profile_projection_preserves_view_precision_and_unknowns() {
+        let cards = json!([
+            {"id":"Fixture123", "kind":"reel", "url":"https://www.instagram.com/reel/Fixture123/",
+             "view_count":26500, "view_count_text":"26.5K", "view_count_approximate":true,
+             "view_count_source":"visible_reels_grid"},
+            {"id":"Missing123", "view_count":null, "view_count_source":"unavailable"}
+        ]);
+        let posts = compact_profile_posts(&cards);
+        for key in [
+            "view_count",
+            "view_count_text",
+            "view_count_approximate",
+            "view_count_source",
+        ] {
+            assert_eq!(posts[0][key], cards[0][key]);
+        }
+        assert!(posts[1]["view_count"].is_null());
+        assert_eq!(posts[1]["view_count_source"], "unavailable");
+        assert!(posts[0].get("is_pinned").is_none());
+    }
+
+    #[test]
+    fn profile_url_accepts_only_the_profile_and_reels_tab() {
+        assert_eq!(
+            instagram_profile_url("https://www.instagram.com/creator/reels/?x=1").unwrap(),
+            "https://www.instagram.com/creator/reels/"
+        );
+        for url in [
+            "https://evil.example/creator/reels/",
+            "https://secret@www.instagram.com/creator/reels/",
+            "https://www.instagram.com/creator/tagged/",
+            "https://www.instagram.com/reels/",
+            "https://www.instagram.com/creator/reels/extra/",
+        ] {
+            assert!(instagram_profile_url(url).is_err(), "accepted {url}");
+        }
+    }
 }

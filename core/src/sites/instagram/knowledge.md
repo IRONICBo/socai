@@ -49,3 +49,7 @@ Post/reel rows from `searchResults` and `profilePosts` are automatically collect
 - Use `comment` only for an explicit user-authorized write. Preserve the requested text and target; do not invent additional comments.
 - The command uses visible CDP pointer and keyboard events. It never calls a platform write API, never replaces a non-empty draft, and dispatches the Post click at most once.
 - If the exact text already exists, the command fails closed instead of creating a duplicate or claiming ownership. Treat `commit_unknown` as unknown and never retry automatically.
+
+## Profile Reel view readings
+
+`profile` retains its original Posts-grid sample and reads the observed same-profile Reels tab to attach visible view counts by shortcode. A direct `/username/reels/` profile URL is also accepted. `view_count` is nullable; `view_count_text`, `view_count_source`, and `view_count_approximate` retain the display evidence. Abbreviated readings are estimates, not exact counts. Missing readings and pin status remain unknown; likes and hover comment counts never substitute for views. A login/challenge/rate gate or transport failure during enrichment returns the already captured profile cards as partial results.
