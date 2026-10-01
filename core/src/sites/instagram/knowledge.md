@@ -23,6 +23,7 @@ Use Instagram for read-only profile, post, reel, and comment research by default
 - Use `profileDetail` and `profilePosts` on a selected `/<username>/` profile.
 - A signed-in private profile keeps the header and replaces the post grid with a padlock plus the visible notice `profileDetail.private_notice` (observed copy: "This profile is private" / "Follow to see their photos and videos."). `private` is true only when that locked empty state is on the page. The header can still show `post_count: 0`; that is the locked grid, not evidence the account never posted or archived everything. Say the profile is private and posts are hidden until follow. Do not treat it as an empty public account.
 - Use `postDetail` and `comments` on a selected `/p/<shortcode>/`, `/reel/<shortcode>/`, or `/<username>/(p|reel)/<shortcode>/` page.
+- `post_navigation_rejected` with `retryable: false` means Instagram rejected that exact permalink at navigation time. Do not retry the same URL; keep any other successful posts in the batch and report partial coverage.
 - For a requested comment budget, call `postDetail`, then `comments`. The host automatically alternates extraction with `scrollComments`, expands collapsed replies, deduplicates, and returns the accumulated set up to `limit` (100 by default). The expansion action is read-only; never click Like, Reply, Follow, or Submit controls.
 - Prefer candidates that match the user's topic in the returned title/subtitle or media description. Open a candidate before making claims from it.
 
