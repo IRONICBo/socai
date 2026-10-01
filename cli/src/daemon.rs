@@ -1,7 +1,7 @@
 use socai_core::telemetry::task_context::{self, TaskLink, TaskRegistration};
 use socai_core::telemetry::tool_call::{summarize_tool_args, summarize_tool_result};
 use socai_core::telemetry::{
-    query_text_enabled, redact_secrets, task_text_enabled, telemetry_enabled, Telemetry,
+    query_text_enabled, redact_telemetry_error, task_text_enabled, telemetry_enabled, Telemetry,
     TelemetrySource,
 };
 
@@ -1061,7 +1061,7 @@ fn error_summary(err: &anyhow::Error) -> String {
 }
 
 fn short_redacted_error(error: &str) -> String {
-    redact_secrets(error)
+    redact_telemetry_error(error)
         .lines()
         .next()
         .unwrap_or("command failed")
@@ -1724,7 +1724,7 @@ mod tests {
 
         let mut failed = trace_context_props(&trace_context());
         let failure: Result<Value> = Err(anyhow!(
-            "CDP disconnected with Authorization: Bearer very-secret-token"
+            "navigation to https://www.instagram.com/p/private-shortcode/?token=hidden failed with Authorization: Bearer very-secret-token"
         ));
         finish_tool_call_props(&mut failed, 84, Some(&failure));
         assert_eq!(failed.get("outcome"), Some(&json!("failed")));
@@ -1734,6 +1734,19 @@ mod tests {
             .and_then(Value::as_str)
             .expect("failure error");
         assert!(!error.contains("very-secret-token"));
+        assert!(!error.contains("private-shortcode"));
+        assert!(!error.contains("token=hidden"));
+        assert!(error.contains("https://www.instagram.com/<redacted>"));
+        for raw in [
+            "connect ws://[::1]:9222/devtools/browser/private-session failed",
+            "navigation to HTTPS://www.instagram.com/p/private/?q=private#fragment failed",
+            "navigation to https://example.com/p/o'private?query=private#fragment failed",
+            "invalid Instagram username or profile URL: private user",
+            "invalid Instagram username or profile URL: bad\nprivate-user",
+        ] {
+            let redacted = short_redacted_error(raw);
+            assert!(!redacted.contains("private"), "leaked from {raw}");
+        }
 
         let mut interrupted = trace_context_props(&trace_context());
         finish_tool_call_props(&mut interrupted, 126, None);
