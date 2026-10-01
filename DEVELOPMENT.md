@@ -1,9 +1,9 @@
 # socai development
 
 Build, run, and maintainer documentation for working **on** socai. It
-intentionally lives outside the [README](./README.md): the README stays focused
-on what users need to install and run the socai CLI. This file is the entry
-point for everything else.
+intentionally lives outside the [README](./README.md). The README is the
+product pitch. Install steps, commands, and browser setup live in the
+[user guide](docs/guide.md). This file is the entry point for development.
 
 For repo structure, architecture, and the conventions every AI tool must follow,
 see [AGENTS.md](./AGENTS.md). This file complements it with local-dev workflows
@@ -13,8 +13,8 @@ and an index of the reference docs.
 
 ### CLI / core
 
-The published install path is documented in the README and prefers the release
-CLI binary. For day-to-day iteration, build and run from the workspace instead:
+The published install path is documented in the [user guide](docs/guide.md) and
+prefers the release CLI binary. For day-to-day iteration, build and run from the workspace instead:
 
 ```bash
 cargo build                 # build the whole workspace (core + cli)
@@ -238,6 +238,7 @@ in [Website deployment](docs/website-deployment.md).
 
 | Doc | Covers |
 | --- | --- |
+| [User guide](docs/guide.md) | Install, interfaces, platform commands, Chrome profiles, and run artifacts. |
 | [Data model](docs/data-model.md) | Run artifacts, desktop task index, and timeline replay. |
 | [Context window management](docs/context-window-management.md) | Agent turns, tool-result bounds, sawtooth compaction, prompt caching, and artifact evidence retention. |
 | [Agent skills and self-healing](docs/agent-skills.md) | Progressive skill loading, constrained local learnings, and the initial self-healing instruction. |

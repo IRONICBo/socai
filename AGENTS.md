@@ -5,9 +5,9 @@ app (`app/`). The Rust core is the active shared implementation for
 CLI/TUI/Tauri.
 
 Build, run, local-dev workflows, and the reference-docs index live in
-[DEVELOPMENT.md](./DEVELOPMENT.md). The [README](./README.md) is user-facing
-only (CLI install + usage, desktop download); keep developer material out of it
-and in DEVELOPMENT.md instead.
+[DEVELOPMENT.md](./DEVELOPMENT.md). The [README](./README.md) is the user-facing
+product pitch. Install, commands, and browser setup live in
+[docs/guide.md](./docs/guide.md). Keep developer material in DEVELOPMENT.md.
 
 ## Engineering rules
 

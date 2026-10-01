@@ -1,0 +1,313 @@
+# socai user guide
+
+Install socai, connect Chrome, and run research. The short version is the [README](../README.md).
+
+Research is read-only by default. Explicit target-bound write commands run only when directly invoked and use durable one-shot receipts to prevent automatic resubmission.
+
+## Quick start
+
+### Desktop app
+
+Use the desktop app to enter research tasks without setting up a command-line environment. It is available for macOS and Windows:
+
+- [Download for macOS](https://github.com/socai-io/socai/releases/latest/download/socai-macos-universal.dmg)
+- [Download for Windows](https://github.com/socai-io/socai/releases/latest/download/socai-windows-x86_64-setup.exe)
+
+After installation, follow the in-app steps to connect Chrome and enter a task such as:
+
+> Compare how people discuss sugar-free tea on RedNote, Douyin, and Instagram. Identify recurring purchase criteria and cite specific posts, videos, comments, and replies.
+
+The first connection to your existing Chrome requires enabling remote debugging and confirming the browser permission prompt. See the [Connect Chrome guide](https://socai.io/connect).
+
+The desktop app keeps task history and artifacts. You can preview or download reports, spreadsheets, images, and other deliverables, or export results to a Feishu document or group chat.
+
+### Command line
+
+The CLI is designed for agent-driven workflows, including Claude Code and Codex, and returns structured data for each platform operation.
+
+macOS:
+
+```bash
+curl -fsSL https://github.com/socai-io/socai/releases/latest/download/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+$installer = Join-Path $env:TEMP 'socai-install.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/socai-io/socai/releases/latest/download/install.ps1 -OutFile $installer; Unblock-File $installer; & $installer
+```
+
+The installers download and verify the release archive, install socai at `~/.socai/bin/socai` on macOS or `%USERPROFILE%\.socai\bin\socai.exe` on Windows, and configure or explain the PATH update.
+
+Let a coding agent discover socai from ordinary requests such as “research how people discuss this product on Instagram and X”:
+
+```bash
+socai integrate install codex
+socai integrate install claude-code
+socai integrate install cursor
+socai integrate install gemini-cli
+socai integrate install kimi-code
+socai integrate install qwen-code
+socai integrate install trae-code
+socai integrate install codebuddy
+socai integrate install opencode
+socai integrate install github-copilot
+# Or install the same portable Skill for every supported local Agent Skills host:
+socai integrate install all
+socai integrate status --json
+```
+
+Use `--scope project` to keep the integration inside the current repository. `claude`, `gemini`, `kimi`, `qwen`, `trae`, and `copilot` are accepted as aliases. The installer writes only the `socai-social-research` Skill directory and refuses to replace different contents unless `--force` is explicit. The repository also exposes the same Skill as the `socai-social-research` plugin for Codex, Claude, Cursor, WorkBuddy/CodeBuddy, Kimi Code, Gemini CLI, Qwen Code, TraeCode, and Agent Plugins-compatible distribution.
+
+Start every new CLI task with `socai task begin`, passing the user’s original question, then run the platform commands. This workflow applies to all platforms:
+
+```bash
+socai task begin "Research the gear purchases first-time campers regret across social platforms."
+socai xhs search "beginner camping gear mistakes" --num-notes 10 --num-comments 8 --pretty
+
+socai dy search "beginner camping gear" --num 20
+socai tiktok search "beginner camping gear" --num 20 --pretty
+socai instagram search "beginner camping gear" --num 20 --pretty
+
+socai task begin "Find product designers on LinkedIn."
+socai linkedin search "product designer" --type people --num 20 --pretty
+```
+See the [CLI skill](../skills/socai-cli/SKILL.md) for the complete workflow.
+
+Run `socai` without a subcommand to ask the agent for cross-platform research across the same platforms.
+
+If a prebuilt binary is unavailable for your platform, or you need a source build for development, use Cargo:
+
+```bash
+git clone https://github.com/socai-io/socai.git
+cd socai
+cargo install --path cli --force --locked
+cargo install --path asr --force --locked
+```
+
+The second command installs the local Whisper helper next to `socai`; it is
+required when unpaid or offline transcription routes to the bundled model.
+
+### Terminal interface
+
+After installing the CLI, run `socai` without a subcommand to open the terminal interface:
+
+```bash
+socai
+```
+
+## Choose an interface
+
+| Interface | Best for | Start with |
+| --- | --- | --- |
+| Desktop app | Natural-language tasks, task history, and artifact preview or download | Install the macOS or Windows app |
+| CLI | Agent calls, scripts, and structured JSON | Start with `socai task begin "<original user question>"`, then run platform commands |
+| Terminal interface | Manually running consecutive tasks in a terminal | Run `socai` |
+
+All three interfaces share the same browser connection, site capabilities, and run-record core.
+
+## Supported platforms
+
+Platform capabilities and short commands are in the [README](../README.md#supported-platforms).
+
+Research commands never mutate platform state. The separately documented publish and comment commands require an explicit target and content, verify the signed-in actor and rendered target immediately before dispatch, and never automatically retry an uncertain submit.
+
+## Platform command reference
+
+All examples below are operations within a task already started with `socai task begin "<original user question>"`. Start a new task when the user’s goal changes; do not repeat registration for each example or command.
+
+### RedNote (Xiaohongshu)
+
+#### Search and read posts
+
+```bash
+socai xhs search "content marketing ideas" \
+  --num-notes 30 \
+  --num-comments 20 \
+  --filter publish_time=一周内 \
+  --filter sort=最多评论 \
+  --download-media \
+  --ocr \
+  --pretty
+```
+
+`search` opens result posts and reads their bodies and comments. Add `--preview` to return only result-card metadata such as titles, covers, and engagement counts without opening post details.
+
+#### Read an author and their posts
+
+```bash
+socai xhs author <author_id> --num-notes 10 --num-comments 8
+```
+
+Return only the author and post-card summaries:
+
+```bash
+socai xhs author <author_id> --num-notes 20 --preview
+```
+
+#### Read selected posts again
+
+Use the post IDs and `xsec_token` values returned by `search` or `author`:
+
+```bash
+socai xhs get-notes \
+  --note '<note_id>=<xsec_token>' \
+  --note '<note_id>=<xsec_token>' \
+  --num-comments 20
+```
+
+Post one explicitly requested comment through the existing signed-in browser:
+
+```bash
+socai xhs comment '<complete_note_url>' --text 'Exact comment text'
+```
+
+#### Common options
+
+| Option | Purpose |
+| --- | --- |
+| `--num-notes <N>` | Target number of posts; socai scrolls when more results are needed. |
+| `--num-comments <N>` | Number of comments and replies per post; use `0` to skip comments. |
+| `--preview` | Read only search-result or author-page post cards. |
+| `--download-media` | Download images and videos from opened posts and record local paths. |
+| `--ocr` | Run local OCR on post images or a video post's cover. |
+| `--transcribe-audio` | Download opened videos and transcribe speech; requires signing in and selecting socai agent. |
+| `--filter <group=option>` | Apply a RedNote search-page filter; repeat to combine filters. |
+| `--pretty` | Pretty-print the final JSON result. |
+| `--debug-snapshot` | Save page DOM, accessibility trees, and screenshots for development diagnostics. |
+
+Available filter groups and UI values:
+
+| Group | Values |
+| --- | --- |
+| `sort` | 综合, 最新, 最多点赞, 最多评论, 最多收藏 |
+| `note_type` | 不限, 视频, 图文 |
+| `publish_time` | 不限, 一天内, 一周内, 半年内 |
+| `search_scope` | 不限, 已看过, 未看过, 已关注 |
+| `distance` | 不限, 同城, 附近 |
+
+Filter values mirror the RedNote web interface and should be passed as shown. Multiple filters can be combined:
+
+```bash
+socai xhs search "Shanghai weekend activities" \
+  --filter publish_time=一周内 \
+  --filter note_type=图文 \
+  --filter sort=最新
+```
+
+### Douyin and TikTok
+
+```bash
+socai dy search "coffee" --num 30
+socai tiktok search "coffee" --num 30 --pretty
+```
+
+Use `socai dy --help` or `socai tiktok --help` for video-detail, author, comment, media-download, and diagnostic commands.
+
+### Instagram
+
+```bash
+socai instagram search "coffee" --num 20 --pretty
+socai instagram profile nike --num 12
+socai instagram get-posts --post https://www.instagram.com/p/<shortcode>/ --num-comments 8
+```
+
+Use `socai instagram --help` for profile, post/Reel, comment, and diagnostic commands.
+
+### LinkedIn
+
+```bash
+socai linkedin search "product designer" --type people --num 20 --pretty
+socai linkedin profile https://www.linkedin.com/in/<id>/
+socai linkedin history <id> --section experience
+socai linkedin company <company-id>
+socai linkedin get-posts --post https://www.linkedin.com/posts/<id> --num-comments 8
+socai linkedin comment https://www.linkedin.com/posts/<id> --text 'Exact comment text'
+```
+
+Use `socai linkedin --help` for company, relationship, post, comment, and diagnostic commands.
+
+## Browser and login modes
+
+socai supports four Chrome profile modes:
+
+| Mode | Best for | Login behavior |
+| --- | --- | --- |
+| `existing` | Everyday use; the default | Reuses your existing Chrome and supported-platform logins |
+| `managed` | Isolating research from everyday browsing | Uses `~/.socai/chrome-profile`; sign in once |
+| `auto` | Automatic connection selection | Tries the managed profile first, then falls back to existing Chrome |
+| `remote` | Testing a hosted cloud browser | Beta socai pro capability with session limits |
+
+These settings are stored in `~/.socai/config.json`; the CLI and desktop app read the same configuration.
+
+Switch to an isolated profile:
+
+```bash
+socai config set chrome.profile managed
+socai stop
+```
+
+Set a custom managed profile directory:
+
+```bash
+socai config set chrome.profile_dir ~/.socai/profiles/social-research
+```
+
+Switch back to your existing Chrome:
+
+```bash
+socai config set chrome.profile existing
+socai stop
+```
+
+`socai stop` is only required when the background daemon is already running; it lets the new setting take effect at the next start.
+
+The hosted browser is currently in beta. Activate socai pro before selecting it:
+
+```bash
+socai pro activate <invite_code>
+socai config set chrome.profile remote
+```
+
+Advanced endpoint overrides remain available through `SOCAI_CDP_WS` and `SOCAI_CDP_URL`.
+
+## Run results and artifacts
+
+Each run is written under the following directory by default:
+
+```text
+~/.socai/runs/<timestamp>_<task>/
+```
+
+Typical contents include:
+
+- final structured results and run metadata
+- search, post, and author data
+- downloaded images, videos, and OCR output
+- a `media_manifest.json` media inventory
+- debug snapshots and agent-generated reports, spreadsheets, or other deliverables
+
+Change the run directory on macOS:
+
+```bash
+socai config set runs.dir "$(pwd)/socai-runs"
+```
+
+Or in Windows PowerShell:
+
+```powershell
+socai config set runs.dir (Join-Path $PWD 'socai-runs')
+```
+
+Relative values passed to `runs.dir` are stored as absolute paths from the current directory. `SOCAI_RUNS_DIR` takes precedence when set.
+
+## Extending and developing socai
+
+To add another site or custom capability, follow the [site extension guide](../core/src/sites/creation/SKILL.md). It covers requirement confirmation, site capability design, and implementation steps for coding agents such as Claude Code, Codex, and Cursor.
+
+Local development, build instructions, repository conventions, and the reference-document index live in [DEVELOPMENT.md](../DEVELOPMENT.md).
+
+## Built with socai
+
+[Jev Social](https://github.com/socai-io/jev-social) is shown in the [README](../README.md#built-with-socai).
+
