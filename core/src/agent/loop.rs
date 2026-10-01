@@ -160,15 +160,16 @@ pub struct AgentOutcome {
     pub final_text: String,
     pub usage: TokenUsage,
     /// Terminal error that ended the run early: an unretryable LLM API
-    /// error, repeated max-token truncation, or a failed forced summary.
+    /// error or a failed forced summary.
     /// When set, run.json and the trace already carry status "failed", and
     /// `final_text` is best-effort — an error placeholder, or partial output
     /// from earlier steps — so callers must not report the run as completed.
     pub error: Option<String>,
     /// Why the run completed with a best-effort partial answer, for example
-    /// after tools became unavailable or the execution limit was reached before
-    /// a requested deliverable was published. This is not a terminal error:
-    /// the final LLM summary completed successfully and `final_text` is visible.
+    /// after tools became unavailable, repeated output truncation, or the
+    /// execution limit was reached before a requested deliverable was published.
+    /// This is not a terminal error: the final LLM summary completed successfully
+    /// and `final_text` is visible.
     pub degraded_reason: Option<String>,
 }
 
@@ -374,6 +375,7 @@ pub async fn run_agent_with_events(
         // replayed reliably — and ask the model to redo it, bounded so a
         // pathological loop still terminates.
         if response.stop_reason == StopReason::MaxTokens && response.tool_calls.is_empty() {
+            run_recorder.mark_llm_response_hidden(step)?;
             truncation_retries += 1;
             warn!(
                 step,
@@ -384,15 +386,8 @@ pub async fn run_agent_with_events(
                     "model output was truncated by the max_tokens limit ({}) {} times in a row",
                     options.max_tokens, truncation_retries
                 );
-                emit(
-                    &events,
-                    AgentEvent::ApiError {
-                        step,
-                        message: msg.clone(),
-                    },
-                );
-                final_text = format!("Error: {msg}");
-                terminal_error = Some(msg);
+                warn!(step, error = %msg, "forcing a concise summary after repeated truncation");
+                degraded_reason = Some(msg);
                 break;
             }
             messages.push(Message::user(
@@ -630,12 +625,9 @@ pub async fn run_agent_with_events(
     let forced_summary_prompt = degraded_reason
         .as_ref()
         .map(|reason| {
-            info!(
-                step,
-                reason, "tool recovery failed; forcing partial summary"
-            );
+            info!(step, reason, "degraded execution; forcing partial summary");
             format!(
-                "The browser connection was lost and automatic recovery did not succeed: {reason}. \
+                "The task could not continue normally: {reason}. \
                  Do not call any more tools. Produce the best possible final answer now in the same \
                  language as the original task, using only evidence already present in the tool \
                  results and conversation. Clearly label the answer as partial, distinguish verified \

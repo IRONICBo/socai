@@ -220,6 +220,14 @@ impl AgentRunRecorder {
         write_json_atomic(&path, &value)
     }
 
+    pub(crate) fn mark_llm_response_hidden(&self, step: u32) -> std::io::Result<()> {
+        let path = self.run_dir.join(format!("llm/{step:03}.response.json"));
+        let mut value: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)
+            .map_err(std::io::Error::other)?;
+        value["user_visible"] = json!(false);
+        write_json_atomic(&path, &value)
+    }
+
     pub(crate) fn replace_llm_response_with_visible_text(
         &self,
         step: u32,
