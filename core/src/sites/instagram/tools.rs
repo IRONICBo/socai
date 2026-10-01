@@ -2459,7 +2459,24 @@ async fn read_instagram_post(
     wait_seconds: f64,
 ) -> anyhow::Result<Value> {
     let url = instagram_post_url(locator)?;
-    navigate_https(page, &url).await?;
+    if let Err(error) = navigate_https(page, &url).await {
+        if error.chain().any(|source| {
+            source
+                .to_string()
+                .contains("net::ERR_HTTP_RESPONSE_CODE_FAILURE")
+        }) {
+            return Ok(failure_payload(
+                "post_navigation_rejected",
+                json!({
+                    "input": locator,
+                    "url": url,
+                    "retryable": false,
+                    "navigation_error": "http_response_code_failure",
+                }),
+            ));
+        }
+        return Err(error);
+    }
     let detail = wait_for_browser_tool(page, SITE_ID, "postDetail", None, wait_seconds).await?;
     if let Some(reason) = gate_reason(&detail) {
         return Ok(failure_payload(
