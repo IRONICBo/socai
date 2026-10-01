@@ -712,6 +712,7 @@ pub async fn run_agent_with_events(
                     usage += &response.usage;
                     let (visible_texts, _) = split_thinking(&response.text_blocks);
                     let visible_text = visible_texts.join("\n\n");
+                    let mut user_visible_texts = visible_texts.clone();
                     let invalid_summary = response.stop_reason == StopReason::MaxTokens
                         || visible_texts.is_empty()
                         || !response.tool_calls.is_empty()
@@ -787,19 +788,41 @@ pub async fn run_agent_with_events(
                                         .to_string();
                                 continue;
                             }
-                            final_text = message.clone();
-                            emit(
-                                &events,
-                                AgentEvent::ApiError {
-                                    step: summary_step,
-                                    message: message.clone(),
-                                },
-                            );
-                            terminal_error = Some(message);
-                            break;
+                            if retry_without_claim {
+                                let fallback = artifact_claim_free_fallback(task, &visible_text);
+                                run_recorder.replace_llm_response_with_visible_text(
+                                    summary_step,
+                                    &fallback,
+                                )?;
+                                let reason = if task
+                                    .chars()
+                                    .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+                                {
+                                    "请求的交付文件未经过验证并成功发布；已保留下方基于现有数据的部分结果。"
+                                } else {
+                                    "The requested deliverable was not verified and published; the evidence-based partial result is preserved below."
+                                };
+                                warn!(
+                                    step = summary_step,
+                                    "replaced an unverified artifact claim with a partial result"
+                                );
+                                degraded_reason = Some(reason.to_string());
+                                user_visible_texts = vec![fallback];
+                            } else {
+                                final_text = message.clone();
+                                emit(
+                                    &events,
+                                    AgentEvent::ApiError {
+                                        step: summary_step,
+                                        message: message.clone(),
+                                    },
+                                );
+                                terminal_error = Some(message);
+                                break;
+                            }
                         }
                     }
-                    for text in &visible_texts {
+                    for text in &user_visible_texts {
                         emit(
                             &events,
                             AgentEvent::AssistantText {
@@ -1239,6 +1262,44 @@ fn forced_summary_disposition(
         }
     } else {
         ForcedSummaryDisposition::Accept
+    }
+}
+
+fn artifact_claim_free_fallback(task: &str, visible_text: &str) -> String {
+    let mut safe_text = String::with_capacity(visible_text.len());
+    let mut sentence = String::new();
+    let mut chars = visible_text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        sentence.push(ch);
+        let sentence_boundary = matches!(ch, '!' | '?' | ';' | '\n' | '。' | '！' | '？' | '；')
+            || (ch == '.' && chars.peek().is_none_or(|next| next.is_whitespace()));
+        if sentence_boundary {
+            if claimed_artifact_kinds(&sentence).is_empty() {
+                safe_text.push_str(&sentence);
+            }
+            sentence.clear();
+        }
+    }
+    if claimed_artifact_kinds(&sentence).is_empty() {
+        safe_text.push_str(&sentence);
+    }
+    if !claimed_artifact_kinds(&safe_text).is_empty() {
+        safe_text.clear();
+    }
+
+    let chinese = task
+        .chars()
+        .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch));
+    let notice = if chinese {
+        "交付文件尚未完成验证，当前没有可用下载文件。以下为基于已有数据整理的部分结果："
+    } else {
+        "No verified deliverable is available. The partial findings below are based on the evidence already gathered:"
+    };
+    let safe_text = safe_text.trim();
+    if safe_text.is_empty() {
+        notice.to_string()
+    } else {
+        format!("{notice}\n\n{safe_text}")
     }
 }
 
@@ -1716,6 +1777,50 @@ mod tests {
                 ForcedSummaryDisposition::Reject { .. }
             ));
         }
+
+        let fallback = artifact_claim_free_fallback(
+            "请根据搜索结果生成 PDF 报告",
+            "已生成 PDF 报告，可供下载。\n\n## 核心洞察\n消费者更关注缓震和尺码。",
+        );
+        assert!(fallback.contains("核心洞察"));
+        assert!(!fallback.contains("已生成"));
+        assert!(!fallback.contains("可供下载"));
+        let response = summary_response(&fallback);
+        assert_eq!(
+            forced_summary_disposition(
+                "请根据搜索结果生成 PDF 报告",
+                &response,
+                &fallback,
+                &state,
+                true,
+                ForcedSummaryKind::RecoveryPartial,
+            ),
+            ForcedSummaryDisposition::Accept
+        );
+
+        let english_fallback = artifact_claim_free_fallback(
+            "Create a PDF report",
+            "The PDF was generated.\nFindings: The campaign generated 100 leads and saved $500.\nThe CSV was not created and is not downloadable.",
+        );
+        assert!(!english_fallback.contains("The PDF was generated"));
+        assert!(english_fallback.contains("The campaign generated 100 leads and saved $500"));
+        assert!(english_fallback.contains("The CSV was not created and is not downloadable"));
+        for claim in [
+            "report.xlsx was saved.",
+            "The PDF report (v1.2) was generated.",
+        ] {
+            let fallback = artifact_claim_free_fallback("Create a report", claim);
+            assert!(claimed_artifact_kinds(&fallback).is_empty());
+            assert!(!fallback.contains(claim));
+        }
+
+        let chinese_fallback = artifact_claim_free_fallback(
+            "生成 PDF 报告",
+            "已生成 PDF，可供下载。\n研究发现：品牌已发布三款新品。\nCSV 不可下载。",
+        );
+        assert!(!chinese_fallback.contains("已生成 PDF"));
+        assert!(chinese_fallback.contains("品牌已发布三款新品"));
+        assert!(chinese_fallback.contains("CSV 不可下载"));
     }
 
     #[test]

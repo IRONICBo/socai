@@ -220,6 +220,20 @@ impl AgentRunRecorder {
         write_json_atomic(&path, &value)
     }
 
+    pub(crate) fn replace_llm_response_with_visible_text(
+        &self,
+        step: u32,
+        text: &str,
+    ) -> std::io::Result<()> {
+        let path = self.run_dir.join(format!("llm/{step:03}.response.json"));
+        let mut value: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)
+            .map_err(std::io::Error::other)?;
+        value["text_blocks"] = json!([text]);
+        value["tool_calls"] = json!([]);
+        value["user_visible"] = json!(true);
+        write_json_atomic(&path, &value)
+    }
+
     pub fn record_llm_error(
         &self,
         step: u32,
