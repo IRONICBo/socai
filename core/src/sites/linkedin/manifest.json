@@ -2,7 +2,7 @@
   "id": "linkedin",
   "name": "LinkedIn",
   "domains": ["linkedin.com", "*.linkedin.com"],
-  "notes": ["knowledge.md"],
+  "notes": [],
   "browserTools": {
     "pageState": {
       "description": "Read the current LinkedIn route, authentication gate, challenge, rate-limit, and hydration state.",
@@ -13,7 +13,7 @@
       "returns": { "type": "object", "description": "Current LinkedIn page state." }
     },
     "searchState": {
-      "description": "Verify that LinkedIn reached the requested people, content, or company search route and report its result state.",
+      "description": "After navigating to https://www.linkedin.com/search/results/<people|content|companies|all>/?keywords=<encoded-query>, verify the requested search route and report its result state. Login, authwall, challenge, rate-limit, query-mismatch, and unhydrated states are not empty results.",
       "path": "page_scripts.js",
       "binding": "window.SocaiLinkedInPageScripts",
       "callable": "searchState",
@@ -52,7 +52,7 @@
       "binding": "window.SocaiLinkedInPageScripts",
       "callable": "profileDetail",
       "args": {},
-      "returns": { "type": "object", "description": "Visible LinkedIn profile details or an explicit gate state." }
+      "returns": { "type": "object", "description": "Visible LinkedIn profile details or an explicit gate state. current_role is authoritative only when explicitly marked current; latest_role alone is historical/unknown-currentness context." }
     },
     "profileHistory": {
       "description": "Extract complete visible work or education entries from a LinkedIn profile details route.",

@@ -22,7 +22,7 @@ Socai 的浏览器/CDP runtime 是稳定执行面。站点能力是独立的 lea
   "id": "example",
   "name": "Example",
   "domains": ["example.com", "*.example.com"],
-  "notes": ["knowledge.md"],
+  "notes": [],
   "browserTools": {
     "readPage": {
       "description": "Read the active page.",
@@ -38,7 +38,7 @@ Socai 的浏览器/CDP runtime 是稳定执行面。站点能力是独立的 lea
 
 - `id` 必须和 package 目录名一致。
 - `domains` 只写 hostname；根域名和 `*.subdomain` 分开声明。
-- `notes` 是需要按需加载的 Markdown 资源列表。已有 `knowledge.md` 必须保留；没有验证过的新知识时允许保持为空。
+- `notes` 是可选的按需加载 Markdown 资源列表，默认保持为空。只有经过真实页面验证、跨任务长期有效、且无法由 tool schema、命令说明或代码表达的知识才新增 note；不要默认创建 `knowledge.md`。
 - `browserTools` 是页面上下文能力表。每项声明 description、相对 path、args、returns；现有 IIFE bundle 用安全的 binding + callable，独立脚本也可以直接导出一个匿名 async function。
 - 所有资源路径必须是 package 内的相对路径，不允许绝对路径、反斜杠、`..` 或符号链接逃逸。
 - manifest 没有声明的 browser tool 不可执行。
@@ -51,7 +51,7 @@ Agent 通过三个通用工具消费 package，而不是为平台注册一套固
 - `read_site_skills`：按当前页面真实 hostname 重新发现和读取 skill；
 - `run_site_browser_tool`：按 `site_id + tool_name` 执行 manifest 声明的页面工具，同时校验当前域名、输入 schema 和返回类型。
 
-XHS、Douyin、TikTok 与后续平台都走同一个发现入口；平台差异只存在各自 package 的 manifest、notes 和脚本内容中。
+XHS、Douyin、TikTok 与后续平台都走同一个发现入口；平台差异只存在各自 package 的 manifest、脚本和确有必要的可选 notes 中。
 
 ## Native adapter boundary
 
@@ -102,4 +102,4 @@ cargo run -p socai-cli -- stop
 
 ## Learning update
 
-完成真实页面验证后，才把跨任务仍然有效、且无法由 tool schema 表达的页面知识写入 manifest 已列出的 note。不要复制 schema，不记录一次性 snapshot ref、会话数据、账号信息或未验证猜测；没有新知识时保留现有 `knowledge.md` 原样。
+完成真实页面验证后，只有跨任务仍然有效、且无法由 tool schema、命令说明或代码表达的页面知识才写入 manifest 已列出的 note。不要复制 schema，不记录一次性 snapshot ref、会话数据、账号信息或未验证猜测；没有这类知识时保持 `notes: []`，不要创建 `knowledge.md`。XHS 的既有知识与评测链路属于明确例外，继续保留。

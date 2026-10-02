@@ -2,7 +2,7 @@
   "id": "x",
   "name": "X",
   "domains": ["x.com", "*.x.com", "twitter.com", "*.twitter.com"],
-  "notes": ["knowledge.md"],
+  "notes": [],
   "browserTools": {
     "pageState": {
       "description": "Read the current X route, login gate, challenge, rate-limit, and hydration state.",
@@ -13,7 +13,7 @@
       "returns": { "type": "object", "description": "Current X page state." }
     },
     "searchState": {
-      "description": "Verify that X reached the requested search route and hydrated visible posts.",
+      "description": "After navigating to https://x.com/search?q=<encoded-query>&src=typed_query&f=live, verify the requested search route and hydrated visible posts; login, challenge, consent, rate-limit, query-mismatch, and unhydrated states are not empty results.",
       "path": "page_scripts.js",
       "binding": "window.SocaiXPageScripts",
       "callable": "searchState",

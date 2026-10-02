@@ -21,7 +21,7 @@
       "returns": { "type": "object", "description": "Current Instagram page state." }
     },
     "searchState": {
-      "description": "Verify that Instagram reached an active keyword search surface and distinguish results, an explicit empty state, and login or challenge gates.",
+      "description": "After navigating to https://www.instagram.com/explore/search/keyword/?q=<encoded-query>, verify the active keyword search surface and distinguish results, an explicit empty state, and login or challenge gates. If that route is unavailable, navigate to the homepage, use openSearch/setSearchQuery, then verify again.",
       "path": "page_scripts.js",
       "binding": "window.SocaiInstagramPageScripts",
       "callable": "searchState",
@@ -115,7 +115,7 @@
       "returns": { "type": "object", "description": "Visible Instagram profile details. private and private_notice are present when the profile grid is locked behind follow. Otherwise an explicit gate state." }
     },
     "profilePosts": {
-      "description": "Collect post and reel cards across the active Instagram profile's lazy grid up to limit.",
+      "description": "Collect post and reel cards across the active Instagram profile's lazy grid up to limit. Grid order is not recency evidence because pinned posts may appear first; open selected cards and use postDetail.published_at before making recency claims.",
       "path": "page_scripts.js",
       "binding": "window.SocaiInstagramPageScripts",
       "callable": "profilePosts",
@@ -171,7 +171,7 @@
       "binding": "window.SocaiInstagramPageScripts",
       "callable": "postDetail",
       "args": {},
-      "returns": { "type": "object", "description": "Visible Instagram post details or an explicit gate state." }
+      "returns": { "type": "object", "description": "Visible Instagram post details or an explicit gate state. Nullable metrics are unavailable rather than zero; complete/missing_fields describe only the declared metadata fields." }
     },
     "comments": {
       "description": "Collect comments and expanded replies across the active Instagram post or reel up to limit; never likes, replies, or submits anything.",

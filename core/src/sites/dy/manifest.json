@@ -7,7 +7,7 @@
     "iesdouyin.com",
     "*.iesdouyin.com"
   ],
-  "notes": ["knowledge.md"],
+  "notes": [],
   "browserTools": {
     "pageState": {
       "description": "Read the current Douyin page, login, challenge, and hydration state.",
