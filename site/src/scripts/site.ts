@@ -22,7 +22,7 @@ let typewriterRun = 0;
 const isSupportedLanguage = (language) => supportedLanguages.includes(language);
 
 const getMessage = (language, path) => {
-    const table = dictionary[language] || dictionary.zh || dictionary.en || {};
+    const table = dictionary[language] || dictionary.en || dictionary.zh || {};
     const value = path
         .split(".")
         .reduce((cursor, key) => cursor?.[key], table);
@@ -119,11 +119,11 @@ const chooseInitialLanguage = () => {
         // Ignore storage errors and fall back to the default language.
     }
 
-    return "zh";
+    return "en";
 };
 
 const applyLanguage = (language, shouldPersist = false) => {
-    const nextLanguage = isSupportedLanguage(language) ? language : "zh";
+    const nextLanguage = isSupportedLanguage(language) ? language : "en";
     const htmlLanguage = nextLanguage === "zh" ? "zh-CN" : "en";
 
     document.documentElement.lang = htmlLanguage;
@@ -179,7 +179,7 @@ const applyLanguage = (language, shouldPersist = false) => {
     });
 
     startTypewriter(
-        dictionary[nextLanguage]?.prompts || dictionary.zh?.prompts || [],
+        dictionary[nextLanguage]?.prompts || dictionary.en?.prompts || [],
     );
 
     if (shouldPersist) {
@@ -193,7 +193,7 @@ const applyLanguage = (language, shouldPersist = false) => {
 
 languageOptions.forEach((option) => {
     option.addEventListener("click", () => {
-        applyLanguage(option.getAttribute("data-lang-option") || "zh", true);
+        applyLanguage(option.getAttribute("data-lang-option") || "en", true);
     });
 });
 
@@ -202,7 +202,7 @@ document.querySelectorAll("[data-download-platform]").forEach((link) => {
         track("download_click", {
             platform:
                 link.getAttribute("data-download-platform") || "unknown",
-            language: document.documentElement.dataset.language || "zh",
+            language: document.documentElement.dataset.language || "en",
         });
     });
 });
@@ -213,7 +213,7 @@ document.querySelectorAll("[data-copy]").forEach((button) => {
     button.addEventListener("click", () => {
         const text = button.getAttribute("data-copy") || "";
         const restore = () => {
-            const language = document.documentElement.dataset.language || "zh";
+            const language = document.documentElement.dataset.language || "en";
             const copiedPath = button.getAttribute("data-i18n-copied");
             const labelPath = button.getAttribute("data-i18n");
 

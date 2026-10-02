@@ -47,7 +47,7 @@ Rules:
 ## Desktop app — `app/`
 
 Stack: Tauri 2.11 (Rust shell) + Vite 6 + vanilla TypeScript (no UI framework).
-Bundle identifier `com.socai.app`. Product name lowercase `socai`.
+Bundle identifier `com.socai.app`.
 
 Layout:
 
@@ -65,8 +65,6 @@ pnpm exec tauri build --bundles app   # → target/release/bundle/macos/socai.ap
 
 Rules:
 
-- **Brand is always lowercase `socai`** — productName, window title, hero text,
-  error strings, comments. No Title Case anywhere.
 - **Design system is monochrome.** Use tokens from `app/src/styles.css`
   (`--ink-0..9`, `--canvas`, `--fg`, `--line`, etc.). **No accent colors.**
   Status is filled vs hollow, never hue.
