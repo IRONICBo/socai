@@ -33,7 +33,7 @@
 
 Social media platforms are hard to access for agents. Scrapers get you banned. Generic computer use methods are slow, expensive and lack the know-hows. 
 
-Socai, instead, builds the deep ontology of each platform. This enables agents to actually understand the entities, states and flows in each platform. Then Socai reuses your signed-in Chrome -- and thus keeps your social status -- to search, open posts, expand comments, read profiles, OCR images, transcribe video and so on, just like a human does.
+socai, instead, builds the deep ontology of each platform. This enables agents to actually understand the entities, states and flows in each platform. Then socai reuses your signed-in Chrome -- and thus keeps your social status -- to search, open posts, expand comments, read profiles, OCR images, transcribe video and so on, just like a human does.
 
 | Instagram research | Xiaohongshu research |
 | --- | --- |
@@ -120,6 +120,8 @@ socai integrate status --json
 The portable [`socai-social-research` Skill](https://skills.sh/socai-io/socai/socai-social-research) keeps agent-driven research read-only and covers all six supported platforms.
 
 Windows install, agent setup, platform commands, Chrome profiles, and artifacts are in the [user guide](docs/guide.md). Development notes are in [DEVELOPMENT.md](DEVELOPMENT.md).
+
+Browser protocol compatibility and security boundaries are documented in the [browser backend support matrix](docs/browser-backends.md).
 
 ## Built with socai
 
