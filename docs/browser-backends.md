@@ -1,6 +1,6 @@
 # Browser backend support
 
-Socai controls a browser through a browser-native automation protocol. A
+socai controls a browser through a browser-native automation protocol. A
 browser extension is not required for the currently supported Chromium path,
 and installing an extension does not make an unsupported protocol compatible
 with the existing CDP runtime.
@@ -22,12 +22,12 @@ supported.
 The existing runtime uses CDP once it has a browser WebSocket endpoint.
 Microsoft documents that the Edge DevTools Protocol matches the Chrome
 DevTools Protocol API and exposes the same `webSocketDebuggerUrl` discovery
-flow. Socai already searches Edge executable and profile locations on macOS,
+flow. socai already searches Edge executable and profile locations on macOS,
 Linux, and Windows.
 
 Chrome 136 and later ignore `--remote-debugging-port` and
 `--remote-debugging-pipe` when they target Chrome's default data directory.
-The browser must be launched with a non-default `--user-data-dir` (the Socai
+The browser must be launched with a non-default `--user-data-dir` (the socai
 managed profile is one such directory), or with Chrome for Testing. An
 already-running default-profile Chrome cannot be made attachable by setting
 `SOCAI_CDP_URL` after launch; that override only selects an endpoint that is
@@ -45,7 +45,7 @@ socai status
 ```
 
 On Windows PowerShell, set the existing compatibility variable to
-`msedge.exe` before starting Socai:
+`msedge.exe` before starting socai:
 
 ```powershell
 $env:SOCAI_CHROME_EXECUTABLE = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
@@ -61,7 +61,7 @@ Edge debugging endpoint, use the generic endpoint overrides when starting the
 daemon. Plain `http://`/`ws://` endpoints must remain loopback-only. Any remote
 endpoint requires authenticated TLS, and its URL (including query parameters)
 must be handled as a browser-control secret rather than logged or shared.
-Socai does not currently validate the endpoint scheme, host, or authentication,
+socai does not currently validate the endpoint scheme, host, or authentication,
 so these restrictions are operator-enforced until the endpoint resolver gains
 an explicit security policy:
 
@@ -78,10 +78,10 @@ socai status
 Firefox needs a WebDriver BiDi backend. Mozilla documents WebDriver BiDi as
 its bidirectional automation protocol, and Firefox 141 removed the former CDP
 selection because BiDi is now the available Remote Agent protocol. Changing
-only the executable path cannot work: Socai's current `PageSession` sends CDP
+only the executable path cannot work: socai's current `PageSession` sends CDP
 `Target`, `Page`, `Runtime`, `DOM`, and `Accessibility` commands.
 
-The future backend must map Socai's browser primitives to BiDi browsing
+The future backend must map socai's browser primitives to BiDi browsing
 contexts, script evaluation, trusted input actions, screenshots, and lifecycle
 events. It must also prove target ownership and reconnection behavior against a
 real Firefox release before any site command is enabled.
@@ -100,7 +100,7 @@ site-consistency acceptance tests; a CDP adapter or executable-path alias is
 not sufficient.
 
 Safari 27 additionally exposes an official `safaridriver --mcp` mode for
-external agents. That is a possible future bridge, not current Socai support:
+external agents. That is a possible future bridge, not current socai support:
 its tool contract, session isolation, cancellation, and write-action semantics
 still need an explicit adapter and the same conformance checks.
 
@@ -121,7 +121,7 @@ Every backend must then provide equivalent, fail-closed primitives for:
 6. disconnect detection, bounded recovery, and cancellation cleanup.
 
 Platform selectors, target identity checks, and write-action policy stay in
-Socai core and site packages. Protocol adapters transport equivalent
+socai core and site packages. Protocol adapters transport equivalent
 operations; they do not silently weaken or redefine them.
 
 ## Optional extension bridge
@@ -167,7 +167,7 @@ control over page data and user sessions. A production adapter must therefore:
 - require an explicit local user action to enable the browser or select a tab;
 - declare which page content, screenshots, files, and actions can reach an
   external agent;
-- preserve Socai's exact-target, one-shot write, cancellation, and audit rules.
+- preserve socai's exact-target, one-shot write, cancellation, and audit rules.
 
 Safari's MCP server sends captured browser data directly to the MCP client the
 user configured. Depending on the enabled tool, that data can include tab URLs,

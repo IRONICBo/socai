@@ -105,7 +105,7 @@
     if (POST_PATH.test(path)) return postIdentity(location.href).kind;
     if (/^\/explore\/tags\//i.test(path)) return 'hashtag';
     if (/^\/explore\/locations\//i.test(path)) return 'location';
-    if (profileUsername(location.href)) return 'profile';
+    if (profilePageUsername()) return 'profile';
     if (/^\/(?:reels|explore)(?:\/|$)/i.test(path)) return 'explore';
     if (path === '/' || path === '') return 'home';
     return 'unknown';
@@ -125,6 +125,29 @@
     return /^\/accounts\/(?:login|signup)/i.test(location.pathname);
   }
 
+  // Signed-in app shell, observed on https://www.instagram.com/ while logged in:
+  // the left nav exposes a[href="/direct/inbox/"] (Messages). Logged-out pages
+  // do not. Two logged-out surfaces were observed the same day:
+  // - https://www.instagram.com/ is the login form, with input[name="pass"]
+  // - a public profile keeps a visible a[href^="/accounts/login"] ("Log In")
+  // Session chrome is checked first so a signed-in shell is never read as out.
+  function signedInChrome() {
+    return !!firstVisibleNode(document, ['a[href^="/direct/inbox"]']);
+  }
+
+  function loggedOutChrome() {
+    if (/^\/accounts\/(?:login|emailsignup|signup)(?:\/|$)/i.test(location.pathname)) return true;
+    if (firstVisibleNode(document, ['input[name="pass"]'])) return true;
+    return !!firstVisibleNode(document, ['a[href^="/accounts/login"]']);
+  }
+
+  function loginState() {
+    const url = location.href;
+    if (signedInChrome()) return { ok: true, login: 'in', url };
+    if (loggedOutChrome()) return { ok: true, login: 'out', url };
+    return { ok: true, login: 'unknown', url };
+  }
+
   function loginGatePresent() {
     if (loginRoute()) return true;
     const password = firstVisibleNode(document, ['input[type="password"]']);
@@ -133,16 +156,6 @@
       const text = cleanText(dialog, 2000);
       return /(log in|sign up|login|注册|登录|iniciar sesi[oó]n|connexion)/i.test(text);
     });
-  }
-
-  function authenticated() {
-    return !!firstVisibleNode(document, [
-      'a[href^="/direct/inbox"]',
-      'a[href^="/accounts/edit"]',
-      'a[href^="/accounts/activity"]',
-      'svg[aria-label="New post" i]',
-      'svg[aria-label="新帖子"]',
-    ]);
   }
 
   function currentCommentActor() {
@@ -188,7 +201,7 @@
   }
 
   function hasProfileContent() {
-    if (!profileUsername(location.href)) return false;
+    if (!profilePageUsername()) return false;
     const title = metaContent('og:title');
     return !!title || !!document.querySelector('main h1, main h2');
   }
@@ -568,7 +581,7 @@
   }
 
   function scrollPosts(arg) {
-    if (!profileUsername(location.href) || postIdentity(location.href)) {
+    if (!profilePageUsername() || postIdentity(location.href)) {
       return { ok: false, status: 'not_profile', url: location.href };
     }
     const input = arg || {};
@@ -629,7 +642,7 @@
     const output = [];
     const seen = new Set();
     const main = document.querySelector('main') || document;
-    const activeUsername = profileUsername(location.href);
+    const activeUsername = profilePageUsername();
     for (const link of main.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]')) {
       if (viewportOnly && !inViewport(link)) continue;
       const url = instagramUrl(link.href || link.getAttribute('href'));
@@ -649,10 +662,37 @@
         title: description,
         thumbnail_url: image && (image.currentSrc || image.src) || '',
         position: output.length + 1,
+        ...profileViews(link),
       });
       if (output.length >= limit) break;
     }
     return output;
+  }
+
+  function profilePageUsername() {
+    const match = location.pathname.match(/^\/([A-Za-z0-9._]+)(?:\/reels)?\/?$/i);
+    return match ? profileUsername(`/${match[1]}/`) : '';
+  }
+
+  function profileViews(link) {
+    const missing = { view_count: null, view_count_source: 'unavailable' };
+    let node = link.querySelector('svg[aria-label="View Count Icon" i]');
+    if (!visible(node)) return missing;
+    for (; node && node !== link; node = node.parentElement) {
+      const sibling = node.nextElementSibling;
+      if (!visible(sibling) || sibling.querySelector('svg')) continue;
+      const text = cleanText(sibling, 100);
+      // The shared metric parser also accepts labelled likes/comments. The
+      // Reels overlay observed beside this icon is a bare numeric reading, so
+      // reject any other text instead of borrowing an ancestor's metric.
+      if (!/^[\d.,]+\s*[KMB万亿]?$/i.test(text)) continue;
+      const metric = postMetric(text, 'visible_reels_grid');
+      if (metric.value !== null) return {
+        view_count: metric.value, view_count_text: text,
+        view_count_approximate: metric.approximate, view_count_source: metric.source,
+      };
+    }
+    return missing;
   }
 
   function ownedClickPoint(node) {
@@ -837,11 +877,56 @@
     return '';
   }
 
+  // Signed-in private profiles keep the header (name, bio, counts) and replace
+  // the post grid with a padlock. Observed on a locked /<username>/ page: the
+  // icon is svg[role="img"][viewBox="0 0 96 96"] whose path starts
+  // "M60.931 70.001", and the visible lines under it are
+  // "This profile is private" and "Follow to see their photos and videos."
+  // The header can still read "0 posts"; that is the locked grid.
+  function profilePrivateNotice() {
+    const main = document.querySelector('main');
+    if (!main) return '';
+    const lock = Array.from(main.querySelectorAll('svg[role="img"]')).find((svg) => {
+      if (!visible(svg) || svg.closest('header')) return false;
+      if ((svg.getAttribute('viewBox') || '') !== '0 0 96 96') return false;
+      const path = svg.querySelector('path');
+      const d = path && path.getAttribute('d') || '';
+      return d.startsWith('M60.931 70.001');
+    });
+    if (lock) {
+      let node = lock.parentElement;
+      let notice = '';
+      for (let i = 0; node && node !== main && i < 8; i += 1, node = node.parentElement) {
+        if (node.querySelector('header')) break;
+        const lines = Array.from(node.querySelectorAll('span'))
+          .filter(visible)
+          .map((span) => cleanText(span, 200))
+          .filter(Boolean);
+        const text = lines.length ? lines.join('\n') : cleanText(node, 500);
+        if (text.length >= 12 && text.length <= 280) notice = text;
+      }
+      if (notice) return notice;
+    }
+    const lines = [];
+    for (const node of main.querySelectorAll('span')) {
+      if (!visible(node) || node.closest('header')) continue;
+      const text = cleanText(node, 200);
+      if (text === 'This profile is private' || text === 'Follow to see their photos and videos.') {
+        if (!lines.includes(text)) lines.push(text);
+      }
+    }
+    return lines.join('\n');
+  }
+
   function profileDetail() {
-    const username = profileUsername(location.href);
+    const username = profilePageUsername();
     const state = pageState();
     if (!username) {
-      return { ok: false, status: 'not_profile', url: location.href, page_state: state };
+      return {
+        ok: false, status: 'not_profile', url: location.href, page_state: state,
+        login_required: state.login_required || state.login_gate_present,
+        challenge_required: state.challenge_required, rate_limited: state.rate_limited,
+      };
     }
     const description = metaContent('description') || metaContent('og:description');
     const title = metaContent('og:title') || document.title || '';
@@ -858,15 +943,18 @@
     };
     const external = externalProfileUrl(header) || externalProfileUrl(main);
     const visiblePosts = profilePosts({ limit: 100 });
-    const contentAvailable = hasProfileContent() && !!(title || description || visiblePosts.length);
+    const privateNotice = profilePrivateNotice();
+    const contentAvailable = hasProfileContent() && !!(title || description || visiblePosts.length || privateNotice);
     const stableFor = searchResultStability(visiblePosts.length, `profile-grid:${username}`);
-    const gridReady = stableFor >= 800 && (visiblePosts.length > 0 || stats.post_count === 0);
-    return {
-      ok: contentAvailable && gridReady && !state.challenge_required && !state.rate_limited,
+    const reelsTab = /^\/[A-Za-z0-9._]+\/reels\/?$/i.test(location.pathname);
+    const gridReady = !!privateNotice || (stableFor >= 800 &&
+      (visiblePosts.length > 0 || stats.post_count === 0 || reelsTab));
+    const detail = {
+      ok: contentAvailable && gridReady && !state.login_required && !state.login_gate_present && !state.challenge_required && !state.rate_limited,
       status: !contentAvailable ? (state.login_required ? 'login_required' : 'unhydrated') : gridReady ? 'profile' : 'hydrating',
       id: username,
       username,
-      url: canonicalPageUrl(),
+      url: instagramUrl(`/${username}/`),
       display_name: cleanText(nameMatch && nameMatch[1] || '', 500),
       bio: cleanText(bioMatch && bioMatch[1] || '', 5000),
       followers: stats.followers,
@@ -876,7 +964,18 @@
       external_url: external,
       visible_post_count: visiblePosts.length,
       login_gate_present: state.login_gate_present,
+      login_required: state.login_required || state.login_gate_present,
+      challenge_required: state.challenge_required,
+      rate_limited: state.rate_limited,
+      reels_url: main && Array.from(main.querySelectorAll('a[href]')).some((link) =>
+        instagramUrl(link.href) === instagramUrl(`/${username}/reels/`))
+        ? instagramUrl(`/${username}/reels/`) : '',
     };
+    if (privateNotice) {
+      detail.private = true;
+      detail.private_notice = privateNotice;
+    }
+    return detail;
   }
 
   function quotedCaption(description) {
@@ -1433,7 +1532,8 @@
     const bodyLength = cleanText(document.body, 200000).length;
     const challenge = challengeRequired();
     const limited = rateLimited();
-    const login = loginRoute();
+    const session = loginState();
+    const login = session.login === 'out';
     const loginGate = loginGatePresent();
     const searchCount = searchSurfaceActive() ? searchResultLinks().length : 0;
     const contentAvailable = hasPostContent() || hasProfileContent() || searchCount > 0;
@@ -1447,15 +1547,16 @@
       page_type: pageType(),
       ready_state: document.readyState,
       body_text_len: bodyLength,
-      authenticated: authenticated(),
-      login_required: login || loginGate,
+      authenticated: session.login === 'in',
+      login: session.login,
+      login_required: login,
       login_gate_present: loginGate,
       challenge_required: challenge,
       rate_limited: limited,
       content_available: contentAvailable,
       result_count: searchCount,
       search_query: searchSurfaceActive() ? currentSearchQuery() : '',
-      profile_username: profileUsername(location.href),
+      profile_username: profilePageUsername(),
       hydrated,
       blank_or_throttled: document.readyState === 'loading' || (bodyLength < 20 && !challenge && !limited),
     };
@@ -1509,6 +1610,7 @@
   }
 
   window.SocaiInstagramPageScripts = Object.freeze({
+    loginState,
     pageState,
     searchState,
     setSearchQuery,

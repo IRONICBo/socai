@@ -1,0 +1,20 @@
+{
+  "name": "socai",
+  "interface": {
+    "displayName": "socai"
+  },
+  "plugins": [
+    {
+      "name": "socai-social-research",
+      "source": {
+        "source": "local",
+        "path": "./plugins/socai-social-research"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
