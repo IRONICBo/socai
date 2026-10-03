@@ -7,6 +7,9 @@ __pycache__/
 !.claude/skills/
 !.claude/skills/**
 
+# Cursor local hooks and settings
+/.cursor/
+
 # WorkBuddy local agent memory (per-project notes, never commit)
 # Root-scoped: only the repo-root .workbuddy/ (agent memory) is ignored.
 # plugins/workbuddy/ is committed source — different path, unaffected.
