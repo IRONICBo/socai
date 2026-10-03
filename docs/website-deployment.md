@@ -6,7 +6,7 @@ The detailed deployment runbook is the shared project skill:
 
 - [`.claude/skills/socai-site-deployment/SKILL.md`](../.claude/skills/socai-site-deployment/SKILL.md)
 
-Claude Code can read that skill directly. Pi loads the same skill directory via [`.pi/settings.json`](../.pi/settings.json).
+Claude Code can read that skill directly.
 
 Use the skill for:
 
