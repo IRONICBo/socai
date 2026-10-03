@@ -34,6 +34,8 @@
 
 socai は各プラットフォームの深いオントロジーを組み立て、エージェントがエンティティ、状態、フローを実際に理解できるようにする。そのうえでログイン済みの Chrome をそのまま使い、ソーシャル上の状態を保ったまま、人と同じように検索し、投稿を開き、コメントを展開し、プロフィールを読み、画像を OCR し、動画を文字起こしする。
 
+[![Instagram・X・TikTokで美容トレンドを調査し、ランニングウェアのクリエイターを発見](docs/assets/research-demo-en.gif)](https://socai.io/?utm_source=github&utm_medium=readme&utm_campaign=research-demo#demo)
+
 | Instagram リサーチ | 小紅書リサーチ |
 | --- | --- |
 | https://github.com/user-attachments/assets/4849e0f3-87d5-4a0d-8e0b-2a58e3d0267a | https://github.com/user-attachments/assets/8aebcded-f365-4f12-b9c4-102cc1fa964d |

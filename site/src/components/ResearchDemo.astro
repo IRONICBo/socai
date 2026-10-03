@@ -1,0 +1,139 @@
+---
+import "../styles/research-demo.css";
+import { demoCopy } from "../scripts/research-demo-copy";
+const instagram = [1, 2, 3].map((n) => ({ number: String(n * 2 - 1).padStart(2, "0"), likes: ["2,841", "1,206", "986"][n - 1], key: `ig${n}`, n }));
+const posts = [1, 2, 3].map((n) => ({ number: String(n * 2).padStart(2, "0"), key: `x${n}`, likes: ["328", "192", "147"][n - 1], replies: ["24", "18", "12"][n - 1], n }));
+const copy = demoCopy.en;
+---
+
+<div id="demo" class="research-demo" data-research-demo data-stage="complete" role="region" aria-label="Animated social research example">
+    <div class="demo-stage">
+        <div class="demo-compose" inert>
+            <span class="demo-case-label" data-demo-copy="caseLabel">{copy.caseLabel}</span>
+            <h2 data-demo-copy="heading">{copy.heading}</h2>
+            <div class="demo-input">
+                <div class="demo-input__text"><span data-demo-typing></span><span class="demo-caret" aria-hidden="true"></span></div>
+                <div class="demo-input__footer">
+                    <span class="demo-sources"><span>◎ Instagram</span><span>𝕏 X</span><span>♪ TikTok</span></span>
+                    <span class="demo-submit"><span data-demo-copy="research">Research</span> <span aria-hidden="true">↗</span></span>
+                </div>
+            </div>
+        </div>
+
+        <div class="demo-workspace">
+            <div class="demo-question"><span class="demo-question__mark" aria-hidden="true">↳</span><span data-demo-copy="question">{copy.question}</span></div>
+            <div class="demo-browser">
+                <div class="demo-browser__tabs" aria-hidden="true">
+                    <span class="demo-lights"><i></i><i></i><i></i></span>
+                    <span class="demo-tab" data-browser-tab="instagram">◎ Instagram <small>×</small></span>
+                    <span class="demo-tab" data-browser-tab="x">𝕏 X <small>×</small></span>
+                    <span class="demo-tab" data-browser-tab="tiktok">♪ TikTok <small>×</small></span>
+                    <span class="demo-tab-plus">+</span>
+                </div>
+                <div class="demo-browser__toolbar" aria-hidden="true"><span>←</span><span>→</span><span>↻</span><div class="demo-address"><span>⌕</span><span data-demo-address>instagram.com</span></div><span>⋮</span></div>
+                <div class="demo-browser__page">
+                <div class="demo-pointer" aria-hidden="true"><svg viewBox="0 0 24 30" width="20" height="25"><path d="M2 2v23l6-7 5 10 4-2-5-10h10Z" fill="var(--fg)" stroke="var(--surface)" stroke-width="1.5"/></svg><span class="demo-pointer__label" data-demo-copy="agent">Agent</span><i></i></div>
+            <div class="demo-feeds">
+                <section class="demo-feed demo-feed--instagram">
+                    <nav class="demo-site-nav" aria-hidden="true"><span class="demo-site-nav__brand">◎</span><span>⌂ <span data-demo-copy="home">Home</span></span><span class="is-selected">⌕ <span data-demo-copy="search">Search</span></span><span>▧ <span data-demo-copy="explore">Explore</span></span><span>♡ <span data-demo-copy="notifications">Notifications</span></span><span>◯ <span data-demo-copy="profile">Profile</span></span></nav>
+                    <header class="demo-feed__header"><strong><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r=".8" fill="currentColor"/></svg>Instagram</strong><span data-demo-count="instagram">72 posts</span></header>
+                    <div class="demo-search"><span aria-hidden="true">⌕</span><span data-demo-query="instagram">{copy.queryInstagram}</span><span class="demo-search__activity" aria-hidden="true">↵</span></div>
+                    <span class="demo-close-post" aria-hidden="true">×</span>
+                    <div class="demo-feed__viewport">
+                        <div class="demo-skeleton" aria-hidden="true"><i></i><i></i><i></i></div>
+                        <div class="demo-posts demo-posts--instagram">
+                            {instagram.map((post, i) => (
+                                <article class="demo-post demo-instagram" data-demo-post data-platform="instagram" data-at={6300 + i * 450}>
+                                    <div class="demo-post__byline"><span class="demo-avatar">A</span><div><b data-demo-copy={`igName${post.n}`}>{copy[`igName${post.n}`]}</b><small data-demo-copy="igMeta">{copy.igMeta}</small></div><span class="demo-source-id">[{post.number}]</span></div>
+                                    <div class={`demo-art demo-art--${i}`} aria-hidden="true">
+                                        <span class="demo-art__label" data-demo-copy={`art${post.n}`}>{copy[`art${post.n}`]}</span>
+                                        <svg class="demo-art__beauty" viewBox="0 0 320 150" fill="none">
+                                            <path d="M28 135h264" stroke="#a3a3a3"/>
+                                            <ellipse cx="163" cy="134" rx="108" ry="8" fill="#d4d4d4"/>
+                                            <rect x="61" y="39" width="51" height="93" rx="7" fill="#f4f4f4" stroke="#737373"/>
+                                            <rect x="75" y="20" width="23" height="20" rx="2" fill="#737373"/>
+                                            <path d="M83 20v-7h28v7" stroke="#737373" stroke-width="4"/>
+                                            <rect x="135" y="74" width="72" height="57" rx="8" fill="#e5e5e5" stroke="#737373"/>
+                                            <rect x="133" y="65" width="76" height="17" rx="4" fill="#a3a3a3"/>
+                                            <path d="m226 31 45 0-5 93h-35Z" fill="#404040" stroke="#737373"/>
+                                            <rect x="231" y="124" width="35" height="10" rx="2" fill="#737373"/>
+                                            <path d="M72 71h29M72 79h20M148 103h47M238 70h19M238 78h14" stroke="#a3a3a3" stroke-width="3"/>
+                                        </svg>
+                                        <svg class="demo-art__running" viewBox="0 0 320 150" fill="none">
+                                            <path d="M19 136h282M30 121h260" stroke="#a3a3a3"/>
+                                            <path d="m51 27 32-13 15 11 16-11 32 13-14 36-16-8 5 71H75l5-71-16 8Z" fill="#f4f4f4" stroke="#737373" stroke-width="2"/>
+                                            <path d="M90 21q8 13 16 0M94 52h9" stroke="#737373" stroke-width="2"/>
+                                            <path d="M170 32h78l12 88-36 6-14-48-14 48-38-6Z" fill="#404040" stroke="#737373" stroke-width="2"/>
+                                            <path d="M170 41h78M205 43v20M217 43v20M234 63v28" stroke="#a3a3a3" stroke-width="2"/>
+                                        </svg>
+                                        <span class="demo-art__caption">FIELD / NOTES / 0{i + 1}</span><span class="demo-art__play">▷</span>
+                                    </div>
+                                    <div class="demo-post__body"><div class="demo-post__metrics"><span>♡ {post.likes}</span><span><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="M13.5 7.5a6 6 0 0 1-6 6H2l1-3a6 6 0 1 1 10.5-3Z"/></svg>{48 + i * 13}</span><span class="demo-post__save"><svg width="11" height="13" viewBox="0 0 12 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="M1 1h10v13l-5-3-5 3Z"/></svg></span></div><p data-demo-copy={post.key}>{demoCopy.en[post.key]}</p><div class="demo-comments"><span data-demo-copy="comments">Comments</span><p><b>everyday.notes</b> <span data-demo-copy="comment1">{copy.comment1}</span></p><p><b data-demo-copy="igName1">{copy.igName1}</b> <span data-demo-copy="comment2">{copy.comment2}</span></p><span class="demo-comment-capture" data-demo-copy="captured">✓ Post and comments collected</span></div></div>
+                                </article>
+                            ))}
+                        </div>
+                    </div>
+                </section>
+                <section class="demo-feed demo-feed--x">
+                    <nav class="demo-site-nav" aria-hidden="true"><span class="demo-site-nav__brand">◎</span><span>⌂ <span data-demo-copy="home">Home</span></span><span class="is-selected">⌕ <span data-demo-copy="search">Search</span></span><span>▧ <span data-demo-copy="explore">Explore</span></span><span>♡ <span data-demo-copy="notifications">Notifications</span></span><span>◯ <span data-demo-copy="profile">Profile</span></span></nav>
+                    <header class="demo-feed__header"><strong><span class="demo-x-logo" aria-hidden="true">𝕏</span> X</strong><span data-demo-count="x">56 posts</span></header>
+                    <div class="demo-search"><span aria-hidden="true">⌕</span><span data-demo-query="x">{copy.queryX}</span><span class="demo-search__activity" aria-hidden="true">↵</span></div>
+                    <span class="demo-close-post" aria-hidden="true">×</span>
+                    <div class="demo-feed__viewport">
+                        <div class="demo-skeleton" aria-hidden="true"><i></i><i></i><i></i></div>
+                        <div class="demo-posts demo-posts--x">
+                            {posts.map((post, i) => (
+                                <article class="demo-post demo-tweet" data-demo-post data-platform="x" data-at={14300 + i * 1500}>
+                                    <div class="demo-post__byline"><span class="demo-avatar">A</span><div><b data-demo-copy={`xName${post.n}`}>{copy[`xName${post.n}`]}</b><small data-demo-copy={`xHandle${post.n}`}>{copy[`xHandle${post.n}`]}</small></div><span class="demo-source-id">[{post.number}]</span></div>
+                                    <p data-demo-copy={post.key}>{demoCopy.en[post.key]}</p>
+                                    <div class="demo-post__metrics"><span>↩ {post.replies}</span><span>⇄ {32 + i * 9}</span><span>♡ {post.likes}</span><span>↗</span></div>
+                                </article>
+                            ))}
+                        </div>
+                    </div>
+                </section>
+                <section class="demo-feed demo-feed--tiktok">
+                    <nav class="demo-site-nav" aria-hidden="true"><span class="demo-site-nav__brand">♪</span><span>⌂ <span data-demo-copy="home">Home</span></span><span class="is-selected">⌕ <span data-demo-copy="search">Search</span></span><span>▧ <span data-demo-copy="explore">Explore</span></span><span>◯ <span data-demo-copy="profile">Profile</span></span></nav>
+                    <header class="demo-feed__header"><strong>♪ TikTok</strong><span data-demo-count="tiktok">40 posts</span></header>
+                    <div class="demo-search"><span aria-hidden="true">⌕</span><span data-demo-query="tiktok">{copy.queryTiktok}</span><span class="demo-search__activity" aria-hidden="true">↵</span></div>
+                    <div class="demo-feed__viewport">
+                        <div class="demo-posts demo-posts--tiktok">
+                            {[1, 2].map((n) => (
+                                <article class="demo-post demo-video" data-demo-post data-platform="tiktok" data-at={20800 + (n - 1) * 1700}>
+                                    <div class="demo-video__screen">
+                                        <span class="demo-video__title" data-demo-copy={`tkTitle${n}`}>{copy[`tkTitle${n}`]}</span>
+                                        <div class="demo-video__illustration" aria-hidden="true"><span class="demo-video__person"></span><div class="demo-video__product"><i></i></div><span class="demo-video__play">▷</span></div>
+                                        <span class="demo-video__handle" data-demo-copy={`tkName${n}`}>{copy[`tkName${n}`]}</span>
+                                        <span class="demo-video__actions" aria-hidden="true">♡<br/>↩<br/>↗</span>
+                                        <span class="demo-video__timeline" aria-hidden="true"><i></i></span>
+                                    </div>
+                                    <div class="demo-video__caption"><b data-demo-copy={`tkMetric${n}`}>{copy[`tkMetric${n}`]}</b><p data-demo-copy={`tkBody${n}`}>{copy[`tkBody${n}`]}</p><span class="demo-source-id">[0{n + 6}]</span></div>
+                                </article>
+                            ))}
+                        </div>
+                    </div>
+                    <div class="demo-creator-profile" data-demo-profile aria-hidden="true">
+                        <div class="demo-creator-profile__head"><span class="demo-avatar">A</span><div><b data-demo-copy="tkName1">{copy.tkName1}</b><small data-demo-copy="igMeta">{copy.igMeta}</small></div></div>
+                        <p data-demo-copy="tkBody1">{copy.tkBody1}</p>
+                        <span data-demo-copy="tkMetric1">{copy.tkMetric1}</span>
+                        <div class="demo-creator-profile__videos" aria-hidden="true"><span>▷</span><span>▷</span><span>▷</span></div>
+                    </div>
+                </section>
+            </div>
+                </div>
+            </div>
+            <div class="demo-result">
+                <div class="demo-result__heading"><span>✧ <span data-demo-copy="finding">The takeaway</span></span><span class="demo-result__sources" data-demo-copy="sources">168 sources · 3 platforms</span></div>
+                <div class="demo-report">
+                    {[1, 2, 3, 4].map((n) => <div class="demo-report__item" data-demo-report-item><strong data-demo-copy={`reportTitle${n}`}>{copy[`reportTitle${n}`]}</strong><p data-demo-summary={n}>{copy[`report${n}`]}</p></div>)}
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="demo-footer">
+        <div class="demo-status" role="status" aria-live="off"><i></i><span data-demo-status>Research complete</span></div>
+        <span class="demo-total" data-demo-total>168 sources</span>
+        <div class="demo-progress" aria-hidden="true"><span></span></div>
+    </div>
+
+</div>

@@ -1,10 +1,11 @@
 // Unified client runtime for every page. It reads the page-local dictionary
 // embedded in #site-i18n and drives the language toggle, all data-i18n* markers
 // (text / html / aria-label / content / alt, with {value} interpolation), the
-// clipboard copy buttons, and the hero typewriter. Each feature no-ops when its
+// clipboard copy buttons, and the research demo. Each feature no-ops when its
 // markup is absent, so one script serves the home, connect, and contact pages.
 
 import { track } from "@vercel/analytics";
+import { startResearchDemo } from "./research-demo";
 
 const i18nElement = document.getElementById("site-i18n");
 const dictionary = JSON.parse(i18nElement?.textContent || "{}");
@@ -13,12 +14,6 @@ const languageOptions = Array.from(
     document.querySelectorAll("[data-lang-option]"),
 );
 const supportedLanguages = Object.keys(dictionary);
-const typewriter = document.querySelector("[data-typewriter]");
-const prefersReducedMotion = window.matchMedia(
-    "(prefers-reduced-motion: reduce)",
-).matches;
-let typewriterRun = 0;
-
 const isSupportedLanguage = (language) => supportedLanguages.includes(language);
 
 const getMessage = (language, path) => {
@@ -45,69 +40,6 @@ const getValues = (element) => {
 
 const interpolate = (value, replacements = {}) =>
     value.replace(/\{(\w+)\}/g, (_, key) => replacements[key] ?? "");
-
-const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
-
-const renderTypewriter = (chars, runId) => {
-    if (runId !== typewriterRun || !(typewriter instanceof HTMLElement)) {
-        return false;
-    }
-
-    typewriter.textContent = chars.join("");
-    return true;
-};
-
-const startTypewriter = (phrases) => {
-    typewriterRun += 1;
-    const runId = typewriterRun;
-
-    if (!(typewriter instanceof HTMLElement)) {
-        return;
-    }
-
-    const nextPhrases = Array.isArray(phrases)
-        ? phrases.filter(
-              (phrase) => typeof phrase === "string" && phrase.length > 0,
-          )
-        : [];
-    typewriter.dataset.phrases = JSON.stringify(nextPhrases);
-    typewriter.textContent = nextPhrases[0] || "";
-
-    if (prefersReducedMotion || nextPhrases.length < 2) {
-        return;
-    }
-
-    const run = async () => {
-        let phraseIndex = 0;
-        await sleep(2200);
-
-        while (runId === typewriterRun) {
-            const currentPhrase = Array.from(nextPhrases[phraseIndex]);
-
-            for (let i = currentPhrase.length; i >= 0; i -= 1) {
-                if (!renderTypewriter(currentPhrase.slice(0, i), runId)) {
-                    return;
-                }
-                await sleep(20);
-            }
-
-            phraseIndex = (phraseIndex + 1) % nextPhrases.length;
-            const nextPhrase = Array.from(nextPhrases[phraseIndex]);
-            await sleep(280);
-
-            for (let i = 1; i <= nextPhrase.length; i += 1) {
-                if (!renderTypewriter(nextPhrase.slice(0, i), runId)) {
-                    return;
-                }
-                await sleep(44 + Math.random() * 26);
-            }
-
-            await sleep(2600);
-        }
-    };
-
-    run();
-};
 
 const chooseInitialLanguage = () => {
     try {
@@ -178,9 +110,7 @@ const applyLanguage = (language, shouldPersist = false) => {
             element.getAttribute("data-post-lang") !== nextLanguage;
     });
 
-    startTypewriter(
-        dictionary[nextLanguage]?.prompts || dictionary.en?.prompts || [],
-    );
+    startResearchDemo(nextLanguage);
 
     if (shouldPersist) {
         try {

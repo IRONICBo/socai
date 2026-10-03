@@ -35,6 +35,8 @@ Social media platforms are hard to access for agents. Scrapers get you banned. G
 
 socai, instead, builds the deep ontology of each platform. This enables agents to actually understand the entities, states and flows in each platform. Then socai reuses your signed-in Chrome -- and thus keeps your social status -- to search, open posts, expand comments, read profiles, OCR images, transcribe video and so on, just like a human does.
 
+[![Beauty trend research and running creator discovery across Instagram, X and TikTok](docs/assets/research-demo-en.gif)](https://socai.io/?utm_source=github&utm_medium=readme&utm_campaign=research-demo#demo)
+
 | Instagram research | Xiaohongshu research |
 | --- | --- |
 | https://github.com/user-attachments/assets/4849e0f3-87d5-4a0d-8e0b-2a58e3d0267a | https://github.com/user-attachments/assets/8aebcded-f365-4f12-b9c4-102cc1fa964d |

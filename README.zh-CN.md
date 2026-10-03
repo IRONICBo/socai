@@ -34,6 +34,8 @@
 
 socai 为每个平台建立深层本体，让 Agent 真正理解其中的实体、状态和流程。然后 socai 复用你已登录的 Chrome，保住你的社交账号状态，像人一样去搜索、打开帖子、展开评论、阅读主页、OCR 图片、转写视频。
 
+[![在 Instagram、X 和 TikTok 调研美妆趋势与寻找跑步服饰达人](docs/assets/research-demo-zh.gif)](https://socai.io/?utm_source=github&utm_medium=readme&utm_campaign=research-demo#demo)
+
 | Instagram 调研 | 小红书调研 |
 | --- | --- |
 | https://github.com/user-attachments/assets/4849e0f3-87d5-4a0d-8e0b-2a58e3d0267a | https://github.com/user-attachments/assets/8aebcded-f365-4f12-b9c4-102cc1fa964d |

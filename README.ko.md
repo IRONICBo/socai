@@ -34,6 +34,8 @@
 
 socai는 각 플랫폼의 깊은 온톨로지를 만들어, 에이전트가 엔티티, 상태, 흐름을 실제로 이해하게 합니다. 그리고 로그인된 Chrome을 그대로 써서 소셜 계정 상태를 유지한 채, 사람처럼 검색하고, 게시물을 열고, 댓글을 펼치고, 프로필을 읽고, 이미지를 OCR하고, 영상을 전사합니다.
 
+[![Instagram, X, TikTok에서 뷰티 트렌드 조사와 러닝 의류 크리에이터 발굴](docs/assets/research-demo-en.gif)](https://socai.io/?utm_source=github&utm_medium=readme&utm_campaign=research-demo#demo)
+
 | Instagram 리서치 | 샤오홍슈 리서치 |
 | --- | --- |
 | https://github.com/user-attachments/assets/4849e0f3-87d5-4a0d-8e0b-2a58e3d0267a | https://github.com/user-attachments/assets/8aebcded-f365-4f12-b9c4-102cc1fa964d |

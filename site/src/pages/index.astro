@@ -2,6 +2,7 @@
 import "../styles/global.css";
 import SiteHeader from "../components/SiteHeader.astro";
 import SiteFooter from "../components/SiteFooter.astro";
+import ResearchDemo from "../components/ResearchDemo.astro";
 import { message as messageFor } from "../lib/i18n";
 
 const githubUrl = "/github";
@@ -51,28 +52,7 @@ const messages = {
             downloadWindows: "download for Windows",
             github: "view on github",
         },
-        preview: {
-            sectionAria: "socai app preview",
-            windowAria: "socai desktop app task composer mockup",
-            chromeStatus: "chrome · connected",
-            agentStatus: "Agent · claude · sonnet 4.5",
-            heading: "what should socai research?",
-            description:
-                "start a one-shot browser task. socai opens a temporary chrome tab, runs the Agent, saves the result, then closes the tab.",
-            modeAria: "selected mode: Agent tasks",
-            modeAgent: "Agent tasks",
-            modeTool: "tool tests",
-            agentContext: "Agent · claude ·",
-            newTask: "new task",
-            recent: "recent",
-            history: "view history",
-            recentCoffee: "LinkedIn AI product leaders · 12 profiles",
-            recentCamping: "Instagram vintage shop reels · 8 posts",
-            recentWalk: "TikTok + Douyin city walks · 24 videos",
-            completedNow: "completed · 14:02",
-            completedEarlier: "completed · 11:38",
-            completedYesterday: "completed · yesterday",
-        },
+        preview: { sectionAria: "socai app preview" },
         project: {
             sectionAria: "Jev Social open-source project",
             eyebrow: "JEV × SOCAI",
@@ -90,12 +70,6 @@ const messages = {
             connect: "connect guide",
             contact: "contact",
         },
-        prompts: [
-            "compare how people discuss sugar-free tea on RedNote, Douyin, and TikTok. cite posts, comments, and replies.",
-            "find high-quality Instagram reels about tokyo vintage shops and summarize why people recommend each shop.",
-            "find LinkedIn people working on AI products at consumer companies and summarize their experience.",
-            "research beginner camping gear across social platforms and organize the mistakes new buyers make most often.",
-        ],
     },
     zh: {
         meta: {
@@ -132,28 +106,7 @@ const messages = {
             downloadWindows: "下载 Windows 版",
             github: "在 github 查看",
         },
-        preview: {
-            sectionAria: "socai app 预览",
-            windowAria: "socai 桌面 app 任务输入界面模型",
-            chromeStatus: "chrome · 已连接",
-            agentStatus: "Agent · claude · sonnet 4.5",
-            heading: "想让 socai 调研什么？",
-            description:
-                "输入一次性浏览器任务。socai 会打开临时 chrome 标签页，运行 Agent，保存结果，然后关闭标签页。",
-            modeAria: "已选择模式：Agent 任务",
-            modeAgent: "Agent 任务",
-            modeTool: "工具测试",
-            agentContext: "Agent · claude ·",
-            newTask: "新任务",
-            recent: "最近",
-            history: "查看历史",
-            recentCoffee: "LinkedIn AI 产品负责人 · 12 份档案",
-            recentCamping: "Instagram 东京中古店 Reels · 8 篇",
-            recentWalk: "TikTok + 抖音 city walk · 24 个视频",
-            completedNow: "已完成 · 14:02",
-            completedEarlier: "已完成 · 11:38",
-            completedYesterday: "已完成 · 昨天",
-        },
+        preview: { sectionAria: "socai app 预览" },
         project: {
             sectionAria: "Jev Social 开源项目",
             eyebrow: "JEV × SOCAI",
@@ -171,12 +124,6 @@ const messages = {
             connect: "连接教程",
             contact: "联系",
         },
-        prompts: [
-            "对比小红书、抖音和 TikTok 上关于无糖茶的讨论，引用具体帖子、评论和回复。",
-            "调研 Instagram 上关于东京中古店的高质量 Reels，总结每家店被推荐的原因。",
-            "在 LinkedIn 搜索消费行业的 AI 产品负责人，并整理他们的相关经历。",
-            "跨平台调研露营入门装备，总结新手最常买错的东西。",
-        ],
     },
 };
 
@@ -185,7 +132,6 @@ const message = (path: string, language = defaultLanguage) =>
 const agentInstallPrompt =
     "Read this repo and install the CLI, and add it to your skills: https://github.com/socai-io/socai .";
 
-const initialPrompts = messages[defaultLanguage].prompts;
 const pageTitle = message("meta.title");
 const pageDescription = message("meta.description");
 const socialImageAlt = message("meta.socialImageAlt");
@@ -450,164 +396,7 @@ const socialImageAlt = message("meta.socialImageAlt");
                     aria-label={message("preview.sectionAria")}
                     data-i18n-aria-label="preview.sectionAria"
                 >
-                    <div
-                        class="app-window"
-                        role="img"
-                        aria-label={message("preview.windowAria")}
-                        data-i18n-aria-label="preview.windowAria"
-                    >
-                        <div class="window-bar">
-                            <span class="traffic-light"></span>
-                            <span class="traffic-light"></span>
-                            <span class="traffic-light"></span>
-                            <span class="window-title">socai</span>
-                        </div>
-
-                        <div class="app-topbar">
-                            <div class="app-brand">
-                                <svg
-                                    viewBox="0 0 32 32"
-                                    width="20"
-                                    height="20"
-                                    fill="none"
-                                    aria-hidden="true"
-                                >
-                                    <rect
-                                        x="2.5"
-                                        y="2.5"
-                                        width="27"
-                                        height="27"
-                                        rx="3"
-                                        stroke="currentColor"
-                                        stroke-width="1.6"></rect>
-                                    <rect
-                                        x="16"
-                                        y="16"
-                                        width="10"
-                                        height="10"
-                                        rx="1.2"
-                                        fill="currentColor"></rect>
-                                </svg>
-                                <span>socai</span>
-                            </div>
-
-                            <div class="status-group">
-                                <span class="status-pill status-pill--active"
-                                    ><i></i>
-                                    <span data-i18n="preview.chromeStatus"
-                                        >{message("preview.chromeStatus")}</span
-                                    ></span
-                                >
-                                <span
-                                    class="status-pill"
-                                    data-i18n="preview.agentStatus"
-                                    >{message("preview.agentStatus")}</span
-                                >
-                            </div>
-                        </div>
-
-                        <div class="composer">
-                            <h2 data-i18n="preview.heading">
-                                {message("preview.heading")}
-                            </h2>
-                            <p data-i18n="preview.description">
-                                {message("preview.description")}
-                            </p>
-
-                            <div class="task-card">
-                                <div class="task-input">
-                                    <span
-                                        class="typewriter-text"
-                                        data-typewriter
-                                        data-phrases={JSON.stringify(
-                                            initialPrompts,
-                                        )}>{initialPrompts[0]}</span
-                                    ><span class="cursor" aria-hidden="true"
-                                    ></span>
-                                </div>
-                                <div class="task-controls">
-                                    <span
-                                        class="mode-switch"
-                                        role="group"
-                                        aria-label={message("preview.modeAria")}
-                                        data-i18n-aria-label="preview.modeAria"
-                                    >
-                                        <span
-                                            class="mode-switch__item mode-switch__item--active"
-                                            data-i18n="preview.modeAgent"
-                                            >{
-                                                message("preview.modeAgent")
-                                            }</span
-                                        >
-                                        <span
-                                            class="mode-switch__item"
-                                            data-i18n="preview.modeTool"
-                                            >{message("preview.modeTool")}</span
-                                        >
-                                    </span>
-                                    <span class="agent-context"
-                                        ><span data-i18n="preview.agentContext"
-                                            >{
-                                                message("preview.agentContext")
-                                            }</span
-                                        >
-                                        <strong>claude-sonnet-4-5</strong></span
-                                    >
-                                    <span
-                                        class="new-task-button"
-                                        data-i18n="preview.newTask"
-                                        >{message("preview.newTask")}</span
-                                    >
-                                </div>
-                            </div>
-
-                            <div class="recent-head">
-                                <span data-i18n="preview.recent"
-                                    >{message("preview.recent")}</span
-                                >
-                                <span data-i18n="preview.history"
-                                    >{message("preview.history")}</span
-                                >
-                            </div>
-                            <div class="recent-list">
-                                <div class="recent-row">
-                                    <span>✓</span>
-                                    <span data-i18n="preview.recentCoffee"
-                                        >{message("preview.recentCoffee")}</span
-                                    >
-                                    <span data-i18n="preview.completedNow"
-                                        >{message("preview.completedNow")}</span
-                                    >
-                                </div>
-                                <div class="recent-row">
-                                    <span>✓</span>
-                                    <span data-i18n="preview.recentCamping"
-                                        >{
-                                            message("preview.recentCamping")
-                                        }</span
-                                    >
-                                    <span data-i18n="preview.completedEarlier"
-                                        >{
-                                            message("preview.completedEarlier")
-                                        }</span
-                                    >
-                                </div>
-                                <div class="recent-row">
-                                    <span>✓</span>
-                                    <span data-i18n="preview.recentWalk"
-                                        >{message("preview.recentWalk")}</span
-                                    >
-                                    <span data-i18n="preview.completedYesterday"
-                                        >{
-                                            message(
-                                                "preview.completedYesterday",
-                                            )
-                                        }</span
-                                    >
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+                    <ResearchDemo />
                 </section>
 
                 <section
