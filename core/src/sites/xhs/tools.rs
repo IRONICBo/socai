@@ -8,7 +8,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::agent::compaction::truncate;
@@ -4401,6 +4401,49 @@ pub struct WaitForLoginTool {
     page: Arc<PageSession>,
 }
 
+/// One human-ready generation per active run. Hosted frontends use this to
+/// wake a login waiter immediately after the user releases browser control;
+/// local/native flows continue to rely on normal polling.
+static LOGIN_RESUME_SIGNALS: OnceLock<
+    Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<u64>>>,
+> = OnceLock::new();
+
+fn login_resume_signals(
+) -> &'static Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<u64>>> {
+    LOGIN_RESUME_SIGNALS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn login_resume_receiver(run_id: &str) -> tokio::sync::watch::Receiver<u64> {
+    let mut signals = login_resume_signals()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    signals
+        .entry(run_id.to_owned())
+        .or_insert_with(|| tokio::sync::watch::channel(0).0)
+        .subscribe()
+}
+
+/// Notify an active `wait_for_login` call that the user says the browser is
+/// ready. The waiter still verifies the live page before it resumes.
+pub fn signal_login_resume(run_id: &str) {
+    let mut signals = login_resume_signals()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let sender = signals
+        .entry(run_id.to_owned())
+        .or_insert_with(|| tokio::sync::watch::channel(0).0);
+    let next = sender.borrow().saturating_add(1);
+    sender.send_replace(next);
+}
+
+/// Release the small per-run signal cell when a host reaches a terminal state.
+pub fn clear_login_resume(run_id: &str) {
+    login_resume_signals()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(run_id);
+}
+
 /// How long `wait_for_login` polls before giving up so the agent can re-prompt.
 const WAIT_FOR_LOGIN_DEFAULT_SECS: i64 = 180;
 const WAIT_FOR_LOGIN_MAX_SECS: i64 = 600;
@@ -4430,7 +4473,7 @@ impl Tool for WaitForLoginTool {
         })
     }
 
-    async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let xhs = XhsPageRuntime::new(&self.page);
         // Already logged in? Return right away — nothing to wait for.
         if xhs.is_logged_in().await.unwrap_or(false) {
@@ -4455,11 +4498,27 @@ impl Tool for WaitForLoginTool {
         let timeout = get_i64(&input, "timeout_seconds", WAIT_FOR_LOGIN_DEFAULT_SECS)
             .clamp(10, WAIT_FOR_LOGIN_MAX_SECS);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout as u64);
+        let mut human_ready = login_resume_receiver(&ctx.run_id);
         loop {
             if xhs.is_logged_in().await.unwrap_or(false) {
+                clear_login_resume(&ctx.run_id);
                 return Ok(json_result(&json!({
                     "logged_in": true,
                     "message": "Login detected. Re-run the original tool to continue.",
+                })));
+            }
+            // A manual "continue" accelerates verification; it does not bypass
+            // a visible logged-out wall. The full gate tolerates sidebar class
+            // changes after a successful QR redirect that make the strict
+            // one-shot selector inconclusive.
+            if *human_ready.borrow_and_update() > 0
+                && xhs.login_gate(false).await.unwrap_or(LoginGate::Required) == LoginGate::LoggedIn
+            {
+                clear_login_resume(&ctx.run_id);
+                return Ok(json_result(&json!({
+                    "logged_in": true,
+                    "human_confirmed": true,
+                    "message": "Login confirmed from the live browser. Re-run the original tool.",
                 })));
             }
             if std::time::Instant::now() >= deadline {
@@ -4473,7 +4532,14 @@ impl Tool for WaitForLoginTool {
                     ),
                 })));
             }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                changed = human_ready.changed() => {
+                    if changed.is_err() {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
+            }
         }
     }
 }
