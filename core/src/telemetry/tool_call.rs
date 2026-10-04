@@ -170,14 +170,33 @@ pub fn summarize_tool_result(value: &Value) -> Map<String, Value> {
         }
     }
     if data.get("ok").and_then(Value::as_bool) == Some(false) {
-        if let Some(reason) = data.get("reason").and_then(Value::as_str) {
+        if let Some(reason) = data
+            .get("reason")
+            .and_then(Value::as_str)
+            .or_else(|| batch_failure_reason(data))
+        {
             props.insert(
                 "failure_reason".into(),
-                json!(reason.chars().take(120).collect::<String>()),
+                json!(super::trace::redact_telemetry_error(reason)
+                    .chars()
+                    .take(120)
+                    .collect::<String>()),
             );
         }
     }
     props
+}
+
+fn batch_failure_reason(value: &Value) -> Option<&str> {
+    ["videos", "notes", "posts"].iter().find_map(|key| {
+        value.get(*key).and_then(Value::as_array).and_then(|items| {
+            items.iter().find_map(|item| {
+                (item.get("ok").and_then(Value::as_bool) != Some(true))
+                    .then(|| item.get("reason").and_then(Value::as_str))
+                    .flatten()
+            })
+        })
+    })
 }
 
 fn page_url_shape(value: &str) -> Option<(String, usize)> {
@@ -430,6 +449,51 @@ mod tests {
         );
         assert!(!props.contains_key("body"));
         assert!(!props.contains_key("comments"));
+
+        let batch_props = summarize_tool_result(&json!({
+            "ok": false,
+            "videos": [
+                { "ok": true, "reason": "must_not_win" },
+                { "ok": false, "reason": "video_navigation_timeout" }
+            ]
+        }));
+        assert_eq!(
+            batch_props.get("failure_reason"),
+            Some(&json!("video_navigation_timeout"))
+        );
+
+        let note_batch_props = summarize_tool_result(&json!({
+            "ok": false,
+            "notes": [
+                { "ok": false, "reason": "note_read_failed" }
+            ]
+        }));
+        assert_eq!(
+            note_batch_props.get("failure_reason"),
+            Some(&json!("note_read_failed"))
+        );
+
+        let post_batch_props = summarize_tool_result(&json!({
+            "ok": false,
+            "posts": [
+                { "ok": false, "reason": "post_unavailable" }
+            ]
+        }));
+        assert_eq!(
+            post_batch_props.get("failure_reason"),
+            Some(&json!("post_unavailable"))
+        );
+
+        let sensitive_batch_props = summarize_tool_result(&json!({
+            "ok": false,
+            "videos": [
+                { "ok": false, "reason": "request rejected: Bearer private-batch-token-123456" }
+            ]
+        }));
+        assert_eq!(
+            sensitive_batch_props.get("failure_reason"),
+            Some(&json!("request rejected: Bearer [redacted]"))
+        );
 
         let content = json!([
             { "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() },

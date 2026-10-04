@@ -3593,6 +3593,13 @@ impl Tool for GetNotesTool {
         });
         if !stop_reason.is_empty() {
             payload["reason"] = json!(stop_reason);
+        } else if successful != targets.len() {
+            // Direct-note entries carry detailed local diagnostics, but the
+            // lean result intentionally removes their error text before it is
+            // returned to the model or telemetry. Preserve a stable,
+            // content-free top-level outcome so partial batch failures remain
+            // diagnosable without exposing note data or runtime errors.
+            payload["reason"] = json!("note_read_failed");
         }
         promote_page_diagnostic(&mut payload);
         // Mid-scan blockers surface as a top-level `reason` too; mark login
