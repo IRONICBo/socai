@@ -15,6 +15,9 @@ pub const DEFAULT_COMPACT_AFTER_MESSAGES: usize = 20;
 pub const DEFAULT_KEEP_RECENT_MESSAGES: usize = 10;
 const TURN_MARKDOWN_MAX_CHARS: usize = 2_000;
 const USER_REQUEST_MAX_CHARS: usize = 500;
+const WEB_SOURCE_EXCERPT_MAX_CHARS: usize = 1_200;
+const WEB_SOURCE_TITLE_MAX_CHARS: usize = 240;
+const MAX_WEB_SOURCES: usize = 24;
 const COMPACT_CONTEXT_HEADING: &str = "# Earlier compacted context";
 const LEGACY_EVIDENCE_HEADING: &str = "# Earlier tool evidence";
 
@@ -129,6 +132,8 @@ fn contains_tool_result(message: &Message) -> bool {
 fn compact_older_messages(messages: &[Message]) -> String {
     let mut inherited = Vec::new();
     let mut artifacts: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
+    let mut web_read_calls = BTreeSet::new();
+    let mut web_sources: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut turns = Vec::new();
     let mut pending_user: Option<String> = None;
 
@@ -144,7 +149,14 @@ fn compact_older_messages(messages: &[Message]) -> String {
                 }
                 continue;
             }
-            (MessageRole::Assistant, _) => {
+            (MessageRole::Assistant, MessageContent::Blocks(blocks)) => {
+                for block in blocks {
+                    if let Block::ToolUse { id, name, .. } = block {
+                        if name == "web_read" {
+                            web_read_calls.insert(id.clone());
+                        }
+                    }
+                }
                 if let Some(markdown) = assistant_report_markdown(message) {
                     turns.push(compact_turn_markdown(
                         pending_user.take().as_deref(),
@@ -160,7 +172,11 @@ fn compact_older_messages(messages: &[Message]) -> String {
             continue;
         };
         for block in blocks {
-            let Block::ToolResult { content, .. } = block else {
+            let Block::ToolResult {
+                tool_use_id,
+                content,
+            } = block
+            else {
                 continue;
             };
             for item in content {
@@ -171,6 +187,9 @@ fn compact_older_messages(messages: &[Message]) -> String {
                     continue;
                 };
                 collect_artifact_evidence(&value, &mut artifacts);
+                if web_read_calls.contains(tool_use_id) {
+                    collect_web_source_evidence(&value, &mut web_sources);
+                }
             }
         }
     }
@@ -207,7 +226,73 @@ fn compact_older_messages(messages: &[Message]) -> String {
             }
         }
     }
+    if !web_sources.is_empty() {
+        rendered.push_str("\n\n## Earlier web source evidence\n");
+        rendered.push_str(
+            "These pages were opened and read directly. Preserve their URLs and excerpts when producing the final report.\n",
+        );
+        for (url, (title, excerpt)) in web_sources.into_iter().take(MAX_WEB_SOURCES) {
+            rendered.push_str(&format!("\n- URL: {url}\n"));
+            if !title.is_empty() {
+                rendered.push_str(&format!("  Title: {title}\n"));
+            }
+            if !excerpt.is_empty() {
+                rendered.push_str(&format!("  Evidence excerpt: {excerpt}\n"));
+            }
+        }
+    }
     rendered
+}
+
+fn collect_web_source_evidence(value: &Value, sources: &mut BTreeMap<String, (String, String)>) {
+    let Some(url) = value
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+    else {
+        return;
+    };
+    let title = value
+        .get("title")
+        .and_then(Value::as_str)
+        .map(normalize_web_evidence)
+        .map(|text| truncate_plain(&text, WEB_SOURCE_TITLE_MAX_CHARS))
+        .unwrap_or_default();
+    let excerpt = value
+        .get("text")
+        .and_then(Value::as_str)
+        .map(normalize_web_evidence)
+        .map(|text| truncate_plain(&text, WEB_SOURCE_EXCERPT_MAX_CHARS))
+        .unwrap_or_default();
+    if title.is_empty() && excerpt.is_empty() {
+        return;
+    }
+
+    let candidate = (title, excerpt);
+    match sources.get(url) {
+        Some(existing) if evidence_size(existing) >= evidence_size(&candidate) => {}
+        _ => {
+            sources.insert(url.to_string(), candidate);
+        }
+    }
+}
+
+fn normalize_web_evidence(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_plain(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max_chars).collect();
+    out.push('…');
+    out
+}
+
+fn evidence_size(value: &(String, String)) -> usize {
+    value.0.chars().count() + value.1.chars().count()
 }
 
 fn assistant_report_markdown(message: &Message) -> Option<String> {
@@ -363,5 +448,97 @@ fn collect_artifact_evidence(
                 entities.insert((id.to_string(), title.to_string()));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tool_exchange(id: &str, name: &str, result: Value) -> Vec<Message> {
+        vec![
+            Message::assistant_blocks(vec![Block::ToolUse {
+                id: id.to_string(),
+                name: name.to_string(),
+                input: json!({}),
+            }]),
+            Message::user_blocks(vec![Block::ToolResult {
+                tool_use_id: id.to_string(),
+                content: vec![ToolResultContent::Text {
+                    text: serde_json::to_string(&result).unwrap(),
+                }],
+            }]),
+        ]
+    }
+
+    #[test]
+    fn compacted_context_preserves_opened_web_source_evidence() {
+        let messages = tool_exchange(
+            "read-1",
+            "web_read",
+            json!({
+                "url": "https://arxiv.org/abs/2604.08516",
+                "title": "MolmoWeb:  Open Visual Web Agent",
+                "text": "Submitted on 9 Apr 2026\nMolmoWeb uses screenshot actions.\nPass@4 is 94.7%."
+            }),
+        );
+
+        let compacted = compact_older_messages(&messages);
+
+        assert!(compacted.contains("## Earlier web source evidence"));
+        assert!(compacted.contains("https://arxiv.org/abs/2604.08516"));
+        assert!(compacted.contains("MolmoWeb: Open Visual Web Agent"));
+        assert!(compacted.contains("Pass@4 is 94.7%."));
+    }
+
+    #[test]
+    fn compacted_context_does_not_treat_navigation_metadata_as_read_evidence() {
+        let messages = tool_exchange(
+            "navigate-1",
+            "web_navigate",
+            json!({
+                "url": "https://arxiv.org/abs/2604.08516",
+                "title": "MolmoWeb"
+            }),
+        );
+
+        let compacted = compact_older_messages(&messages);
+
+        assert!(!compacted.contains("Earlier web source evidence"));
+        assert!(!compacted.contains("https://arxiv.org/abs/2604.08516"));
+    }
+
+    #[test]
+    fn compacted_context_keeps_the_richer_read_for_a_repeated_url() {
+        let mut messages = tool_exchange(
+            "read-1",
+            "web_read",
+            json!({
+                "url": "https://example.com/report",
+                "title": "Report",
+                "text": "short"
+            }),
+        );
+        messages.extend(tool_exchange(
+            "read-2",
+            "web_read",
+            json!({
+                "url": "https://example.com/report",
+                "title": "Report",
+                "text": "longer evidence with the benchmark result"
+            }),
+        ));
+
+        let compacted = compact_older_messages(&messages);
+
+        assert_eq!(
+            compacted
+                .matches("- URL: https://example.com/report")
+                .count(),
+            1
+        );
+        assert!(compacted.contains("longer evidence with the benchmark result"));
+        assert!(!compacted.contains("Evidence excerpt: short\n"));
     }
 }
