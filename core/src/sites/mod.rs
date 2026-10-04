@@ -9,6 +9,7 @@ pub mod registry;
 pub mod runner;
 pub(crate) mod skill_cli;
 pub mod tiktok;
+pub mod web;
 pub mod x;
 pub mod xhs;
 
@@ -20,8 +21,8 @@ pub use learning::{
     SiteSkillContext, SiteSkillManifest,
 };
 pub use registry::{
-    all_native_site_adapters, find_native_site_adapter, required_string, AgentInstructionsFn,
-    AgentToolsFn, ArgKind, BoxFuture, CommandArg, CommandRunFn, NativeSiteAdapter, SiteCommand,
-    SlowWhen,
+    all_native_site_adapters, find_native_site_adapter, find_site, required_string,
+    AgentInstructionsFn, AgentToolsFn, ArgKind, BoxFuture, CommandArg, CommandRunFn,
+    NativeSiteAdapter, SiteCommand, SiteSpec, SlowWhen,
 };
 pub use runner::{run_tool_command, PageHook, ToolCommand};
