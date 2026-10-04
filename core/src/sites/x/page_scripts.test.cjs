@@ -615,3 +615,89 @@ test('home tabs, timeline reply icon, and hover card stay inspection-only', () =
   assert.equal(scripts.overlayClosed({ path: '/home' }).status, 'returned');
   assert.equal(clicked, false);
 });
+
+test('home inline composer stays inspection-only', () => {
+  let clicked = false;
+  const profile = new FakeNode({
+    href: 'https://x.com/tonyisntstark',
+    attributes: { 'data-testid': 'AppTabBar_Profile_Link' },
+  });
+  const home = new FakeNode({
+    href: 'https://x.com/home',
+    attributes: { 'data-testid': 'AppTabBar_Home_Link' },
+  });
+  home.getBoundingClientRect = () => ({ left: 16, top: 58, width: 120, height: 40, right: 136, bottom: 98 });
+  home.click = () => { clicked = true; };
+  const editor = new FakeNode({
+    text: '\n',
+    attributes: { 'data-testid': 'tweetTextarea_0', contenteditable: 'true', 'aria-label': 'Post text' },
+  });
+  editor.getBoundingClientRect = () => ({ left: 350, top: 76, width: 514, height: 28, right: 864, bottom: 104 });
+  const postButton = new FakeNode({
+    text: 'Post',
+    attributes: { 'data-testid': 'tweetButtonInline', role: 'button', 'aria-disabled': 'true' },
+  });
+  postButton.disabled = true;
+  postButton.getBoundingClientRect = () => ({ left: 799, top: 128, width: 67, height: 36, right: 866, bottom: 164 });
+  postButton.click = () => { clicked = true; };
+  const primary = new FakeNode({
+    attributes: { 'data-testid': 'primaryColumn' },
+    selectors: {
+      '[data-testid="tweetTextarea_0"][contenteditable="true"]': [editor],
+      '[data-testid="tweetButtonInline"]': [postButton],
+    },
+  });
+  editor.parentElement = primary;
+  postButton.parentElement = primary;
+  const mine = tweetFixture('99', { username: 'tonyisntstark', text: 'already posted' });
+  const document = {
+    body: new FakeNode({ text: 'Hydrated X page' }),
+    readyState: 'complete',
+    activeElement: editor,
+    querySelector: (selector) => {
+      if (selector.includes('primaryColumn')) return primary;
+      if (selector.includes('AppTabBar_Home_Link')) return home;
+      return null;
+    },
+    querySelectorAll: (selector) => {
+      if (selector.includes('AppTabBar_Profile_Link')) return [profile];
+      if (selector === 'article[data-testid="tweet"], article') return [mine];
+      if (selector.includes('AppTabBar_Home_Link')) return [home];
+      return [];
+    },
+    elementFromPoint: (x, y) => {
+      if (y >= 76 && y <= 104 && x >= 350 && x <= 864) return editor;
+      if (y >= 128 && y <= 164 && x >= 799) return postButton;
+      if (y >= 58 && y <= 98 && x <= 136) return home;
+      return null;
+    },
+  };
+  const window = {
+    innerHeight: 763,
+    innerWidth: 1280,
+    scrollY: 0,
+    getComputedStyle: () => ({ visibility: 'visible', display: 'block' }),
+    scrollBy: () => {},
+  };
+  const location = { href: 'https://x.com/home', pathname: '/home', search: '' };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'page_scripts.js'), 'utf8'), {
+    URL, document, location, window, setTimeout,
+  });
+  const scripts = window.SocaiXPageScripts;
+  const composer = scripts.postComposerTarget();
+  assert.equal(composer.ok, true);
+  assert.equal(composer.actor, 'tonyisntstark');
+  assert.equal(composer.status, 'post_editor_ready');
+  assert.equal(scripts.postDraftState().value, '\n');
+  assert.equal(scripts.postDraftState().focused, true);
+  const submit = scripts.postSubmitTarget();
+  assert.equal(submit.status, 'post_submit_disabled');
+  assert.equal(submit.ok, false);
+  assert.equal(scripts.postCloseTarget().status, 'post_close_not_found');
+  assert.equal(scripts.homeLinkTarget().ok, true);
+  assert.equal(scripts.renderedPostState({ text: 'already posted' }).ids[0], '99');
+  location.pathname = '/compose/post';
+  location.href = 'https://x.com/compose/post';
+  assert.equal(scripts.postComposerTarget().status, 'not_home');
+  assert.equal(clicked, false);
+});

@@ -1271,12 +1271,18 @@
       : { ok: false, status: 'follow_button_obscured', username: cardState.username, following, hit_owned: false };
   }
 
-  function hoverDismissTarget() {
+  function homeLinkTarget() {
     const home = document.querySelector('[data-testid="AppTabBar_Home_Link"]');
     const point = home && ownedPoint(home);
     return point
-      ? { ok: true, status: 'dismiss_ready', hit_owned: true, ...point }
-      : { ok: false, status: 'dismiss_point_not_found', hit_owned: false };
+      ? { ok: true, status: 'home_link_ready', hit_owned: true, ...point }
+      : { ok: false, status: 'home_link_not_found', hit_owned: false };
+  }
+
+  function hoverDismissTarget() {
+    const home = homeLinkTarget();
+    if (!home.ok) return { ok: false, status: 'dismiss_point_not_found', hit_owned: false };
+    return { ...home, status: 'dismiss_ready' };
   }
 
   function hoverCardPresence() {
@@ -1284,6 +1290,112 @@
     const open = !!card && card.count === undefined;
     const count = open ? 1 : card && card.count || 0;
     return { ok: count === 0, status: count ? 'hover_card_open' : 'hover_card_closed', count };
+  }
+
+  function homeInlineRoot() {
+    if (!/^\/home\/?$/i.test(location.pathname)) return { error: 'not_home' };
+    const primary = document.querySelector('[data-testid="primaryColumn"]');
+    if (!primary) return { error: 'composer_not_found' };
+    return { primary };
+  }
+
+  function homeInlineEditors(primary) {
+    return Array.from(primary.querySelectorAll(
+      '[data-testid="tweetTextarea_0"][contenteditable="true"]',
+    )).filter((editor) => visible(editor) && !editor.closest?.('[role="dialog"]')
+      && editor.getAttribute('aria-disabled') !== 'true');
+  }
+
+  function homeInlineButton(primary) {
+    const buttons = Array.from(primary.querySelectorAll('[data-testid="tweetButtonInline"]'))
+      .map((node) => node.closest?.('button, [role="button"]') || node)
+      .filter((button) => visible(button) && !button.closest?.('[role="dialog"]'));
+    const unique = [];
+    for (const button of buttons) if (!unique.includes(button)) unique.push(button);
+    return unique.length === 1 ? unique[0] : null;
+  }
+
+  function postComposerTarget() {
+    const root = homeInlineRoot();
+    const actor = currentUsername();
+    if (root.error) return { ok: false, status: root.error, actor };
+    const editors = homeInlineEditors(root.primary);
+    if (editors.length !== 1) {
+      return { ok: false, status: editors.length ? 'ambiguous_composer' : 'composer_not_found', actor };
+    }
+    const point = ownedPoint(editors[0]);
+    return point
+      ? { ok: true, status: 'post_editor_ready', actor, hit_owned: true, ...point }
+      : { ok: false, status: 'post_editor_obscured', actor, hit_owned: false };
+  }
+
+  function postDraftState() {
+    const root = homeInlineRoot();
+    const actor = currentUsername();
+    if (root.error) return { ok: false, status: root.error, actor, value: '' };
+    const editors = homeInlineEditors(root.primary);
+    if (editors.length !== 1) {
+      return { ok: false, status: editors.length ? 'ambiguous_composer' : 'composer_not_found', actor, value: '' };
+    }
+    const editor = editors[0];
+    const active = document.activeElement;
+    return {
+      ok: true,
+      status: 'post_editor_ready',
+      actor,
+      focused: active === editor || editor.contains?.(active),
+      value: editableText(editor, 10000),
+    };
+  }
+
+  function postSubmitTarget() {
+    const root = homeInlineRoot();
+    const actor = currentUsername();
+    if (root.error) return { ok: false, status: root.error, actor };
+    const button = homeInlineButton(root.primary);
+    if (!button) return { ok: false, status: 'post_submit_not_found', actor };
+    const point = ownedPoint(button);
+    const disabled = !!button.disabled || button.getAttribute('aria-disabled') === 'true';
+    return {
+      ok: !disabled && !!point,
+      status: disabled ? 'post_submit_disabled' : point ? 'post_submit_ready' : 'post_submit_obscured',
+      actor,
+      text: cleanText(button, 40),
+      disabled,
+      hit_owned: !!point,
+      ...(point || {}),
+    };
+  }
+
+  function postCloseTarget() {
+    return { ok: false, status: 'post_close_not_found', hit_owned: false };
+  }
+
+  function renderedPostState(arg) {
+    const text = cleanText(arg && arg.text || '', 10000);
+    const actor = currentUsername();
+    const state = pageState();
+    const path = location.pathname + location.search;
+    if (/graduated-access/i.test(path)) {
+      return { ok: false, status: 'graduated_access', actor, ids: [], url: location.href, composer_open: false };
+    }
+    if (!actor) return { ok: false, status: 'current_user_unknown', actor: '', ids: [], url: location.href };
+    const ids = [];
+    for (const article of tweetArticles()) {
+      const parsed = parseTweet(article, ids.length + 1);
+      if (!parsed || parsed.author.username !== actor || parsed.text.trim() !== text) continue;
+      if (!ids.includes(parsed.id)) ids.push(parsed.id);
+    }
+    const composer = homeInlineRoot();
+    return {
+      ok: state.ok || ids.length > 0,
+      status: ids.length ? 'visible' : state.ok ? 'ready' : state.status,
+      actor,
+      ids,
+      count: ids.length,
+      composer_open: !composer.error,
+      url: location.href,
+    };
   }
 
   async function scrollComments() {
@@ -1341,9 +1453,15 @@
     overlayReplySubmitTarget,
     overlayCloseTarget,
     overlayClosed,
+    postComposerTarget,
+    postDraftState,
+    postSubmitTarget,
+    postCloseTarget,
+    renderedPostState,
     streamNameTarget,
     hoverCardState,
     hoverFollowTarget,
+    homeLinkTarget,
     hoverDismissTarget,
     hoverCardPresence,
   });

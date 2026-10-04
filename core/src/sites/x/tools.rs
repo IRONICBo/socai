@@ -59,6 +59,7 @@ fn x_tools(page: Arc<PageSession>) -> Vec<Arc<dyn Tool>> {
         Arc::new(ProfileTool { page: page.clone() }),
         Arc::new(GetPostsTool { page: page.clone() }),
         Arc::new(ReplyTool { page: page.clone() }),
+        Arc::new(PostTool { page: page.clone() }),
         Arc::new(LikeTool { page: page.clone() }),
         Arc::new(FollowTool { page: page.clone() }),
         Arc::new(HoverTool { page: page.clone() }),
@@ -266,6 +267,31 @@ pub static X_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
             run: run_reply,
         },
         SiteCommand {
+            name: "post",
+            tool_name: "post",
+            about: "Publish one X post by typing into the home timeline composer and clicking Post.",
+            args: &[
+                CommandArg {
+                    key: "text",
+                    long: Some("text"),
+                    value_name: "TEXT",
+                    help: "Exact post text. The command refuses to replace an existing draft.",
+                    required: true,
+                    kind: ArgKind::Str,
+                },
+                CommandArg {
+                    key: "wait_seconds",
+                    long: Some("wait-seconds"),
+                    value_name: "SECONDS",
+                    help: "Maximum wait for the composer and post-submit reconciliation. Defaults to 30.",
+                    required: false,
+                    kind: ArgKind::Int,
+                },
+            ],
+            slow: SlowWhen::Always,
+            run: run_post,
+        },
+        SiteCommand {
             name: "like",
             tool_name: "like",
             about: "Like one X post. Does nothing when that post is already liked.",
@@ -450,6 +476,15 @@ fn run_follow(
     progress: Option<ToolProgressSender>,
 ) -> BoxFuture<Value> {
     run_named(page, args, debug_snapshot, progress, "follow", "follow")
+}
+
+fn run_post(
+    page: Arc<PageSession>,
+    args: Value,
+    debug_snapshot: bool,
+    progress: Option<ToolProgressSender>,
+) -> BoxFuture<Value> {
+    run_named(page, args, debug_snapshot, progress, "post", "post")
 }
 
 fn run_reply(
@@ -1002,6 +1037,10 @@ struct ReplyTool {
     page: Arc<PageSession>,
 }
 
+struct PostTool {
+    page: Arc<PageSession>,
+}
+
 struct LikeTool {
     page: Arc<PageSession>,
 }
@@ -1385,6 +1424,398 @@ impl Tool for ReplyTool {
             "reconcile": reconciled,
         })))
     }
+}
+
+#[async_trait]
+impl Tool for PostTool {
+    fn name(&self) -> &str {
+        "post"
+    }
+
+    fn description(&self) -> &str {
+        "Publish one X post only when the user explicitly requests the exact text. Types into the home timeline composer and clicks its Post button once. Does not open the compose URL. Refuses an existing draft and does not retry commit_unknown."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string", "minLength": 1, "maxLength": 10000 },
+                "wait_seconds": { "type": "number", "default": 30, "minimum": 1, "maximum": 330 }
+            },
+            "required": ["text"]
+        })
+    }
+
+    async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let raw_text = input
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing required argument: text"))?;
+        if raw_text.trim().is_empty() || raw_text.trim() != raw_text {
+            anyhow::bail!("post text must be non-empty and have no leading or trailing whitespace");
+        }
+        let text = raw_text.to_string();
+        if text.chars().count() > 10_000 {
+            anyhow::bail!("post text must contain at most 10000 characters");
+        }
+        let wait_seconds =
+            get_f64(&input, "wait_seconds", DEFAULT_WAIT_SECONDS).clamp(1.0, MAX_TOOL_WAIT_SECONDS);
+        let composer = reveal_home_composer(&self.page).await?;
+        let page_state =
+            crate::sites::learning::run_site_browser_tool(&self.page, SITE_ID, "pageState", None)
+                .await?;
+        if let Some(reason) = gate_reason(&page_state).or_else(|| gate_reason(&composer)) {
+            return Ok(json_result(&failure_payload(
+                reason,
+                json!({ "url": HOME_URL, "composer": composer, "submit_click_count": 0 }),
+            )));
+        }
+        if composer.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Ok(json_result(&failure_payload(
+                composer
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("post_editor_unavailable"),
+                json!({ "url": HOME_URL, "composer": composer, "submit_click_count": 0 }),
+            )));
+        }
+        let actor_id = composer
+            .get("actor")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if actor_id.is_empty() {
+            return Ok(json_result(&failure_payload(
+                "current_user_unknown",
+                json!({ "url": HOME_URL, "composer": composer, "submit_click_count": 0 }),
+            )));
+        }
+        let rendered_args = json!({ "text": text });
+        let before = crate::sites::learning::run_site_browser_tool(
+            &self.page,
+            SITE_ID,
+            "renderedPostState",
+            Some(&rendered_args),
+        )
+        .await?;
+        if before.get("status").and_then(Value::as_str) == Some("graduated_access") {
+            return Ok(json_result(&failure_payload(
+                "graduated_access",
+                json!({ "url": HOME_URL, "reconcile": before, "submit_click_count": 0 }),
+            )));
+        }
+        let actor = ActionActor {
+            id: actor_id.clone(),
+            display_name: format!("@{actor_id}"),
+        };
+        let idempotency_key = format!("x:post:{actor_id}:{text}");
+        let store = ActionStore::open_default();
+        let mut receipt = store.create_draft(
+            &idempotency_key,
+            "x",
+            SocialActionKind::Publish,
+            ActionTarget {
+                id: actor_id.clone(),
+                url: HOME_URL.to_string(),
+            },
+            actor.clone(),
+            ActionPreview {
+                text: Some(text.clone()),
+                evidence: Value::Null,
+            },
+        )?;
+        match receipt.status() {
+            SocialActionStatus::Committed | SocialActionStatus::Reconciled => {
+                return Ok(json_result(&json!({
+                    "ok": true, "status": receipt.status(), "action_id": receipt.action_id(),
+                    "idempotent_replay": true, "url": HOME_URL,
+                    "text": text, "submit_click_count": 0, "receipt": receipt,
+                })));
+            }
+            SocialActionStatus::Committing | SocialActionStatus::CommitUnknown => {
+                let prior = receipt.precommit_target_ids().unwrap_or(&[]);
+                let observed = value_string_array(&before, "ids");
+                if let Some(new_id) = observed.into_iter().find(|id| !prior.contains(id)) {
+                    receipt = store.reconcile_committed(receipt.action_id(), &new_id)?;
+                    return Ok(json_result(&json!({
+                        "ok": true, "status": "reconciled", "action_id": receipt.action_id(),
+                        "idempotent_replay": true, "url": HOME_URL,
+                        "text": text, "post_id": new_id, "submit_click_count": 0, "receipt": receipt,
+                    })));
+                }
+                return Ok(json_result(&json!({
+                    "ok": false, "status": "commit_unknown",
+                    "reason": "a submit attempt was already reserved; reconcile instead of retrying",
+                    "action_id": receipt.action_id(), "url": HOME_URL,
+                    "text": text, "submit_click_count": 0, "receipt": receipt,
+                })));
+            }
+            SocialActionStatus::Prepared => {
+                receipt = store.reset_prepared(receipt.action_id(), &actor.id, &actor_id)?;
+            }
+            SocialActionStatus::Draft => {}
+        }
+        let prior_ids = value_string_array(&before, "ids");
+        if !prior_ids.is_empty() {
+            return Ok(json_result(&json!({
+                "ok": true,
+                "status": "already_present",
+                "url": HOME_URL,
+                "text": text,
+                "post_id": prior_ids.first().cloned().unwrap_or_default(),
+                "submit_click_count": 0,
+                "reconcile": before,
+            })));
+        }
+        let Some((editor_x, editor_y)) = point_of(&composer) else {
+            return Ok(json_result(&failure_payload(
+                composer
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("post_editor_unavailable"),
+                json!({ "url": HOME_URL, "composer": composer, "submit_click_count": 0 }),
+            )));
+        };
+        self.page.click(editor_x, editor_y).await?;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let draft = crate::sites::learning::run_site_browser_tool(
+            &self.page,
+            SITE_ID,
+            "postDraftState",
+            None,
+        )
+        .await?;
+        let draft_text = draft
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let already_typed = draft_text == text;
+        if draft.get("ok").and_then(Value::as_bool) != Some(true)
+            || draft.get("focused").and_then(Value::as_bool) != Some(true)
+            || (!draft_text.is_empty() && !already_typed)
+        {
+            if draft_text.is_empty() || already_typed {
+                close_post_composer(&self.page).await;
+            }
+            return Ok(json_result(&failure_payload(
+                "post_editor_not_empty_or_focused",
+                json!({ "url": HOME_URL, "draft": draft, "submit_click_count": 0 }),
+            )));
+        }
+        if !already_typed {
+            self.page.type_chars(&text).await?;
+            let typed_deadline = Instant::now() + Duration::from_secs(5);
+            let typed = loop {
+                let state = crate::sites::learning::run_site_browser_tool(
+                    &self.page,
+                    SITE_ID,
+                    "postDraftState",
+                    None,
+                )
+                .await?;
+                if state.get("value").and_then(Value::as_str).map(str::trim) == Some(text.as_str())
+                    || Instant::now() >= typed_deadline
+                {
+                    break state;
+                }
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            };
+            if typed.get("value").and_then(Value::as_str).map(str::trim) != Some(text.as_str()) {
+                close_post_composer(&self.page).await;
+                return Ok(json_result(&failure_payload(
+                    "post_draft_mismatch",
+                    json!({ "url": HOME_URL, "draft": typed, "submit_click_count": 0 }),
+                )));
+            }
+        }
+        let submit =
+            wait_for_browser_tool(&self.page, SITE_ID, "postSubmitTarget", None, 8.0).await?;
+        let Some((submit_x, submit_y)) = point_of(&submit) else {
+            close_post_composer(&self.page).await;
+            return Ok(json_result(&failure_payload(
+                submit
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("post_submit_unavailable"),
+                json!({ "url": HOME_URL, "submit": submit, "submit_click_count": 0 }),
+            )));
+        };
+        let final_rendered = crate::sites::learning::run_site_browser_tool(
+            &self.page,
+            SITE_ID,
+            "renderedPostState",
+            Some(&rendered_args),
+        )
+        .await?;
+        if final_rendered.get("actor").and_then(Value::as_str) != Some(actor.id.as_str()) {
+            close_post_composer(&self.page).await;
+            return Ok(json_result(&failure_payload(
+                "actor_changed_before_submit",
+                json!({ "url": HOME_URL, "reconcile": final_rendered, "submit_click_count": 0 }),
+            )));
+        }
+        let precommit_ids = value_string_array(&final_rendered, "ids");
+        if precommit_ids.iter().any(|id| !prior_ids.contains(id)) {
+            close_post_composer(&self.page).await;
+            return Ok(json_result(&json!({
+                "ok": true,
+                "status": "already_present",
+                "url": HOME_URL,
+                "text": text,
+                "submit_click_count": 0,
+                "reconcile": final_rendered,
+            })));
+        }
+        receipt = store.mark_prepared(receipt.action_id(), &actor.id, &actor_id, 300)?;
+        receipt = store.begin_commit(
+            receipt.action_id(),
+            &actor.id,
+            &actor_id,
+            precommit_ids.clone(),
+        )?;
+        let action_id = receipt.action_id().to_string();
+        let dispatch_error = self
+            .page
+            .click(submit_x, submit_y)
+            .await
+            .err()
+            .map(|error| format!("{error:#}"));
+        let deadline = Instant::now() + Duration::from_secs_f64(wait_seconds);
+        let mut reconcile_error = None;
+        let mut reconciled = json!({ "ok": false, "status": "not_observed", "ids": [] });
+        loop {
+            match crate::sites::learning::run_site_browser_tool(
+                &self.page,
+                SITE_ID,
+                "renderedPostState",
+                Some(&rendered_args),
+            )
+            .await
+            {
+                Ok(state) => {
+                    reconciled = state;
+                    let status = reconciled
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if status == "graduated_access"
+                        || reconciled.get("actor").and_then(Value::as_str)
+                            != Some(actor.id.as_str())
+                    {
+                        if reconciled.get("actor").and_then(Value::as_str)
+                            != Some(actor.id.as_str())
+                            && status != "graduated_access"
+                        {
+                            reconcile_error =
+                                Some("signed-in actor changed after submit dispatch".to_string());
+                        }
+                        break;
+                    }
+                    let ids = value_string_array(&reconciled, "ids");
+                    if ids.iter().any(|id| !precommit_ids.contains(id))
+                        || Instant::now() >= deadline
+                    {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    reconcile_error = Some(format!("{error:#}"));
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let new_target_id = value_string_array(&reconciled, "ids")
+            .into_iter()
+            .find(|id| !precommit_ids.contains(id));
+        let posted_id = new_target_id.clone().unwrap_or_default();
+        let (committed, persisted_receipt, receipt_error) = if let Some(new_id) = new_target_id {
+            match store.reconcile_committed(&action_id, &new_id) {
+                Ok(receipt) => (true, Some(receipt), None),
+                Err(error) => (false, None, Some(format!("{error:#}"))),
+            }
+        } else {
+            match store.finish_commit(&action_id, false) {
+                Ok(receipt) => (false, Some(receipt), None),
+                Err(error) => (false, None, Some(format!("{error:#}"))),
+            }
+        };
+        Ok(json_result(&json!({
+            "ok": committed,
+            "status": if committed { "committed" } else { "commit_unknown" },
+            "action_id": action_id,
+            "url": HOME_URL,
+            "text": text,
+            "post_id": posted_id,
+            "interaction": "trusted_pointer_and_keyboard",
+            "platform_api_called": false,
+            "submit_click_count": 1,
+            "dispatch_error": dispatch_error,
+            "reconcile_error": reconcile_error,
+            "receipt_error": receipt_error,
+            "receipt": persisted_receipt,
+            "reconcile": reconciled,
+        })))
+    }
+}
+
+fn on_x_home(url: &str) -> (bool, bool) {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return (false, false);
+    };
+    let host = parsed.host_str().unwrap_or("");
+    let on_x = host == "x.com" || host.ends_with(".x.com");
+    let on_home = parsed.path() == "/home" || parsed.path() == "/home/";
+    (on_x, on_home)
+}
+
+async fn click_home_link(page: &PageSession) -> anyhow::Result<bool> {
+    let target =
+        crate::sites::learning::run_site_browser_tool(page, SITE_ID, "homeLinkTarget", None)
+            .await?;
+    let Some((x, y)) = point_of(&target) else {
+        return Ok(false);
+    };
+    page.click(x, y).await?;
+    Ok(true)
+}
+
+/// Reach the home timeline composer by clicking Home when already on X.
+/// A URL load is only used to enter the site.
+async fn reveal_home_composer(page: &PageSession) -> anyhow::Result<Value> {
+    let url = current_url(page).await.unwrap_or_default();
+    let (on_x, on_home) = on_x_home(&url);
+    if !on_x {
+        navigate_https(page, HOME_URL).await?;
+    } else if !on_home {
+        let _ = click_home_link(page).await?;
+    }
+    let composer =
+        crate::sites::learning::run_site_browser_tool(page, SITE_ID, "postComposerTarget", None)
+            .await?;
+    if composer.get("ok").and_then(Value::as_bool) == Some(true) {
+        return Ok(composer);
+    }
+    let status = composer.get("status").and_then(Value::as_str).unwrap_or("");
+    if status == "post_editor_obscured" || status == "not_home" {
+        let _ = click_home_link(page).await?;
+    }
+    wait_for_browser_tool(page, SITE_ID, "postComposerTarget", None, 8.0).await
+}
+
+async fn close_post_composer(page: &PageSession) {
+    let Ok(close) =
+        crate::sites::learning::run_site_browser_tool(page, SITE_ID, "postCloseTarget", None).await
+    else {
+        return;
+    };
+    let Some((x, y)) = point_of(&close) else {
+        return;
+    };
+    let _ = page.click(x, y).await;
 }
 
 fn value_string_array(value: &Value, key: &str) -> Vec<String> {

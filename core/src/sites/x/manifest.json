@@ -291,6 +291,56 @@
       "args": {},
       "returns": { "type": "object", "description": "Fail-closed overlay close geometry." }
     },
+    "homeLinkTarget": {
+      "description": "Inspect the left-nav Home link. Never clicks. Clicking it from another X page opens home; clicking it on home scrolls the timeline back to the composer.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "homeLinkTarget",
+      "args": {},
+      "returns": { "type": "object", "description": "Fail-closed Home link geometry." }
+    },
+    "postComposerTarget": {
+      "description": "Inspect the home timeline's inline post editor and return owned pointer geometry. Ignores dialogs and the compose URL. Never focuses or types.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "postComposerTarget",
+      "args": {},
+      "returns": { "type": "object", "description": "Fail-closed compose editor geometry." }
+    },
+    "postDraftState": {
+      "description": "Read the draft and focus state of the home timeline's inline post editor.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "postDraftState",
+      "args": {},
+      "returns": { "type": "object", "description": "Current compose draft." }
+    },
+    "postSubmitTarget": {
+      "description": "Inspect the Post button on the home timeline's inline composer. Never clicks.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "postSubmitTarget",
+      "args": {},
+      "returns": { "type": "object", "description": "Fail-closed Post button geometry." }
+    },
+    "postCloseTarget": {
+      "description": "The home inline composer has no close control. Returns not found so a failed draft is left in place.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "postCloseTarget",
+      "args": {},
+      "returns": { "type": "object", "description": "Fail-closed compose close geometry." }
+    },
+    "renderedPostState": {
+      "description": "Find visible posts by the signed-in account whose text exactly matches the requested post.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "renderedPostState",
+      "args": {
+        "text": { "type": "string", "required": true, "description": "Exact post text." }
+      },
+      "returns": { "type": "object", "description": "Matching signed-in post ids, plus composer and graduated-access state." }
+    },
     "overlayClosed": {
       "description": "Report whether the reply overlay is gone and the page has returned to the timeline path it started on.",
       "path": "page_scripts.js",

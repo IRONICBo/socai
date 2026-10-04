@@ -64,6 +64,13 @@ XHS、Douyin、TikTok 与后续平台都走同一个发现入口；平台差异�
 
 `NativeSiteAdapter` 仅绑定 Rust 函数指针、agent tool factory 和 CLI command handler。它不是发现入口，不声明 domains/notes/browser scripts，也不决定 package 文件结构。纯 DOM 能力应只增加 manifest browser tool，不创建空 Rust 模块。
 
+## Prefer human-like page actions
+
+When a control is reachable, prefer clicking, typing, and scrolling. If it is hard to find, unreachable, off the current page, or the click keeps failing, a URL or another programmatic action is fine. Examples:
+
+- Posting: use the composer and post button already on the timeline. Otherwise open the compose URL.
+- Replying: click the reply icon on the timeline. If the post is hard to locate or sits off the page, open the post URL.
+
 ## Development loop
 
 1. 先确认目标 URL、用户操作流程、输出字段、登录状态与成功条件。
