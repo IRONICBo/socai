@@ -342,7 +342,7 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read the current real page as compact visible text plus referenced links and controls. Call it after navigation, scrolling, or a click; input values and raw HTML are never returned."
+        "Read the current real detail page as compact visible text plus referenced links and controls. Do not use this on an arXiv search page; call web_collect_links there. Input values and raw HTML are never returned."
     }
 
     fn input_schema(&self) -> Value {
@@ -358,6 +358,16 @@ impl Tool for ReadTool {
     }
 
     async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let page_info = self.page.page_info().await?;
+        let current_url = page_info.get("url").and_then(Value::as_str).unwrap_or("");
+        if reqwest::Url::parse(current_url).is_ok_and(|url| {
+            matches!(url.host_str(), Some("arxiv.org" | "www.arxiv.org"))
+                && url.path().starts_with("/search")
+        }) {
+            anyhow::bail!(
+                "arXiv search results require web_collect_links with url_contains '/abs/'"
+            );
+        }
         let max_chars = input
             .get("max_chars")
             .and_then(Value::as_u64)
