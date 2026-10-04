@@ -694,5 +694,11 @@ mod tests {
         assert_eq!(object.get("event"), Some(&json!("socai_tool_call")));
         assert_eq!(object.get("install_id"), Some(&json!("install-1")));
         assert!(!object.contains_key("created_at_ms"));
+        assert_eq!(
+            redact_telemetry_error(
+                "Incorrect API key provided: provider-specific***value. Check the dashboard"
+            ),
+            "Incorrect API key provided: [redacted]"
+        );
     }
 }
