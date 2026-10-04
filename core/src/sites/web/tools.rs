@@ -140,6 +140,7 @@ pub fn web_tools(page: Arc<PageSession>) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(NavigateTool { page: page.clone() }),
         Arc::new(ReadTool { page: page.clone() }),
+        Arc::new(CollectLinksTool { page: page.clone() }),
         Arc::new(ClickTool { page: page.clone() }),
         Arc::new(TypeTool { page: page.clone() }),
         Arc::new(BackTool { page }),
@@ -172,6 +173,133 @@ pub static WEB_SITE: SiteSpec = SiteSpec {
     default_agent_instructions: None,
     commands: &[],
 };
+
+struct CollectLinksTool {
+    page: Arc<PageSession>,
+}
+
+#[async_trait]
+impl Tool for CollectLinksTool {
+    fn name(&self) -> &str {
+        "web_collect_links"
+    }
+
+    fn description(&self) -> &str {
+        "Collect exact public link URLs from the current search or list page with nearby visible context. Use url_contains to narrow results (for example /abs/ on arXiv), select relevant records by title/context, then navigate only to returned URLs."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "url_contains": {"type": "string", "description": "Optional case-insensitive substring required in each link URL"},
+                "text_contains": {"type": "string", "description": "Optional case-insensitive substring required in link text or nearby context"},
+                "max_links": {"type": "integer", "minimum": 1, "maximum": 40, "default": 20},
+                "offset": {"type": "integer", "minimum": 0, "maximum": 100000, "default": 0, "description": "Continuation offset returned by a previous call"},
+                "context_chars": {"type": "integer", "minimum": 80, "maximum": 400, "default": 240}
+            }
+        })
+    }
+
+    async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let url_contains = input
+            .get("url_contains")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let text_contains = input
+            .get("text_contains")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if url_contains.chars().count() > 256 || text_contains.chars().count() > 256 {
+            anyhow::bail!("link filter exceeds the 256 character limit");
+        }
+        let max_links = input
+            .get("max_links")
+            .and_then(Value::as_u64)
+            .unwrap_or(20)
+            .clamp(1, 40);
+        let offset = input
+            .get("offset")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(100_000);
+        let context_chars = input
+            .get("context_chars")
+            .and_then(Value::as_u64)
+            .unwrap_or(240)
+            .clamp(80, 400);
+        let script = format!(
+            r#"
+const urlNeedle = {url_contains};
+const textNeedle = {text_contains};
+const maxLinks = {max_links};
+const offset = {offset};
+const offsetLimit = 100000;
+const contextChars = {context_chars};
+const outputBudget = 24000;
+const clean = (value, limit) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
+const visible = (element) => {{
+  const style = getComputedStyle(element);
+  const rect = element.getBoundingClientRect();
+  return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+}};
+const seen = new Set();
+const links = [];
+let matched = 0;
+let outputChars = 0;
+let hasMore = false;
+for (const anchor of document.querySelectorAll('a[href]')) {{
+  if (!visible(anchor)) continue;
+  let parsed;
+  try {{ parsed = new URL(anchor.href, location.href); }} catch {{ continue; }}
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) continue;
+  if (parsed.href.length > 2048 || seen.has(parsed.href)) continue;
+  if (urlNeedle && !parsed.href.toLocaleLowerCase().includes(urlNeedle.toLocaleLowerCase())) continue;
+  const container = anchor.closest('article, li, .arxiv-result, .result, .search-result, [role="listitem"], tr') || anchor.parentElement;
+  const text = clean(anchor.innerText || anchor.getAttribute('aria-label'), 180);
+  const context = clean(container?.innerText, contextChars);
+  if (textNeedle && !`${{text}} ${{context}}`.toLocaleLowerCase().includes(textNeedle.toLocaleLowerCase())) continue;
+  seen.add(parsed.href);
+  if (matched >= offsetLimit) break;
+  if (matched++ < offset) continue;
+  const item = {{url: parsed.href, text, context}};
+  const itemChars = JSON.stringify(item).length;
+  if (links.length >= maxLinks || outputChars + itemChars > outputBudget) {{ hasMore = true; break; }}
+  links.push(item);
+  outputChars += itemChars;
+}}
+return {{
+  url: clean(location.href, 2048),
+  title: clean(document.title, 180),
+  links,
+  has_more: hasMore,
+  next_offset: hasMore ? offset + links.length : null,
+}};
+"#,
+            url_contains = serde_json::to_string(&url_contains)?,
+            text_contains = serde_json::to_string(&text_contains)?,
+        );
+        let mut result = self.page.evaluate_json(&script).await?;
+        let candidates = result
+            .get_mut("links")
+            .and_then(Value::as_array_mut)
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let mut public_links = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let Some(url) = candidate.get("url").and_then(Value::as_str) else {
+                continue;
+            };
+            if validate_public_url(url).await.is_ok() {
+                public_links.push(candidate);
+            }
+        }
+        result["links"] = Value::Array(public_links);
+        Ok(json_text(&result))
+    }
+}
 
 struct NavigateTool {
     page: Arc<PageSession>,
