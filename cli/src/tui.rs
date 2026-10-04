@@ -41,6 +41,7 @@ const PROVIDER_ORDER: &[Provider] = &[
     Provider::QwenIntl,
     Provider::Doubao,
     Provider::DeepSeek,
+    Provider::OpenRouter,
     Provider::OpenAI,
     Provider::Anthropic,
 ];
