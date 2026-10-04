@@ -956,11 +956,15 @@ fn search_transition_ok(value: &Value, query: &str) -> bool {
         .get("title")
         .and_then(Value::as_str)
         .is_some_and(|title| title.to_lowercase().contains(&query.to_lowercase()));
+    let url_matches = value
+        .get("url")
+        .and_then(Value::as_str)
+        .is_some_and(|url| tiktok_search_matches(url, query));
     !value
         .get("blank_or_throttled")
         .and_then(Value::as_bool)
         .unwrap_or(false)
-        && (query_visible || title_matches)
+        && (query_visible || title_matches || url_matches)
         && (value.get("card_count").and_then(Value::as_u64).unwrap_or(0) > 0
             || value
                 .get("has_no_results")
