@@ -29,6 +29,8 @@ pub enum Provider {
     /// Doubao via its OpenAI-compatible API.
     Doubao,
     DeepSeek,
+    /// OpenRouter's OpenAI-compatible gateway.
+    OpenRouter,
 }
 
 impl Provider {
@@ -42,6 +44,7 @@ impl Provider {
             Provider::QwenIntl => "qwen-intl",
             Provider::Doubao => "doubao",
             Provider::DeepSeek => "deepseek",
+            Provider::OpenRouter => "openrouter",
         }
     }
 
@@ -55,6 +58,7 @@ impl Provider {
             "qwen-intl" | "qwen_intl" | "dashscope-intl" => Some(Self::QwenIntl),
             "doubao" => Some(Self::Doubao),
             "deepseek" => Some(Self::DeepSeek),
+            "openrouter" | "router" => Some(Self::OpenRouter),
             _ => None,
         }
     }
@@ -254,6 +258,17 @@ pub static PROVIDERS: &[ProviderConfig] = &[
         base_url: Some("https://api.deepseek.com/v1"),
         model_prefixes: &["deepseek-"],
     },
+    ProviderConfig {
+        provider: Provider::OpenRouter,
+        display_name: "OpenRouter",
+        default_model: "openai/gpt-6-luna",
+        env_keys: &["OPENROUTER_API_KEY"],
+        base_url: Some("https://openrouter.ai/api/v1"),
+        // OpenRouter model ids include the upstream provider prefix. Require
+        // explicit provider selection so `openai/...` is never mistaken for
+        // the direct OpenAI API.
+        model_prefixes: &[],
+    },
 ];
 
 pub fn config_for(provider: Provider) -> &'static ProviderConfig {
@@ -343,6 +358,12 @@ fn auth_paths() -> Vec<PathBuf> {
 }
 
 fn codex_auth_path() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("SOCAI_CODEX_AUTH_PATH") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
     dirs::home_dir().map(|home| home.join(".codex/auth.json"))
 }
 
@@ -659,6 +680,10 @@ mod tests {
         assert_eq!(Provider::from_name("qwen-intl"), Some(Provider::QwenIntl));
         assert_eq!(Provider::from_name("doubao"), Some(Provider::Doubao));
         assert_eq!(Provider::from_name("DeepSeek"), Some(Provider::DeepSeek));
+        assert_eq!(
+            Provider::from_name("OpenRouter"),
+            Some(Provider::OpenRouter)
+        );
         assert_eq!(Provider::from_name("nope"), None);
     }
 
@@ -673,6 +698,7 @@ mod tests {
             Provider::QwenIntl,
             Provider::Doubao,
             Provider::DeepSeek,
+            Provider::OpenRouter,
         ] {
             let cfg = config_for(p);
             assert_eq!(cfg.provider, p);
