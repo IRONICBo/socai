@@ -899,15 +899,20 @@ fn redact_url_paths(text: &str) -> String {
 
 fn redact_interpolated_error_values(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
-    let value_start = ["invalid ", "unsupported ", "unexpected "]
-        .iter()
-        .filter_map(|marker| lower.find(marker))
-        .filter_map(|marker_start| {
-            text[marker_start..]
-                .find(": ")
-                .map(|separator| marker_start + separator + 2)
-        })
-        .min();
+    let value_start = [
+        "invalid ",
+        "unsupported ",
+        "unexpected ",
+        "incorrect api key",
+    ]
+    .iter()
+    .filter_map(|marker| lower.find(marker))
+    .filter_map(|marker_start| {
+        text[marker_start..]
+            .find(": ")
+            .map(|separator| marker_start + separator + 2)
+    })
+    .min();
     match value_start {
         Some(value_start) => format!("{}[redacted]", &text[..value_start]),
         None => text.to_string(),
