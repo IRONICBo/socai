@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -288,11 +289,36 @@ return {{
             .map(std::mem::take)
             .unwrap_or_default();
         let mut public_links = Vec::with_capacity(candidates.len());
+        let mut public_origins: HashMap<(String, u16), bool> = HashMap::new();
         for candidate in candidates {
             let Some(url) = candidate.get("url").and_then(Value::as_str) else {
                 continue;
             };
-            if validate_public_url(url).await.is_ok() {
+            let Ok(parsed) = reqwest::Url::parse(url) else {
+                continue;
+            };
+            if !matches!(parsed.scheme(), "http" | "https")
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+            {
+                continue;
+            }
+            let Some(host) = parsed.host_str() else {
+                continue;
+            };
+            let origin = (
+                host.trim_end_matches('.').to_ascii_lowercase(),
+                parsed.port_or_known_default().unwrap_or(443),
+            );
+            let is_public = match public_origins.get(&origin) {
+                Some(value) => *value,
+                None => {
+                    let value = validate_public_url(url).await.is_ok();
+                    public_origins.insert(origin, value);
+                    value
+                }
+            };
+            if is_public {
                 public_links.push(candidate);
             }
         }
