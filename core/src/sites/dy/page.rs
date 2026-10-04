@@ -494,16 +494,31 @@ impl<'a> DouyinPageRuntime<'a> {
                 .await?;
             sleep_ms(150).await;
         }
-        let set = self
-            .expect_object("setSearchInput", Some(&json!({ "query": query })))
-            .await?;
-        if !script_ok(&set) {
-            return Ok(json!({
-                "ok": false,
-                "strategy": "set_search_input_failed",
-                "error": set.get("error").and_then(Value::as_str).unwrap_or_default(),
-                "state": set,
-            }));
+        // Douyin can mount a full-page login overlay over a still-focusable
+        // header search input. Focus the selected DOM input directly, then
+        // use trusted CDP key events so React receives the same event sequence
+        // as real typing. Keep the native setter as a compatibility fallback.
+        let selected = self.expect_object("selectSearchInput", None).await?;
+        let mut typed_ok = false;
+        if script_ok(&selected) {
+            self.page.type_chars(query).await?;
+            sleep_ms(150).await;
+            let current = self.expect_object("searchInput", None).await?;
+            typed_ok =
+                current.get("value").and_then(Value::as_str).map(str::trim) == Some(query.trim());
+        }
+        if !typed_ok {
+            let set = self
+                .expect_object("setSearchInput", Some(&json!({ "query": query })))
+                .await?;
+            if !script_ok(&set) {
+                return Ok(json!({
+                    "ok": false,
+                    "strategy": "set_search_input_failed",
+                    "error": set.get("error").and_then(Value::as_str).unwrap_or_default(),
+                    "state": set,
+                }));
+            }
         }
 
         self.page.press_key("Enter").await?;
@@ -513,13 +528,16 @@ impl<'a> DouyinPageRuntime<'a> {
         if search_transition_ok(&state) {
             return Ok(json!({
                 "ok": true,
-                "strategy": "input_enter",
+                "strategy": if typed_ok { "input_type_enter" } else { "input_set_value_enter" },
                 "state": state,
                 "url": self.current_url().await?,
             }));
         }
 
-        if let Some(submit) = loc.get("submit") {
+        // Typing can re-render the header and move the button, so measure the
+        // submit affordance again instead of clicking a stale coordinate.
+        let current_loc = self.expect_object("searchInput", None).await?;
+        if let Some(submit) = current_loc.get("submit") {
             let x = number(submit, "x");
             let y = number(submit, "y");
             if x > 0.0 && y > 0.0 {

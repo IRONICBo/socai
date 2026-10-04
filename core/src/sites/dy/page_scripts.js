@@ -118,15 +118,27 @@
     };
   }
 
-  function searchInput() {
-    const candidates = [
+  const SEARCH_INPUT_SELECTORS = [
       '[data-e2e="searchbar-input"]',
       'input[placeholder*="搜索"]',
       'textarea[placeholder*="搜索"]',
       '[contenteditable="true"][data-e2e*="search"]',
       '[role="searchbox"]',
-    ];
-    const input = candidates.flatMap((selector) => Array.from(document.querySelectorAll(selector))).find(visible);
+  ];
+
+  function findSearchInput() {
+    for (const selector of SEARCH_INPUT_SELECTORS) {
+      const input = Array.from(document.querySelectorAll(selector)).find((candidate) => {
+        if (!visible(candidate) || candidate.getAttribute('aria-hidden') === 'true') return false;
+        return parseFloat(window.getComputedStyle(candidate).opacity || '1') >= 0.1;
+      });
+      if (input) return input;
+    }
+    return null;
+  }
+
+  function searchInput() {
+    const input = findSearchInput();
     if (!input) {
       return { ok: false, error: 'search_input_not_found', state: pageState() };
     }
@@ -139,6 +151,27 @@
       placeholder: input.getAttribute('placeholder') || '',
       value: input.value || text(input),
     };
+  }
+
+  function selectSearchInput() {
+    const input = findSearchInput();
+    if (!input) return { ok: false, error: 'search_input_not_found' };
+    input.focus();
+    let value = '';
+    if (input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement) {
+      value = String(input.value || '');
+      input.setSelectionRange(0, value.length);
+    } else if (input.isContentEditable) {
+      value = String(input.textContent || '');
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    } else {
+      return { ok: false, error: 'unsupported_search_input' };
+    }
+    return { ok: true, value };
   }
 
   function setNativeValue(el, value) {
@@ -155,10 +188,10 @@
     const query = String((arg && arg.query) || '').trim();
     const loc = searchInput();
     if (!loc.ok) return loc;
-    const input = document.elementFromPoint(loc.input.x, loc.input.y);
-    const target = input && (input.matches('input, textarea, [contenteditable="true"]')
-      ? input
-      : input.closest('input, textarea, [contenteditable="true"]'));
+    // Resolve the same visible DOM input directly. A full-page login overlay
+    // can make elementFromPoint return the overlay even while the header
+    // search input remains present and focusable underneath it.
+    const target = findSearchInput();
     if (!target) {
       return { ok: false, error: 'search_input_target_missing', loc };
     }
@@ -859,6 +892,7 @@
   window.SocaiDouyinPageScripts = {
     pageState,
     searchInput,
+    selectSearchInput,
     setSearchInput,
     searchState,
     videoCards,
