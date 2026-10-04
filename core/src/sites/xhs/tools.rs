@@ -1117,6 +1117,16 @@ const REMOTE_LOGIN_NOTE: &str = "the hosted browser's shared login is unavailabl
      is temporarily unavailable and to try again later; do NOT ask them to scan a QR \
      and do NOT call wait_for_login.";
 
+const INTERACTIVE_REMOTE_LOGIN_NOTE: &str = "the user can control this cloud browser's \
+     live view. Call wait_for_login and keep the current browser session open while the \
+     user signs in; continue the original tool when login is detected.";
+
+fn interactive_remote_login_enabled() -> bool {
+    std::env::var("SOCAI_REMOTE_LOGIN_MODE")
+        .ok()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("interactive"))
+}
+
 /// Mark a `reason: login_required` result as coming from a remote hosted
 /// browser so the agent reports a socai-side outage instead of starting the
 /// local login protocol. No-op for local browsers or other failure reasons.
@@ -1127,8 +1137,13 @@ fn annotate_remote_login_gate(page: &PageSession, value: &mut Value) {
         return;
     }
     if let Some(obj) = value.as_object_mut() {
-        obj.insert("remote_browser".into(), Value::Bool(true));
-        obj.insert("note".into(), json!(REMOTE_LOGIN_NOTE));
+        if interactive_remote_login_enabled() {
+            obj.insert("cloud_login_supported".into(), Value::Bool(true));
+            obj.insert("note".into(), json!(INTERACTIVE_REMOTE_LOGIN_NOTE));
+        } else {
+            obj.insert("remote_browser".into(), Value::Bool(true));
+            obj.insert("note".into(), json!(REMOTE_LOGIN_NOTE));
+        }
     }
 }
 
@@ -4417,9 +4432,10 @@ impl Tool for WaitForLoginTool {
                 "message": "Already logged in. Re-run the original tool.",
             })));
         }
-        // A remote hosted browser has no window the user could scan a QR in;
-        // its shared login is socai-operated. Fail fast instead of polling.
-        if self.page.is_remote_browser() {
+        // Operator-managed hosted browsers have no user-visible window. Cloud
+        // Session Workers explicitly opt into an interactive Kernel live view,
+        // where the same polling protocol can safely wait for the user.
+        if self.page.is_remote_browser() && !interactive_remote_login_enabled() {
             return Ok(json_result(&json!({
                 "logged_in": false,
                 "remote_browser": true,
