@@ -26,7 +26,9 @@ use socai_core::telemetry::tool_call::{
     is_site_tool_result, summarize_site_tool_result, summarize_tool_args,
 };
 use socai_core::telemetry::trace::mark_run_trace_status;
-use socai_core::telemetry::{query_text_enabled, redact_secrets};
+use socai_core::telemetry::{
+    browser_disconnect_details, query_text_enabled, redact_secrets, tool_failure_error_type,
+};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Write};
@@ -1004,14 +1006,20 @@ impl DesktopBrowserRecovery {
         );
     }
 
-    fn capture_recovery(&self, outcome: &str, reason: &str, duration_ms: u64) {
+    fn capture_recovery(&self, outcome: &str, reason: Option<&str>, duration_ms: u64) {
+        let (error_type, error) = reason
+            .map(browser_disconnect_details)
+            .map_or((None, None), |(error_type, error)| {
+                (Some(error_type), Some(error))
+            });
         self.telemetry.capture(
             "socai_browser_task_recovery",
             json!({
                 "task_id": self.task_id,
                 "outcome": outcome,
                 "duration_ms": duration_ms,
-                "error": (!reason.is_empty()).then(|| redacted_short_error(reason)),
+                "error_type": error_type,
+                "error": error,
             }),
         );
     }
@@ -1052,7 +1060,7 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
             )
             .await;
             self.clear_task_target().await;
-            self.capture_recovery("degraded", &reason, 0);
+            self.capture_recovery("degraded", Some(&disconnect_reason), 0);
             return ToolRecoveryOutcome::Degraded { reason };
         }
         if disconnect_reason == "user_disconnected" {
@@ -1063,7 +1071,7 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
             )
             .await;
             self.clear_task_target().await;
-            self.capture_recovery("degraded", &reason, 0);
+            self.capture_recovery("degraded", Some(&disconnect_reason), 0);
             return ToolRecoveryOutcome::Degraded { reason };
         }
 
@@ -1089,7 +1097,11 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
                 "browser recovery failed; summarizing the collected results".into(),
             )
             .await;
-            self.capture_recovery("failed", &reason, started.elapsed().as_millis() as u64);
+            self.capture_recovery(
+                "failed",
+                Some(&disconnect_reason),
+                started.elapsed().as_millis() as u64,
+            );
             return ToolRecoveryOutcome::Degraded { reason };
         }
         let replacement_guard = self
@@ -1132,7 +1144,7 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
                     "browser connection recovered; retrying the interrupted operation".into(),
                 )
                 .await;
-                self.capture_recovery("completed", "", duration_ms);
+                self.capture_recovery("completed", None, duration_ms);
                 ToolRecoveryOutcome::Recovered
             }
             Err(error) => {
@@ -1144,7 +1156,7 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
                     "browser recovery failed; summarizing the collected results".into(),
                 )
                 .await;
-                self.capture_recovery("failed", &reason, duration_ms);
+                self.capture_recovery("failed", Some(&error), duration_ms);
                 ToolRecoveryOutcome::Degraded { reason }
             }
         }
@@ -3431,6 +3443,9 @@ fn pump_agent_task_events(
                         "error".into(),
                         json!(error.as_deref().map(redacted_short_error)),
                     );
+                    if let Some(error) = error.as_deref() {
+                        props.insert("error_type".into(), json!(tool_failure_error_type(error)));
+                    }
                     if is_site_tool_result(name) {
                         props.insert("site".into(), json!(APP_SITE_ID));
                     }
