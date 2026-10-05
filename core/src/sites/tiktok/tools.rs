@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -11,6 +11,7 @@ use crate::agent::tool::ToolProgressSender;
 use crate::agent::{Backend as LlmProvider, Tool, ToolContext, ToolResult};
 use crate::cdp::PageSession;
 use crate::media::MediaProcessor;
+use crate::sites::login_wait::{interactive_remote_login_enabled, login_resume_receiver};
 use crate::sites::post_archive::persist_site_tool_result;
 use crate::sites::registry::{
     required_string, ArgKind, BoxFuture, CommandArg, NativeSiteAdapter, SiteCommand, SlowWhen,
@@ -52,8 +53,13 @@ pub fn tiktok_tools_with_llm_provider(
             llm_provider,
         }),
         Arc::new(AuthorScanTool { page: page.clone() }),
-        Arc::new(PageStateTool { page }),
+        Arc::new(PageStateTool { page: page.clone() }),
+        tiktok_wait_for_login_tool(page),
     ]
+}
+
+pub fn tiktok_wait_for_login_tool(page: Arc<PageSession>) -> Arc<dyn Tool> {
+    Arc::new(WaitForTikTokLoginTool { page })
 }
 
 pub async fn tiktok_agent_tools(
@@ -574,6 +580,13 @@ pub struct PageStateTool {
     page: Arc<PageSession>,
 }
 
+struct WaitForTikTokLoginTool {
+    page: Arc<PageSession>,
+}
+
+const WAIT_FOR_TIKTOK_LOGIN_DEFAULT_SECS: i64 = 180;
+const WAIT_FOR_TIKTOK_LOGIN_MAX_SECS: i64 = 600;
+
 #[async_trait]
 impl Tool for PageStateTool {
     fn name(&self) -> &str {
@@ -599,6 +612,88 @@ impl Tool for PageStateTool {
         runtime.ensure_tiktok(true).await?;
         let result = runtime.wait_until_interactive(wait_seconds).await?;
         Ok(json_result(&result))
+    }
+}
+
+#[async_trait]
+impl Tool for WaitForTikTokLoginTool {
+    fn name(&self) -> &str {
+        "wait_for_tiktok_login"
+    }
+
+    fn description(&self) -> &str {
+        "After a TikTok tool reports login_required, keep the current tab open and wait for the \
+         user to sign in. Returns logged_in true only after the live navigation profile confirms \
+         the account session; then retry the original tool."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Seconds to wait before returning (default 180, max 600)."
+                }
+            }
+        })
+    }
+
+    async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        if self.page.is_remote_browser() && !interactive_remote_login_enabled() {
+            return Ok(json_result(&json!({
+                "logged_in": false,
+                "remote_browser": true,
+                "message": "Hosted TikTok login is unavailable in this browser session.",
+            })));
+        }
+        let runtime = TikTokPageRuntime::new(&self.page);
+        runtime.ensure_tiktok(true).await?;
+        let timeout = get_i64(
+            &input,
+            "timeout_seconds",
+            WAIT_FOR_TIKTOK_LOGIN_DEFAULT_SECS,
+        )
+        .clamp(10, WAIT_FOR_TIKTOK_LOGIN_MAX_SECS);
+        let deadline = Instant::now() + Duration::from_secs(timeout as u64);
+        let mut human_ready = login_resume_receiver(&ctx.run_id);
+        loop {
+            let state = match runtime.detect_state().await {
+                Ok(state) => state,
+                Err(error) => {
+                    if self.page.transport_closed().await {
+                        return Err(error);
+                    }
+                    Value::Null
+                }
+            };
+            if state.get("authenticated").and_then(Value::as_bool) == Some(true)
+                && state.get("login_required").and_then(Value::as_bool) != Some(true)
+            {
+                return Ok(json_result(&json!({
+                    "logged_in": true,
+                    "message": "TikTok login detected. Re-run the original tool and continue.",
+                })));
+            }
+            if Instant::now() >= deadline {
+                return Ok(json_result(&json!({
+                    "logged_in": false,
+                    "timed_out": true,
+                    "message": format!(
+                        "TikTok login was not detected within {timeout}s. Ask the user to sign in \
+                         in the connected browser, then call wait_for_tiktok_login again."
+                    ),
+                })));
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                changed = human_ready.changed() => {
+                    if changed.is_err() {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
+        }
     }
 }
 

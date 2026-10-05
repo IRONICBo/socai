@@ -10,6 +10,7 @@ use crate::cdp::PageSession;
 use crate::sites::actions::{
     ActionActor, ActionPreview, ActionStore, ActionTarget, SocialActionKind, SocialActionStatus,
 };
+use crate::sites::login_wait::{interactive_remote_login_enabled, login_resume_receiver};
 use crate::sites::post_archive::is_byte_range_preview;
 use crate::sites::registry::{
     required_string, ArgKind, BoxFuture, CommandArg, NativeSiteAdapter, SiteCommand, SlowWhen,
@@ -84,7 +85,7 @@ pub fn instagram_wait_for_login_tool(page: Arc<PageSession>) -> Arc<dyn Tool> {
 /// Open Instagram if needed and read `loginState` until it is `in` or a settled `out`.
 /// `remote` means the hosted browser, where the user cannot sign in themselves.
 pub async fn probe_instagram_login(page: &PageSession) -> anyhow::Result<String> {
-    if page.is_remote_browser() {
+    if page.is_remote_browser() && !interactive_remote_login_enabled() {
         return Ok("remote".into());
     }
     ensure_site_page(page, HOST_ROOT, HOME_URL).await?;
@@ -1546,8 +1547,8 @@ impl Tool for WaitForInstagramLoginTool {
         })
     }
 
-    async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
-        if self.page.is_remote_browser() {
+    async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        if self.page.is_remote_browser() && !interactive_remote_login_enabled() {
             return Ok(json_result(&json!({
                 "logged_in": false,
                 "remote_browser": true,
@@ -1573,6 +1574,7 @@ impl Tool for WaitForInstagramLoginTool {
         )
         .clamp(10, WAIT_FOR_INSTAGRAM_LOGIN_MAX_SECS);
         let deadline = Instant::now() + Duration::from_secs(timeout as u64);
+        let mut human_ready = login_resume_receiver(&ctx.run_id);
         loop {
             if poll_instagram_login(&self.page, 2).await? == "in" {
                 return Ok(json_result(&json!({
@@ -1591,7 +1593,14 @@ impl Tool for WaitForInstagramLoginTool {
                     ),
                 })));
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                changed = human_ready.changed() => {
+                    if changed.is_err() {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
         }
     }
 }

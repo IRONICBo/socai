@@ -4,6 +4,7 @@ pub mod dy;
 pub mod instagram;
 pub mod learning;
 pub mod linkedin;
+pub mod login_wait;
 pub mod post_archive;
 pub mod registry;
 pub mod runner;

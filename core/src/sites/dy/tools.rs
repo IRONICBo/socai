@@ -10,6 +10,7 @@ use crate::agent::{Backend as LlmProvider, Tool, ToolContext, ToolResult};
 use crate::cdp::PageSession;
 use crate::media::MediaProcessor;
 use crate::sites::dy::DouyinPageRuntime;
+use crate::sites::login_wait::{interactive_remote_login_enabled, login_resume_receiver};
 use crate::sites::post_archive::persist_site_tool_result;
 use crate::sites::registry::{
     required_string, ArgKind, BoxFuture, CommandArg, NativeSiteAdapter, SiteCommand, SlowWhen,
@@ -40,8 +41,18 @@ pub fn dy_tools_with_llm_provider(
         }),
         Arc::new(AuthorScanTool { page: page.clone() }),
         Arc::new(PageStateTool { page: page.clone() }),
-        Arc::new(WaitForLoginTool { page }),
+        Arc::new(WaitForLoginTool {
+            page,
+            tool_name: "wait_for_login",
+        }),
     ]
+}
+
+pub fn douyin_wait_for_login_tool(page: Arc<PageSession>) -> Arc<dyn Tool> {
+    Arc::new(WaitForLoginTool {
+        page,
+        tool_name: "wait_for_douyin_login",
+    })
 }
 
 pub async fn dy_agent_tools(
@@ -604,6 +615,7 @@ impl Tool for PageStateTool {
 
 pub struct WaitForLoginTool {
     page: Arc<PageSession>,
+    tool_name: &'static str,
 }
 
 const WAIT_FOR_LOGIN_SECS: u64 = 600;
@@ -611,7 +623,7 @@ const WAIT_FOR_LOGIN_SECS: u64 = 600;
 #[async_trait]
 impl Tool for WaitForLoginTool {
     fn name(&self) -> &str {
-        "wait_for_login"
+        self.tool_name
     }
 
     fn description(&self) -> &str {
@@ -624,8 +636,8 @@ impl Tool for WaitForLoginTool {
         json!({"type": "object", "properties": {}})
     }
 
-    async fn call(&self, _input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
-        if self.page.is_remote_browser() {
+    async fn call(&self, _input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        if self.page.is_remote_browser() && !interactive_remote_login_enabled() {
             return Ok(json_result(&json!({
                 "logged_in": false,
                 "remote_browser": true,
@@ -636,6 +648,7 @@ impl Tool for WaitForLoginTool {
         let runtime = DouyinPageRuntime::new(&self.page);
         runtime.ensure_douyin(true, 30.0).await?;
         let deadline = std::time::Instant::now() + Duration::from_secs(WAIT_FOR_LOGIN_SECS);
+        let mut human_ready = login_resume_receiver(&ctx.run_id);
         loop {
             let state = match runtime.detect_state().await {
                 Ok(state) => state,
@@ -664,7 +677,14 @@ impl Tool for WaitForLoginTool {
                     "message": "Douyin login was not detected within ten minutes. Fail the task.",
                 })));
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                changed = human_ready.changed() => {
+                    if changed.is_err() {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
         }
     }
 }
