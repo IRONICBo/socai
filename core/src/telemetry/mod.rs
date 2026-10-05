@@ -13,6 +13,90 @@ pub mod trace;
 
 pub use trace::{redact_secrets, redact_telemetry_error};
 
+/// Convert a browser disconnect reason into stable, content-free telemetry.
+///
+/// Runtime errors may contain local paths, profile names, or remote details,
+/// so callers should emit only this classification instead of the raw reason.
+pub fn browser_disconnect_details(reason: &str) -> (&'static str, &'static str) {
+    let reason = reason.to_ascii_lowercase();
+    if reason == "user_disconnected" {
+        ("user_disconnected", "browser disconnected by user")
+    } else if reason.contains("permission denied") || reason.contains("access denied") {
+        (
+            "browser_profile_access_denied",
+            "browser profile access denied",
+        )
+    } else if reason.contains("no chrome/chromium executable") {
+        ("chrome_not_found", "chrome executable not found")
+    } else if reason.contains("singleton") || reason.contains("another chrome instance") {
+        (
+            "browser_profile_conflict",
+            "browser profile is already in use",
+        )
+    } else if reason.contains("managed chrome") {
+        (
+            "managed_chrome_launch_failed",
+            "managed chrome failed to start",
+        )
+    } else if reason.contains("remote browser") || reason.contains("hosted") {
+        ("remote_browser_failed", "remote browser connection failed")
+    } else if reason.contains("websocket") {
+        (
+            "browser_websocket_failed",
+            "browser websocket connection failed",
+        )
+    } else if reason.contains("timed out") || reason.contains("timeout") {
+        ("browser_connect_timeout", "browser connection timed out")
+    } else if reason.contains("connection lost") || reason.contains("transport") {
+        (
+            "browser_transport_disconnected",
+            "browser transport disconnected",
+        )
+    } else {
+        ("browser_connect_failed", "browser connection failed")
+    }
+}
+
+/// Classify a failed tool invocation without copying its error text into the
+/// grouping key. The original telemetry summary remains separately redacted;
+/// this value is deliberately coarse and stable for operational aggregation.
+pub fn tool_failure_error_type(error: &str) -> &'static str {
+    let error = error.to_ascii_lowercase();
+    if error.contains("websocket") {
+        "browser_websocket_failed"
+    } else if error.contains("connection lost")
+        || error.contains("connection closed")
+        || error.contains("connection reset")
+        || error.contains("cdp session is closed")
+        || error.contains("transport")
+    {
+        "browser_transport_disconnected"
+    } else if error.contains("no chrome/chromium executable")
+        || error.contains("singleton")
+        || error.contains("another chrome instance")
+        || error.contains("managed chrome")
+        || error.contains("remote browser")
+        || error.contains("hosted browser")
+        || error.contains("failed to connect cdp")
+    {
+        browser_disconnect_details(&error).0
+    } else if error.contains("timed out") || error.contains("timeout") {
+        "tool_timeout"
+    } else if error.contains("permission denied") || error.contains("access denied") {
+        "permission_denied"
+    } else if error.contains("no such file") || error.contains("not found") {
+        "resource_not_found"
+    } else if error.contains("json")
+        || error.contains("serialize")
+        || error.contains("deserialize")
+        || error.contains("decode")
+    {
+        "response_decode_failed"
+    } else {
+        "tool_execution_failed"
+    }
+}
+
 const EVENT_SCHEMA_VERSION: u32 = 1;
 const TELEMETRY_ENDPOINT: &str = "https://socai.io/v1/events";
 const TRACES_ENDPOINT: &str = "https://socai.io/v1/traces";

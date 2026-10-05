@@ -10,6 +10,7 @@ use std::collections::HashSet;
 
 use serde_json::json;
 use socai_core::runtime::{RuntimeBrowserEvent, SocaiRuntime};
+use socai_core::telemetry::browser_disconnect_details;
 use tasks::AgentTaskRegistry;
 use tauri::{Emitter, Manager};
 use telemetry::{duration_ms, DesktopTelemetry};
@@ -214,6 +215,8 @@ pub fn run() {
                                     }
                                     if reason != "not_yet_connected" {
                                         latest_disconnect_reason = Some(reason.clone());
+                                        let (error_type, error) =
+                                            browser_disconnect_details(reason);
                                         telemetry.capture(
                                             "socai_browser_connect",
                                             json!({
@@ -222,7 +225,8 @@ pub fn run() {
                                                 } else {
                                                     "failed"
                                                 },
-                                                "error": crate::telemetry::short_error(reason),
+                                                "error_type": error_type,
+                                                "error": error,
                                             }),
                                         );
                                     }

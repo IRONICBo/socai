@@ -1,8 +1,8 @@
 use socai_core::telemetry::task_context::{self, TaskLink, TaskRegistration};
 use socai_core::telemetry::tool_call::{summarize_tool_args, summarize_tool_result};
 use socai_core::telemetry::{
-    query_text_enabled, redact_telemetry_error, task_text_enabled, telemetry_enabled, Telemetry,
-    TelemetrySource,
+    browser_disconnect_details, query_text_enabled, redact_telemetry_error, task_text_enabled,
+    telemetry_enabled, tool_failure_error_type, Telemetry, TelemetrySource,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -1033,6 +1033,10 @@ fn finish_tool_call_props(
         Some(Err(err)) => {
             props.insert("outcome".into(), json!("failed"));
             props.insert("ok".into(), json!(false));
+            props.insert(
+                "error_type".into(),
+                json!(tool_failure_error_type(&format!("{err:#}"))),
+            );
             props.insert("error".into(), json!(error_summary(err)));
         }
         None => {
@@ -1125,46 +1129,6 @@ fn browser_connect_props(
         BrowserStatus::Disconnected { .. } => return None,
     }
     Some(props)
-}
-
-fn browser_disconnect_details(reason: &str) -> (&'static str, &'static str) {
-    let reason = reason.to_ascii_lowercase();
-    if reason == "user_disconnected" {
-        ("user_disconnected", "browser disconnected by user")
-    } else if reason.contains("permission denied") || reason.contains("access denied") {
-        (
-            "browser_profile_access_denied",
-            "browser profile access denied",
-        )
-    } else if reason.contains("no chrome/chromium executable") {
-        ("chrome_not_found", "chrome executable not found")
-    } else if reason.contains("singleton") || reason.contains("another chrome instance") {
-        (
-            "browser_profile_conflict",
-            "browser profile is already in use",
-        )
-    } else if reason.contains("managed chrome") {
-        (
-            "managed_chrome_launch_failed",
-            "managed chrome failed to start",
-        )
-    } else if reason.contains("remote browser") || reason.contains("hosted") {
-        ("remote_browser_failed", "remote browser connection failed")
-    } else if reason.contains("websocket") {
-        (
-            "browser_websocket_failed",
-            "browser websocket connection failed",
-        )
-    } else if reason.contains("timed out") || reason.contains("timeout") {
-        ("browser_connect_timeout", "browser connection timed out")
-    } else if reason.contains("connection lost") || reason.contains("transport") {
-        (
-            "browser_transport_disconnected",
-            "browser transport disconnected",
-        )
-    } else {
-        ("browser_connect_failed", "browser connection failed")
-    }
 }
 
 fn browser_source_category(source: &str) -> &str {
@@ -1729,6 +1693,10 @@ mod tests {
         finish_tool_call_props(&mut failed, 84, Some(&failure));
         assert_eq!(failed.get("outcome"), Some(&json!("failed")));
         assert_eq!(failed.get("ok"), Some(&json!(false)));
+        assert_eq!(
+            failed.get("error_type"),
+            Some(&json!("tool_execution_failed"))
+        );
         let error = failed
             .get("error")
             .and_then(Value::as_str)
@@ -1737,6 +1705,32 @@ mod tests {
         assert!(!error.contains("private-shortcode"));
         assert!(!error.contains("token=hidden"));
         assert!(error.contains("https://www.instagram.com/<redacted>"));
+
+        let mut websocket_failed = trace_context_props(&trace_context());
+        let websocket_failure: Result<Value> = Err(anyhow!(
+            "browser websocket ws://127.0.0.1:9222/devtools/browser/private did not respond"
+        ));
+        finish_tool_call_props(&mut websocket_failed, 61_000, Some(&websocket_failure));
+        assert_eq!(
+            websocket_failed.get("error_type"),
+            Some(&json!("browser_websocket_failed"))
+        );
+
+        let mut timed_out = trace_context_props(&trace_context());
+        let timeout_failure: Result<Value> =
+            Err(anyhow!("CDP command timed out: Runtime.evaluate"));
+        finish_tool_call_props(&mut timed_out, 60_001, Some(&timeout_failure));
+        assert_eq!(timed_out.get("error_type"), Some(&json!("tool_timeout")));
+
+        let mut protocol_failed = trace_context_props(&trace_context());
+        let protocol_failure: Result<Value> = Err(anyhow!(
+            "CDP command failed (DOM.querySelector): Could not find node with given id"
+        ));
+        finish_tool_call_props(&mut protocol_failed, 3, Some(&protocol_failure));
+        assert_eq!(
+            protocol_failed.get("error_type"),
+            Some(&json!("tool_execution_failed"))
+        );
         for raw in [
             "connect ws://[::1]:9222/devtools/browser/private-session failed",
             "navigation to HTTPS://www.instagram.com/p/private/?q=private#fragment failed",
