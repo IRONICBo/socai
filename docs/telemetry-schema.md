@@ -175,6 +175,9 @@ Current metadata keys:
 | `notes_count` | number | Count of note result entries when present. |
 | `notes_skipped_count` | number | Count of notes marked skipped when present. |
 | `has_run_dir` | boolean | Whether the command returned a run directory. |
+| `login_detected` | boolean | Whether a login-wait tool verified a signed-in session from the live page. |
+| `login_wait_timed_out` | boolean | Whether a login-wait tool reached its bounded timeout without verifying login. |
+| `remote_browser` | boolean | Whether a login-wait result refers to a hosted remote browser session. |
 | `failure_reason` | string | Semantic failure reason when a tool returns `ok=false`. |
 | `page_error` | string | Error or reason associated with the unexpected page/control diagnostic, for example `not_profile_page` or `search_input_not_found`. |
 | `page_url` | string | Origin of an unexpected page URL; path, query, fragment, account, and post locators are omitted. |

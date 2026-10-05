@@ -113,6 +113,15 @@ pub fn summarize_tool_result(value: &Value) -> Map<String, Value> {
     if value.get("run_dir").is_some() {
         props.insert("has_run_dir".into(), json!(true));
     }
+    if let Some(logged_in) = find_bool(data, "logged_in") {
+        props.insert("login_detected".into(), json!(logged_in));
+    }
+    if let Some(timed_out) = find_bool(data, "timed_out") {
+        props.insert("login_wait_timed_out".into(), json!(timed_out));
+    }
+    if let Some(remote_browser) = find_bool(data, "remote_browser") {
+        props.insert("remote_browser".into(), json!(remote_browser));
+    }
     if let Some(text) = find_string(data, "page_ocr_text") {
         props.insert("page_ocr_text_len".into(), json!(text.chars().count()));
     }
@@ -224,7 +233,16 @@ pub fn summarize_site_tool_result(tool_name: &str, value: &Value) -> Map<String,
 pub fn is_site_tool_result(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "search" | "get_notes" | "author_scan" | "page_state"
+        "search"
+            | "get_notes"
+            | "author_scan"
+            | "page_state"
+            | "wait_for_login"
+            | "wait_for_douyin_login"
+            | "wait_for_tiktok_login"
+            | "wait_for_instagram_login"
+            | "wait_for_linkedin_login"
+            | "wait_for_x_login"
     )
 }
 
@@ -384,6 +402,9 @@ mod tests {
                 "security_verification_detected": true,
                 "security_verification_marker": "Security Verification",
                 "recovery_tool": "wait_for_rate_limit",
+                "logged_in": false,
+                "timed_out": true,
+                "remote_browser": true,
                 "cards": [{}, {}],
                 "search": { "cards": [{}, {}, {}] },
                 "selected_cards": [{}],
@@ -406,6 +427,9 @@ mod tests {
         assert_eq!(props.get("notes_count"), Some(&json!(3)));
         assert_eq!(props.get("notes_skipped_count"), Some(&json!(2)));
         assert_eq!(props.get("has_run_dir"), Some(&json!(true)));
+        assert_eq!(props.get("login_detected"), Some(&json!(false)));
+        assert_eq!(props.get("login_wait_timed_out"), Some(&json!(true)));
+        assert_eq!(props.get("remote_browser"), Some(&json!(true)));
         assert_eq!(
             props.get("failure_reason"),
             Some(&json!("not_profile_page"))
@@ -493,6 +517,16 @@ mod tests {
             { "type": "image", "media_type": "image/png" }
         ]);
         assert_eq!(summarize_site_tool_result("search", &content), props);
+        for tool_name in [
+            "wait_for_login",
+            "wait_for_douyin_login",
+            "wait_for_tiktok_login",
+            "wait_for_instagram_login",
+            "wait_for_linkedin_login",
+            "wait_for_x_login",
+        ] {
+            assert_eq!(summarize_site_tool_result(tool_name, &content), props);
+        }
 
         let hostile_local_json = json!([
             {
