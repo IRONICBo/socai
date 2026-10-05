@@ -1,8 +1,9 @@
 use socai_core::telemetry::task_context::{self, TaskLink, TaskRegistration};
 use socai_core::telemetry::tool_call::{summarize_tool_args, summarize_tool_result};
 use socai_core::telemetry::{
-    browser_disconnect_details, query_text_enabled, redact_telemetry_error, task_text_enabled,
-    telemetry_enabled, tool_failure_error_type, Telemetry, TelemetrySource,
+    browser_disconnect_details, browser_source_category, query_text_enabled,
+    redact_telemetry_error, task_text_enabled, telemetry_enabled, tool_failure_error_type,
+    Telemetry, TelemetrySource,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -1129,12 +1130,6 @@ fn browser_connect_props(
         BrowserStatus::Disconnected { .. } => return None,
     }
     Some(props)
-}
-
-fn browser_source_category(source: &str) -> &str {
-    source
-        .split_once(':')
-        .map_or(source, |(category, _)| category)
 }
 
 async fn send_request(

@@ -13,6 +13,17 @@ pub mod trace;
 
 pub use trace::{redact_secrets, redact_telemetry_error};
 
+/// Reduce a browser endpoint source to its stable category before telemetry.
+///
+/// Runtime source strings may suffix `active_port` or `managed_profile` with a
+/// local filesystem path. The category is enough for operational grouping and
+/// prevents profile directories and OS usernames from leaving the device.
+pub fn browser_source_category(source: &str) -> &str {
+    source
+        .split_once(':')
+        .map_or(source, |(category, _)| category)
+}
+
 /// Convert a browser disconnect reason into stable, content-free telemetry.
 ///
 /// Runtime errors may contain local paths, profile names, or remote details,

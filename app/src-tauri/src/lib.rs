@@ -10,7 +10,7 @@ use std::collections::HashSet;
 
 use serde_json::json;
 use socai_core::runtime::{RuntimeBrowserEvent, SocaiRuntime};
-use socai_core::telemetry::browser_disconnect_details;
+use socai_core::telemetry::{browser_disconnect_details, browser_source_category};
 use tasks::AgentTaskRegistry;
 use tauri::{Emitter, Manager};
 use telemetry::{duration_ms, DesktopTelemetry};
@@ -203,7 +203,7 @@ pub fn run() {
                                         json!({
                                             "outcome": "completed",
                                             "browser_profile": profile,
-                                            "browser_source": source,
+                                            "browser_source": browser_source_category(source),
                                             "remote_timeout_seconds": remote_timeout_seconds,
                                             "remote_remaining_seconds": remote_remaining_seconds,
                                         }),
