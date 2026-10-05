@@ -14,8 +14,8 @@ const PAGE_OCR_MAX_CHARS: usize = 200;
 /// strings, arrays, and objects become lengths/counts so post locators,
 /// usernames, comments, and future free-text fields cannot enter telemetry by
 /// default. Only the arguments are summarized here — ordinary tool output
-/// (note bodies, comments) is never included; see
-/// [`summarize_tool_result`] for bounded failure-page OCR diagnostics.
+/// (note bodies, comments, page OCR text) is never included; see
+/// [`summarize_tool_result`] for bounded failure diagnostics.
 pub fn summarize_tool_args(args: &Value, include_query_text: bool) -> Map<String, Value> {
     let mut props = Map::new();
     let Some(obj) = args.as_object() else {
@@ -73,9 +73,10 @@ fn summarize_metadata_value(metadata: &mut Map<String, Value>, key: &str, value:
 }
 
 /// Extract safe metrics from a tool call's output. Reports collection sizes and
-/// presence flags, plus the explicitly bounded unexpected-page OCR diagnostic;
-/// note bodies and comments are never copied. The value may be the raw tool
-/// result or wrapped in a `data` envelope (CLI daemon); both shapes are handled.
+/// presence flags, plus the unexpected-page OCR length and fixed diagnostics;
+/// note bodies, comments, and OCR text are never copied. The value may be the
+/// raw tool result or wrapped in a `data` envelope (CLI daemon); both shapes
+/// are handled.
 pub fn summarize_tool_result(value: &Value) -> Map<String, Value> {
     let mut props = Map::new();
     let data = value.get("data").unwrap_or(value);
@@ -113,13 +114,7 @@ pub fn summarize_tool_result(value: &Value) -> Map<String, Value> {
         props.insert("has_run_dir".into(), json!(true));
     }
     if let Some(text) = find_string(data, "page_ocr_text") {
-        props.insert(
-            "page_ocr_text".into(),
-            json!(super::trace::redact_secrets(text)
-                .chars()
-                .take(PAGE_OCR_MAX_CHARS)
-                .collect::<String>()),
-        );
+        props.insert("page_ocr_text_len".into(), json!(text.chars().count()));
     }
     if let Some(region) = find_string(data, "page_ocr_region") {
         props.insert("page_ocr_region".into(), json!(region));
@@ -421,12 +416,10 @@ mod tests {
             Some(&json!("https://www.xiaohongshu.com"))
         );
         assert_eq!(props.get("page_path_depth"), Some(&json!(2)));
+        assert!(!props.contains_key("page_ocr_text"));
         assert_eq!(
-            props
-                .get("page_ocr_text")
-                .and_then(Value::as_str)
-                .map(|text| text.chars().count()),
-            Some(PAGE_OCR_MAX_CHARS)
+            props.get("page_ocr_text_len"),
+            Some(&json!(PAGE_OCR_MAX_CHARS + 1))
         );
         assert_eq!(
             props.get("page_ocr_region"),
