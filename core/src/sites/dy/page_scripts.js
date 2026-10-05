@@ -302,18 +302,45 @@
     return parts.reduce((total, part) => total * 60 + part, 0);
   }
 
-  function statText(selectors, labels, root) {
-    const scope = root && root.querySelectorAll ? root : document;
-    const node = firstVisibleWithin(scope, selectors);
-    if (node) return text(node).replace(/^(点赞|评论|分享|收藏|播放)\s*/, '');
-    const body = text(scope);
-    for (const label of labels) {
-      const after = body.match(new RegExp(`${label}\\s*([0-9.,]+(?:万|w|W|k|K)?)`));
-      if (after) return after[1];
-      const before = body.match(new RegExp(`([0-9.,]+(?:万|w|W|k|K)?)\\s*${label}`));
-      if (before) return before[1];
+  // The action bar that carries the count hooks is display:none outside the
+  // immersive player, so it is read without a visibility filter, and only
+  // inside the work's own player: a page-wide lookup can read another work.
+  // A zero count is drawn as the bare label (收藏, 分享); only a number is a value.
+  function statCount(player, selector) {
+    const value = text(player && player.querySelector(selector));
+    return /^\d[\d.,]*(?:万|亿|[wWkKmMbB])?\+?$/.test(value) ? value : '';
+  }
+
+  // The detail page prints 发布时间 in the browser's own time zone, so the same
+  // work shows a different calendar day on a remote browser. Report the instant
+  // in Beijing time, the zone Douyin dates are quoted in.
+  function publishTime(videoId) {
+    const raw = text(firstVisible(['[data-e2e="detail-video-publish-time"]']))
+      .replace(/^发布时间\s*[:：]\s*/, '');
+    const parts = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})$/);
+    if (!parts) return raw;
+    const [year, month, day, hour, minute] = parts.slice(1).map(Number);
+    const local = new Date(year, month - 1, day, hour, minute);
+    let instant = local.getTime();
+    if (Number.isNaN(instant)) return raw;
+    // In the hour a clock falls back, a wall time names two instants and Date
+    // takes the first. A work is created before it is published, so the
+    // creation second in its id rules the first one out when it is too early.
+    const fallBack = (new Date(instant + 3 * 3600 * 1000).getTimezoneOffset() - local.getTimezoneOffset()) * 60 * 1000;
+    const second = new Date(instant + fallBack);
+    if (fallBack > 0 && second.getHours() === hour && second.getMinutes() === minute) {
+      const created = /^\d+$/.test(videoId) ? Number(BigInt(videoId) >> 32n) * 1000 : NaN;
+      if (!(created < instant + fallBack + 60 * 1000)) return raw;
+      if (created >= instant + 60 * 1000) instant += fallBack;
     }
-    return '';
+    return `${new Date(instant + 8 * 3600 * 1000).toISOString().slice(0, 19)}+08:00`;
+  }
+
+  // The share-card meta is the only node that names this work's cover. Player
+  // <img> nodes are avatars and next-video thumbnails.
+  function shareCardCover(videoId) {
+    const frameId = (metaContent('lark:url:video_iframe_url').match(/\/light\/([^/?#]+)/) || [])[1] || '';
+    return videoId && frameId === videoId ? metaContent('lark:url:video_cover_image_url') : '';
   }
 
   function allowedMediaUrl(raw) {
@@ -594,14 +621,9 @@
     if (video && video.paused && video.src && video.src.startsWith('blob:')) {
       video.play().catch(() => {});
     }
-    const coverNode = firstVisible([
-      'img[elementtiming="lcp_ele"]',
-      '[data-e2e="detail-video-player"] img',
-      '[class*="player"] img',
-    ]);
-    const cover = normUrl((video && video.poster) ||
-      (coverNode && (coverNode.currentSrc || coverNode.src)) || '');
+    const cover = normUrl((video && video.poster) || shareCardCover(state.video_id));
     const media = collectVideoInfo(video, cover);
+    const actionBar = video && video.closest('[data-e2e="player-container"]');
     const hashtagSet = new Set();
     for (const match of description.matchAll(/#([^#\s]+)/g)) hashtagSet.add(match[1]);
     for (const link of (detailRoot || document).querySelectorAll('a[href*="/search/"]')) {
@@ -616,16 +638,16 @@
       title,
       description,
       hashtags: Array.from(hashtagSet).slice(0, 30),
-      created_at: text(firstVisible(['[data-e2e="video-create-time"]', 'time', '[class*="create-time"]'])),
+      created_at: publishTime(state.video_id),
       author: text(authorLink) || text(authorTextLink) || (authorAvatar && authorAvatar.alt || '') || structuredAuthor.name ||
         text(firstVisible(['[data-e2e="video-author-name"]', '[class*="author-name"]'])),
       author_id: authorIdFromUrl(authorUrl),
       author_url: authorUrl,
-      likes: statText(['[data-e2e="like-count"]', '[class*="like-count"]'], ['点赞'], detailRoot),
-      comments_count: statText(['[data-e2e="comment-count"]', '[class*="comment-count"]'], ['评论'], detailRoot),
-      shares: statText(['[data-e2e="share-count"]', '[class*="share-count"]'], ['分享'], detailRoot),
-      favorites: statText(['[data-e2e="collect-count"]', '[class*="collect-count"]'], ['收藏'], detailRoot),
-      views: statText(['[data-e2e="view-count"]', '[class*="view-count"]'], ['播放'], detailRoot),
+      likes: statCount(actionBar, '[data-e2e="video-player-digg"]'),
+      comments_count: statCount(actionBar, '[data-e2e="feed-comment-icon"]'),
+      shares: statCount(actionBar, '[data-e2e="video-player-share"]'),
+      favorites: statCount(actionBar, '[data-e2e="video-player-collect"]'),
+      views: '',
       duration_seconds: video ? Math.round(Number(video.duration) || 0) : 0,
       cover_url: cover,
       video: media,
