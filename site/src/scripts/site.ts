@@ -1,11 +1,10 @@
 // Unified client runtime for every page. It reads the page-local dictionary
 // embedded in #site-i18n and drives the language toggle, all data-i18n* markers
 // (text / html / aria-label / content / alt, with {value} interpolation), the
-// clipboard copy buttons, and the research demo. Each feature no-ops when its
+// clipboard copy buttons. Each feature no-ops when its
 // markup is absent, so one script serves the home, connect, and contact pages.
 
 import { track } from "@vercel/analytics";
-import { startResearchDemo } from "./research-demo";
 
 const i18nElement = document.getElementById("site-i18n");
 const dictionary = JSON.parse(i18nElement?.textContent || "{}");
@@ -110,7 +109,6 @@ const applyLanguage = (language, shouldPersist = false) => {
             element.getAttribute("data-post-lang") !== nextLanguage;
     });
 
-    startResearchDemo(nextLanguage);
 
     if (shouldPersist) {
         try {

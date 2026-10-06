@@ -1,0 +1,29 @@
+---
+import WorkflowShowcase from './WorkflowShowcase.astro';
+// Need-pattern synthesis from desktop traces: weekly AI-topic research,
+// cross-account post comparisons, and creator benchmarking.
+// Authors, notes, comments and metrics below are fictional showcase data.
+const notes=[
+ {id:'01',author:'阿乔的效率实验',title:'同一份周报，让 3 个 AI 各做一遍 PPT',likes:'2,184',saves:'4,860',comments:'236',quote:'别只看生成截图，能不能改模板、导出后还乱不乱？',need:'可编辑、能交付'},
+ {id:'02',author:'产品小周',title:'AI 做汇报，最费时间的其实是改稿',likes:'1,326',saves:'3,012',comments:'148',quote:'想看从原始文档到最终可汇报版本的全过程。',need:'完整工作流'},
+ {id:'03',author:'Mia 的产品笔记',title:'一小时用户访谈，怎么整理成需求清单',likes:'1,742',saves:'4,105',comments:'193',quote:'多人说话会不会串？原话和需求能一一对应吗？',need:'访谈证据可追溯'},
+ {id:'04',author:'工具箱不吃灰',title:'AI 会议纪要好看，但行动项还是得自己补',likes:'986',saves:'2,240',comments:'121',quote:'能区分谁负责、什么时候完成，再导入飞书吗？',need:'从纪要到执行'},
+ {id:'05',author:'林同学的知识库',title:'把 50 份产品文档丢进知识库后，我问了 10 个问题',likes:'1,568',saves:'3,780',comments:'207',quote:'答得像真的，但引用能跳回原文哪一段吗？',need:'答案有出处'},
+ {id:'06',author:'不加班实验室',title:'AI 知识库答错时，怎么发现它在编',likes:'812',saves:'1,966',comments:'98',quote:'新旧版本冲突时会听谁的？搜不到会直接说吗？',need:'识别错误与边界'}
+];
+const directions=[
+ {title:'同一份周报，实测 3 个 AI 做 PPT',signal:'优先做',evidence:'[01][02]',why:'评论追问的是“能不能交付”，已有内容却多停在生成效果。',angle:'固定一份产品周报，对比结构、改模板、导出后可编辑性和返工时间。',detail:'标题：AI 做 PPT 到底省了多久？把改稿时间也算进去。附同一份输入文档和对照表。'},
+ {title:'一段访谈，怎么变成可追溯的需求池',signal:'第二篇',evidence:'[03][04]',why:'产品经理需要原话、需求与负责人对应，单纯转写不够。',angle:'用同一段多人访谈，展示原话 → 需求 → 行动项 → 飞书表格。',detail:'用自录演示素材。重点检查说话人、需求出处、负责人和截止时间，保留工具没识别出的部分。'},
+ {title:'知识库不只测答对，也测什么时候答错',signal:'适合做系列',evidence:'[05][06]',why:'用户担心引用不实和版本冲突，需要看到工具的边界。',angle:'准备新旧版本冲突、原文没有答案和引用定位三类题，逐题核对。',detail:'标题：我故意给 AI 知识库出了 3 道坑题。每次换一组文档，沉淀同一套测试方法。'}
+];
+const steps=[{label:'搜索笔记',address:'xiaohongshu.com · 搜索'},{label:'阅读评论',address:'xiaohongshu.com · 评论'},{label:'对比选题',address:'xiaohongshu.com · 选题对照'},{label:'结果',address:'socai result'}];
+---
+<WorkflowShowcase id="xiaohongshu-showcase" language="zh" platform="小红书" icon="/platforms/xiaohongshu.png" title="AI 账号选题研究" prompt="我在做一个面向产品经理的 AI 工具账号。看看小红书近一周哪些选题互动好、评论里还在追问什么，选 3 个我能做的题，列出参考笔记和切入角度。" steps={steps}>
+ <div class="cs-screen cs-process-screen" data-cs-screen="0" hidden><div class="cs-search-field">⌕ AI 工具实测 · 产品经理提效 · 近 7 天</div><div class="cs-cards">{[notes[0],notes[2],notes[4]].map(n=><article class="cs-card"><h3 class="xh-note-title">{n.title}</h3><p class="cs-detail-copy">{n.author}</p><p class="cs-detail-copy">{n.likes} 赞 · {n.saves} 收藏 · {n.comments} 评论</p></article>)}</div></div>
+ <div class="cs-screen cs-process-screen" data-cs-screen="1" hidden><div class="cs-browser-comments">{[notes[0],notes[2],notes[4]].map(n=><div><span class="cs-reader-avatar">{n.id}</span><p>“{n.quote}”<small>{n.author} · {n.title}</small></p></div>)}</div></div>
+ <div class="cs-screen cs-process-screen" data-cs-screen="2" hidden><div class="tt-breakdown">{directions.map(d=><div><strong>{d.title}</strong><p>{d.why}</p><span>{d.evidence}</span></div>)}</div></div>
+ <div class="cs-screen cs-board" data-cs-screen="3"><header class="cs-result-header"><strong>3 个值得做的选题</strong><button class="cs-export" type="button" disabled>下载选题表 ↓</button></header>
+  <div class="cs-cards xh-directions">{directions.map(d=><article class="cs-card"><h3>{d.title}</h3><div class="xh-signal">{d.signal}<span>{d.evidence}</span></div><p>{d.why}</p><h4>怎么切入</h4><p>{d.angle}</p><details class="cs-post-details"><summary>展开执行建议 +</summary><p class="cs-detail-copy">{d.detail}</p></details></article>)}</div>
+  <div class="cs-table-wrap cs-reference-table"><table><thead><tr><th>参考笔记 / 作者</th><th>评论里的需求</th><th>赞</th><th>收藏</th><th>评论</th></tr></thead><tbody>{notes.map(n=><tr><td><strong>[{n.id}] {n.title}</strong><span>{n.author}</span></td><td>“{n.quote}”</td><td>{n.likes}</td><td>{n.saves}</td><td>{n.comments}</td></tr>)}</tbody></table></div>
+ </div>
+</WorkflowShowcase>

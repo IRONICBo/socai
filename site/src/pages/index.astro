@@ -2,7 +2,10 @@
 import "../styles/global.css";
 import SiteHeader from "../components/SiteHeader.astro";
 import SiteFooter from "../components/SiteFooter.astro";
-import ResearchDemo from "../components/ResearchDemo.astro";
+import CreatorShowcase from "../components/CreatorShowcase.astro";
+import TiktokShowcase from "../components/TiktokShowcase.astro";
+import XShowcase from "../components/XShowcase.astro";
+import XhsShowcase from "../components/XhsShowcase.astro";
 import { message as messageFor } from "../lib/i18n";
 
 const githubUrl = "/github";
@@ -391,19 +394,19 @@ const socialImageAlt = message("meta.socialImageAlt");
                     </div>
                 </section>
 
-                <section
-                    class="app-shot-section"
-                    aria-label={message("preview.sectionAria")}
-                    data-i18n-aria-label="preview.sectionAria"
-                >
-                    <ResearchDemo />
-                </section>
+                <XhsShowcase />
+                {(['en', 'zh'] as const).map(language => <>
+                    <CreatorShowcase language={language} />
+                    <TiktokShowcase language={language} />
+                    <XShowcase language={language} />
+                </>)}
 
                 <section
                     class="project-feature"
                     aria-label={message("project.sectionAria")}
                     data-i18n-aria-label="project.sectionAria"
                 >
+                    <h2 class="built-with-heading">Built with Socai</h2>
                     <div class="project-feature__panel">
                         <div class="project-feature__copy">
                             <span
