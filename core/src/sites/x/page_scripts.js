@@ -749,6 +749,7 @@
       });
       return cleanText(link, 200);
     };
+    const header = headerFollow(username);
     const postsReady = tweetArticles(primary).length;
     const timelineEmpty = postsReady === 0 && /No (?:posts|reposts|replies|likes|media)|hasn.?t (?:posted|reposted|liked)|还没有|没有转发|没有回复|没有喜欢/i.test(cleanText(primary, 4000));
     const contentReady = !!(nameRoot && (postsReady > 0 || timelineEmpty));
@@ -762,6 +763,7 @@
       bio: cleanText(description, 5000),
       followers: metric(linkText('followers')),
       following: metric(linkText('following')),
+      viewer_following: header.ok ? header.following : null,
       url: xUrl(location.href),
       visible_post_count: tweetArticles(primary).length,
       page_state: state,
@@ -789,11 +791,7 @@
       : { ok: false, status: 'like_button_obscured', post_id: expected, liked, actor, hit_owned: false };
   }
 
-  function followTarget(arg) {
-    const username = cleanText(arg && (arg.username || arg.profile) || '', 40).replace(/^@/, '').toLowerCase();
-    const route = profileRoute(location.href);
-    if (!/^[a-z0-9_]{1,15}$/.test(username)) return { ok: false, status: 'invalid_username', following: false };
-    if (!route || route.username !== username) return { ok: false, status: route ? 'wrong_profile' : 'not_profile', following: false };
+  function headerFollow(username) {
     const primary = document.querySelector('[data-testid="primaryColumn"]') || document;
     const buttons = Array.from(primary.querySelectorAll('button[data-testid$="-follow"], button[data-testid$="-unfollow"]'))
       .filter((button) => {
@@ -810,15 +808,32 @@
         status: buttons.length ? 'ambiguous_follow_button' : 'follow_button_not_found',
         username,
         following: false,
+        button: null,
       };
     }
     const button = buttons[0];
     const following = (button.getAttribute('data-testid') || '').endsWith('-unfollow');
-    const point = ownedPoint(button);
+    return {
+      ok: true,
+      status: following ? 'following' : 'follow_ready',
+      username,
+      following,
+      button,
+    };
+  }
+
+  function followTarget(arg) {
+    const username = cleanText(arg && (arg.username || arg.profile) || '', 40).replace(/^@/, '').toLowerCase();
+    const route = profileRoute(location.href);
+    if (!/^[a-z0-9_]{1,15}$/.test(username)) return { ok: false, status: 'invalid_username', following: false };
+    if (!route || route.username !== username) return { ok: false, status: route ? 'wrong_profile' : 'not_profile', following: false };
+    const header = headerFollow(username);
+    if (!header.ok) return { ok: false, status: header.status, username, following: false };
+    const point = ownedPoint(header.button);
     const actor = currentUsername();
     return point
-      ? { ok: true, status: following ? 'following' : 'follow_ready', username, following, actor, hit_owned: true, text: cleanText(button, 80), ...point }
-      : { ok: false, status: 'follow_button_obscured', username, following, actor, hit_owned: false };
+      ? { ok: true, status: header.status, username, following: header.following, actor, hit_owned: true, text: cleanText(header.button, 80), ...point }
+      : { ok: false, status: 'follow_button_obscured', username, following: header.following, actor, hit_owned: false };
   }
 
   function activePostArticle() {
@@ -1358,6 +1373,273 @@
       : { ok: false, status: 'home_link_not_found', hit_owned: false };
   }
 
+  function navLinkTarget(arg) {
+    const name = cleanText(arg && arg.name || '', 40).toLowerCase();
+    const testid = name === 'notifications' ? 'AppTabBar_Notifications_Link'
+      : name === 'profile' ? 'AppTabBar_Profile_Link'
+        : name === 'home' ? 'AppTabBar_Home_Link' : '';
+    if (!testid) return { ok: false, status: 'invalid_nav', name, hit_owned: false };
+    const link = document.querySelector(`[data-testid="${testid}"]`);
+    const username = name === 'profile' && link
+      ? profileUsername(link.href || link.getAttribute('href')) : '';
+    const point = link && ownedPoint(link);
+    return point
+      ? { ok: true, status: 'nav_ready', name, username, hit_owned: true, ...point }
+      : { ok: false, status: 'nav_not_found', name, username, hit_owned: false };
+  }
+
+  function notificationArticles() {
+    return Array.from(primaryColumn().querySelectorAll(
+      'article[data-testid="tweet"], article[data-testid="notification"]',
+    ));
+  }
+
+  function avatarUsernames(article) {
+    const names = [];
+    for (const node of article.querySelectorAll('[data-testid^="UserAvatar-Container-"]')) {
+      const username = String(node.getAttribute('data-testid') || '')
+        .slice('UserAvatar-Container-'.length).toLowerCase();
+      if (/^[a-z0-9_]{1,15}$/.test(username) && !names.includes(username)) names.push(username);
+    }
+    return names.slice(0, 30);
+  }
+
+  function notificationKind(article) {
+    const testid = article.getAttribute('data-testid') || '';
+    const text = cleanText(article, 800);
+    if (testid === 'notification' || !article.querySelector('a[href*="/status/"]')) {
+      if (/followed you/i.test(text)) return 'follow';
+      if (/\bliked\b/i.test(text)) return 'like';
+      return 'other';
+    }
+    return replyTargets(article).length ? 'reply' : 'mention';
+  }
+
+  function notificationsTabs() {
+    if (!/^\/notifications\/?$/i.test(location.pathname)) return [];
+    return Array.from(primaryColumn().querySelectorAll('[role="tab"]')).filter((tab) => visible(tab));
+  }
+
+  function notificationsState(arg) {
+    const state = pageState();
+    const onPage = /^\/notifications\/?$/i.test(location.pathname);
+    const expected = normalizeLabel(arg && arg.tab || '');
+    const tabs = notificationsTabs();
+    const selected = tabs.find((tab) => tab.getAttribute('aria-selected') === 'true');
+    const tab = selected ? cleanText(selected, 40) : '';
+    const count = onPage ? notificationArticles().length : 0;
+    let status = 'results';
+    if (!onPage) status = 'not_notifications';
+    else if (!state.ok) status = state.status;
+    else if (!tab) status = 'tab_not_found';
+    else if (expected && normalizeLabel(tab) !== expected) status = 'tab_mismatch';
+    return {
+      ok: status === 'results',
+      status,
+      tab,
+      tabs: tabs.map((item) => cleanText(item, 40)),
+      result_count: count,
+      actor: currentUsername(),
+      url: location.href,
+      login_required: state.login_required,
+      challenge_required: state.challenge_required,
+      rate_limited: state.rate_limited,
+    };
+  }
+
+  function notificationsTabTarget(arg) {
+    const expected = normalizeLabel(arg && arg.tab || '');
+    if (!expected) return { ok: false, status: 'invalid_tab' };
+    if (!/^\/notifications\/?$/i.test(location.pathname)) {
+      return { ok: false, status: 'not_notifications', url: location.href };
+    }
+    const matches = notificationsTabs().filter((tab) => normalizeLabel(tab) === expected);
+    if (matches.length !== 1) {
+      return {
+        ok: false,
+        status: matches.length ? 'ambiguous_tab' : 'tab_not_found',
+        tabs: notificationsTabs().map((tab) => cleanText(tab, 40)),
+      };
+    }
+    const tab = matches[0];
+    const point = ownedPoint(tab);
+    return point
+      ? {
+        ok: true,
+        status: 'tab_ready',
+        tab: cleanText(tab, 40),
+        selected: tab.getAttribute('aria-selected') === 'true',
+        hit_owned: true,
+        ...point,
+      }
+      : { ok: false, status: 'tab_obscured', tab: cleanText(tab, 40), hit_owned: false };
+  }
+
+  function notificationItems(arg) {
+    const limit = Math.min(100, Math.max(1, Number(arg && arg.limit || 20)));
+    const actor = currentUsername();
+    const output = [];
+    const seen = new Set();
+    let position = 0;
+    for (const article of notificationArticles()) {
+      position += 1;
+      const kind = notificationKind(article);
+      const accounts = avatarUsernames(article);
+      const time = article.querySelector('time[datetime]');
+      const published = time && (time.dateTime || time.getAttribute('datetime')) || '';
+      const tweet = kind === 'reply' || kind === 'mention' ? parseTweet(article, position) : null;
+      const id = tweet && tweet.id
+        ? tweet.id
+        : `${kind}:${published}:${accounts.join(',')}`;
+      if (!id || id.endsWith(':') || seen.has(id)) continue;
+      seen.add(id);
+      const liked = !!article.querySelector('[data-testid="unlike"]');
+      if (tweet) {
+        output.push({
+          ...tweet,
+          kind,
+          liked,
+          replying_to: replyTargets(article),
+          accounts,
+          actor,
+          position,
+        });
+      } else {
+        const username = accounts[0] || '';
+        output.push({
+          ok: true,
+          kind,
+          id,
+          url: '',
+          author: {
+            username,
+            display_name: '',
+            url: username ? xUrl(`https://x.com/${username}`) : '',
+          },
+          text: cleanText(article, 1000),
+          published_at: published,
+          liked,
+          replying_to: [],
+          accounts,
+          actor,
+          position,
+        });
+      }
+      if (output.length >= limit) break;
+    }
+    return output;
+  }
+
+  function followersUsername() {
+    const parts = location.pathname.split('/').filter(Boolean);
+    if (parts.length !== 2 || parts[1].toLowerCase() !== 'followers') return '';
+    const username = parts[0].toLowerCase();
+    return /^[a-z0-9_]{1,15}$/.test(username) && !RESERVED.has(username) ? username : '';
+  }
+
+  function followersState() {
+    const state = pageState();
+    const username = followersUsername();
+    const count = username
+      ? primaryColumn().querySelectorAll('[data-testid="UserCell"]').length : 0;
+    let status = 'results';
+    if (!username) status = 'not_followers';
+    else if (!state.ok) status = state.status;
+    else if (!count) status = 'unhydrated';
+    return {
+      ok: status === 'results',
+      status,
+      username,
+      result_count: count,
+      actor: currentUsername(),
+      url: location.href,
+      login_required: state.login_required,
+      challenge_required: state.challenge_required,
+      rate_limited: state.rate_limited,
+    };
+  }
+
+  function followerPath(link, actor) {
+    try {
+      const parts = new URL(link.href || link.getAttribute('href'), location.href)
+        .pathname.split('/').filter(Boolean);
+      if (parts.length !== 2 || parts[0].toLowerCase() !== actor) return '';
+      return parts[1].toLowerCase();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function followersLinkTarget() {
+    const actor = currentUsername();
+    if (!actor) return { ok: false, status: 'actor_not_found', hit_owned: false };
+    const links = Array.from(document.querySelectorAll('a[href]')).filter((link) => {
+      if (!visible(link) || link.getAttribute('role') === 'tab') return false;
+      if (!/\bfollowers\b|粉丝/i.test(cleanText(link, 40))) return false;
+      return /followers$/.test(followerPath(link, actor));
+    });
+    const link = links[0];
+    const point = link && ownedPoint(link);
+    return point
+      ? { ok: true, status: 'followers_link_ready', username: actor, hit_owned: true, ...point }
+      : { ok: false, status: 'followers_link_not_found', username: actor, hit_owned: false };
+  }
+
+  function followersTabTarget() {
+    const actor = currentUsername();
+    if (!actor) return { ok: false, status: 'actor_not_found', hit_owned: false };
+    const matches = Array.from(primaryColumn().querySelectorAll('a[role="tab"][href]'))
+      .filter((tab) => visible(tab) && followerPath(tab, actor) === 'followers');
+    if (matches.length !== 1) {
+      return { ok: false, status: matches.length ? 'ambiguous_tab' : 'tab_not_found', username: actor };
+    }
+    const tab = matches[0];
+    const point = ownedPoint(tab);
+    return point
+      ? {
+        ok: true,
+        status: 'tab_ready',
+        username: actor,
+        selected: tab.getAttribute('aria-selected') === 'true',
+        hit_owned: true,
+        ...point,
+      }
+      : { ok: false, status: 'tab_obscured', username: actor, hit_owned: false };
+  }
+
+  function followBackCandidates(arg) {
+    const limit = Math.min(100, Math.max(1, Number(arg && arg.limit || 20)));
+    if (!followersUsername()) return [];
+    const output = [];
+    const seen = new Set();
+    for (const cell of primaryColumn().querySelectorAll('[data-testid="UserCell"]')) {
+      const text = cleanText(cell, 2000);
+      const handle = text.match(/@([A-Za-z0-9_]{1,15})/);
+      const username = handle ? handle[1].toLowerCase() : '';
+      if (!username || seen.has(username) || RESERVED.has(username)) continue;
+      const button = Array.from(cell.querySelectorAll('button')).find((node) => (
+        /^\d+-(?:follow|unfollow)$/.test(node.getAttribute('data-testid') || '')
+      ));
+      if (!button) continue;
+      const following = (button.getAttribute('data-testid') || '').endsWith('-unfollow');
+      const label = cleanText(button, 40);
+      if (following || !/follow back|回关/i.test(label)) continue;
+      seen.add(username);
+      const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
+      output.push({
+        id: username,
+        username,
+        display_name: lines.find((line) => !line.startsWith('@') && !/follow/i.test(line)) || '',
+        bio: cleanText(cell.querySelector('[data-testid="UserDescription"]'), 500),
+        follows_you: /follows you|关注了你/i.test(text),
+        following: false,
+        position: output.length + 1,
+      });
+      if (output.length >= limit) break;
+    }
+    return output;
+  }
+
   function hoverDismissTarget() {
     const home = homeLinkTarget();
     if (!home.ok) return { ok: false, status: 'dismiss_point_not_found', hit_owned: false };
@@ -1543,6 +1825,14 @@
     hoverCardState,
     hoverFollowTarget,
     homeLinkTarget,
+    navLinkTarget,
+    notificationsState,
+    notificationsTabTarget,
+    notificationItems,
+    followersState,
+    followersLinkTarget,
+    followersTabTarget,
+    followBackCandidates,
     hoverDismissTarget,
     hoverCardPresence,
   });

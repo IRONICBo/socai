@@ -94,13 +94,14 @@ function tweetFixture(id, {
   return article;
 }
 
-function loadScripts({ href, pathname, articles = [], inputs = [], accountUsername = '' }) {
+function loadScripts({ href, pathname, articles = [], inputs = [], accountUsername = '', primary = null }) {
   const profileLink = accountUsername ? new FakeNode({ href: `https://x.com/${accountUsername}` }) : null;
   const document = {
     body: new FakeNode({ text: 'Hydrated X page' }),
     title: 'X fixture',
     readyState: 'complete',
     querySelector: (selector) => {
+      if (selector === '[data-testid="primaryColumn"]' && primary) return primary;
       if (selector.includes('input')) return inputs[0] || null;
       return null;
     },
@@ -608,6 +609,7 @@ test('like and follow targets stay on the active post and profile header', () =>
   assert.equal(detail.username, 'openai');
   assert.equal(detail.tab, 'reposts');
   assert.equal(detail.followers, 1234);
+  assert.equal(detail.viewer_following, false);
   const followed = profileScripts.followTarget({ username: 'openai' });
   assert.equal(followed.ok, true);
   assert.equal(followed.following, false);
@@ -802,4 +804,71 @@ test('home inline composer stays inspection-only', () => {
   location.href = 'https://x.com/compose/post';
   assert.equal(scripts.postComposerTarget().status, 'not_home');
   assert.equal(clicked, false);
+});
+
+test('notifications keep replies separate from follows, and follow back skips people already followed', () => {
+  const reply = tweetFixture('210', {
+    username: 'alex',
+    text: 'Happy to connect, the browser line made me smile.',
+    reply: true,
+    replyTo: 'tonyisntstark',
+  });
+  const likeButton = reply.selectors['[data-testid="like"], [data-testid="unlike"]'][0];
+  likeButton.attributes.set('data-testid', 'unlike');
+  reply.selectors['[data-testid="unlike"]'] = [likeButton];
+  const follow = new FakeNode({
+    text: 'Aman and 2 others followed you',
+    attributes: { 'data-testid': 'notification' },
+    selectors: {
+      '[data-testid^="UserAvatar-Container-"]': [
+        new FakeNode({ attributes: { 'data-testid': 'UserAvatar-Container-BuildByAman' } }),
+      ],
+      'time[datetime]': [new FakeNode({ datetime: '2026-10-05T02:52:34.000Z' })],
+    },
+  });
+  const already = new FakeNode({
+    text: 'Aman\n@buildbyaman\nFollows you\nFollowing',
+    attributes: { 'data-testid': 'UserCell' },
+    selectors: {
+      button: [new FakeNode({ text: 'Following', attributes: { 'data-testid': '8-unfollow' } })],
+    },
+  });
+  const followBack = new FakeNode({
+    text: 'Ravi\n@ravi_g\nFollows you\nFollow back\nbuilding small tools',
+    attributes: { 'data-testid': 'UserCell' },
+    selectors: {
+      button: [new FakeNode({ text: 'Follow back', attributes: { 'data-testid': '9-follow' } })],
+      '[data-testid="UserDescription"]': [new FakeNode({ text: 'building small tools' })],
+    },
+  });
+  const primary = new FakeNode({
+    selectors: {
+      'article[data-testid="tweet"], article[data-testid="notification"]': [reply, follow],
+      '[data-testid="UserCell"]': [already, followBack],
+    },
+  });
+  const notes = loadScripts({
+    href: 'https://x.com/notifications',
+    pathname: '/notifications',
+    primary,
+    accountUsername: 'tonyisntstark',
+  });
+  const items = notes.notificationItems({ limit: 10 });
+  assert.equal(items[0].kind, 'reply');
+  assert.equal(items[0].author.username, 'alex');
+  assert.equal(items[0].liked, true);
+  assert.equal(items[0].replying_to[0], 'tonyisntstark');
+  assert.equal(items[1].kind, 'follow');
+  assert.equal(items[1].accounts[0], 'buildbyaman');
+
+  const followers = loadScripts({
+    href: 'https://x.com/TonyisntStark/followers',
+    pathname: '/TonyisntStark/followers',
+    primary,
+  });
+  const backs = followers.followBackCandidates({ limit: 10 });
+  assert.equal(backs.length, 1);
+  assert.equal(backs[0].username, 'ravi_g');
+  assert.equal(backs[0].bio, 'building small tools');
+  assert.equal(backs[0].follows_you, true);
 });
