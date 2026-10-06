@@ -139,6 +139,8 @@ pub fn xhs_tools_with_llm_provider(
             always_ocr: false,
             asr_enabled,
         }),
+        Arc::new(AlbumTool { page: page.clone() }),
+        Arc::new(AlbumsTool { page: page.clone() }),
         Arc::new(WaitForLoginTool { page: page.clone() }),
         Arc::new(WaitForRateLimitTool),
         Arc::new(PageStateTool { page }),
@@ -178,6 +180,8 @@ pub fn xhs_macro_tools_with_llm_provider(
             always_ocr: true,
             asr_enabled,
         }),
+        Arc::new(AlbumTool { page: page.clone() }),
+        Arc::new(AlbumsTool { page: page.clone() }),
         Arc::new(CommentTool { page: page.clone() }),
         Arc::new(WaitForLoginTool { page }),
         Arc::new(WaitForRateLimitTool),
@@ -431,6 +435,40 @@ pub static XHS_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
             // can take a while; give it the longer budget.
             slow: SlowWhen::Always,
             run: run_author_scan,
+        },
+        SiteCommand {
+            name: "albums",
+            tool_name: "albums",
+            about: "List the signed-in account's Xiaohongshu favorites albums from 我 → 收藏 → 专辑.",
+            args: &[],
+            slow: SlowWhen::Always,
+            run: run_albums,
+        },
+        SiteCommand {
+            name: "album",
+            tool_name: "album",
+            about: "Open one of your Xiaohongshu favorites albums from 我 → 收藏 → 专辑 \
+                    and return its note cards.",
+            args: &[
+                CommandArg {
+                    key: "album",
+                    long: None,
+                    value_name: "ALBUM",
+                    help: "Album name shown on the 专辑 tab.",
+                    required: true,
+                    kind: ArgKind::Str,
+                },
+                CommandArg {
+                    key: "num_notes",
+                    long: Some("num-notes"),
+                    value_name: "N",
+                    help: "Maximum notes to return. Omit to collect until the album stops loading.",
+                    required: false,
+                    kind: ArgKind::Int,
+                },
+            ],
+            slow: SlowWhen::Always,
+            run: run_album,
         },
         SiteCommand {
             name: "comment",
@@ -715,6 +753,56 @@ fn run_search(
             progress,
         )
         .await
+    })
+}
+
+fn run_albums(
+    page: Arc<PageSession>,
+    _args: Value,
+    debug_snapshot: bool,
+    _progress: Option<ToolProgressSender>,
+) -> BoxFuture<Value> {
+    Box::pin(async move {
+        let run_dir = make_run_dir("xhs_albums");
+        let mut data = with_snapshot_recording(&page, &run_dir, debug_snapshot, async {
+            XhsPageRuntime::new(&page).list_favorite_albums().await
+        })
+        .await?;
+        annotate_remote_login_gate(&page, &mut data);
+        Ok(json!({
+            "command": "albums",
+            "run_dir": run_dir.to_string_lossy(),
+            "data": data,
+        }))
+    })
+}
+
+fn run_album(
+    page: Arc<PageSession>,
+    args: Value,
+    debug_snapshot: bool,
+    _progress: Option<ToolProgressSender>,
+) -> BoxFuture<Value> {
+    Box::pin(async move {
+        let album = required_string(&args, "album")?;
+        let num_notes = args
+            .get("num_notes")
+            .and_then(Value::as_i64)
+            .filter(|n| *n > 0)
+            .map(|n| n as usize);
+        let run_dir = make_run_dir("xhs_album");
+        let mut data = with_snapshot_recording(&page, &run_dir, debug_snapshot, async {
+            XhsPageRuntime::new(&page)
+                .collect_favorite_album(&album, num_notes)
+                .await
+        })
+        .await?;
+        annotate_remote_login_gate(&page, &mut data);
+        Ok(json!({
+            "command": "album",
+            "run_dir": run_dir.to_string_lossy(),
+            "data": data,
+        }))
     })
 }
 
@@ -4541,6 +4629,94 @@ impl Tool for WaitForLoginTool {
                 }
             }
         }
+    }
+}
+
+pub struct AlbumsTool {
+    page: Arc<PageSession>,
+}
+
+#[async_trait]
+impl Tool for AlbumsTool {
+    fn name(&self) -> &str {
+        "albums"
+    }
+
+    fn description(&self) -> &str {
+        "List the signed-in account's Xiaohongshu favorites albums. Clicks 我, \
+         then 收藏, then 专辑, and returns each album name, id, and note count. \
+         Use album afterwards to read one album's notes."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
+    }
+
+    async fn call(&self, _input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let mut value = XhsPageRuntime::new(&self.page)
+            .list_favorite_albums()
+            .await?;
+        annotate_remote_login_gate(&self.page, &mut value);
+        Ok(json_result(&value))
+    }
+}
+
+pub struct AlbumTool {
+    page: Arc<PageSession>,
+}
+
+#[async_trait]
+impl Tool for AlbumTool {
+    fn name(&self) -> &str {
+        "album"
+    }
+
+    fn description(&self) -> &str {
+        "Open one favorites album from the signed-in Xiaohongshu account. Clicks \
+         我 in the left sidebar, then 收藏, then 专辑, then the named album, and \
+         returns that album's note cards (title, author, likes, cover, note id, \
+         and xsec token). Does not open each note; pass a returned note id and \
+         xsec token to get_notes when the body or comments are needed."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "album": {
+                    "type": "string",
+                    "description": "Album name shown on the 专辑 tab."
+                },
+                "num_notes": {
+                    "type": "integer",
+                    "description": "Maximum notes to return. Omit to collect until the album stops loading."
+                }
+            },
+            "required": ["album"],
+            "additionalProperties": false
+        })
+    }
+
+    async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let album = get_str(&input, "album")
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("missing album"))?
+            .to_string();
+        let num_notes = input
+            .get("num_notes")
+            .and_then(Value::as_i64)
+            .filter(|n| *n > 0)
+            .map(|n| n as usize);
+        let mut value = XhsPageRuntime::new(&self.page)
+            .collect_favorite_album(&album, num_notes)
+            .await?;
+        annotate_remote_login_gate(&self.page, &mut value);
+        Ok(json_result(&value))
     }
 }
 

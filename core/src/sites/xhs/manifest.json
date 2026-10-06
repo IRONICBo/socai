@@ -263,6 +263,59 @@
       "callable": "profileCards",
       "args": {},
       "returns": { "type": "array", "description": "Visible profile cards." }
+    },
+    "sidebarMe": {
+      "description": "Locate the signed-in account's 我 entry in the left sidebar.",
+      "path": "page_scripts.js",
+      "binding": "SocaiXhsPageScripts",
+      "callable": "sidebarMe",
+      "args": {},
+      "returns": { "type": "object", "description": "Sidebar 我 click target." }
+    },
+    "profileTab": {
+      "description": "Locate a visible profile tab or favorites subtab by its label.",
+      "path": "page_scripts.js",
+      "binding": "SocaiXhsPageScripts",
+      "callable": "profileTab",
+      "args": {
+        "label": { "type": "string", "required": true, "description": "Visible tab label, such as 收藏 or 专辑." }
+      },
+      "returns": { "type": "object", "description": "Tab click target." }
+    },
+    "profileSubtabs": {
+      "description": "Read the visible favorites subtabs, such as 笔记, 专辑, and 文件, with their current centers.",
+      "path": "page_scripts.js",
+      "binding": "SocaiXhsPageScripts",
+      "callable": "profileSubtabs",
+      "args": {},
+      "returns": { "type": "object", "description": "Visible favorites subtabs and click centers." }
+    },
+    "favoriteAlbums": {
+      "description": "List favorite albums visible on the current profile 专辑 tab.",
+      "path": "page_scripts.js",
+      "binding": "SocaiXhsPageScripts",
+      "callable": "favoriteAlbums",
+      "args": {},
+      "returns": { "type": "array", "description": "Favorite album cards." }
+    },
+    "albumCard": {
+      "description": "Locate one favorite album card by name and scroll it into view.",
+      "path": "page_scripts.js",
+      "binding": "SocaiXhsPageScripts",
+      "callable": "albumCard",
+      "args": {
+        "name": { "type": "string", "required": true, "description": "Album name shown on the card." },
+        "board_id": { "type": "string", "required": false, "description": "Album id from /board/<id>, used when the name is ambiguous." }
+      },
+      "returns": { "type": "object", "description": "Album card click target." }
+    },
+    "albumNotes": {
+      "description": "Read the open favorite album header and the notes loaded so far.",
+      "path": "page_scripts.js",
+      "binding": "SocaiXhsPageScripts",
+      "callable": "albumNotes",
+      "args": {},
+      "returns": { "type": "object", "description": "Album header and loaded notes." }
     }
   }
 }
