@@ -15,9 +15,11 @@ pub const DEFAULT_COMPACT_AFTER_MESSAGES: usize = 20;
 pub const DEFAULT_KEEP_RECENT_MESSAGES: usize = 10;
 const TURN_MARKDOWN_MAX_CHARS: usize = 2_000;
 const USER_REQUEST_MAX_CHARS: usize = 500;
-const WEB_SOURCE_EXCERPT_MAX_CHARS: usize = 1_200;
+const WEB_SOURCE_EXCERPT_MIN_CHARS: usize = 1_200;
+const WEB_SOURCE_EXCERPT_MAX_CHARS: usize = 2_000;
 const WEB_SOURCE_TITLE_MAX_CHARS: usize = 240;
 const MAX_WEB_SOURCES: usize = 24;
+const WEB_SOURCE_TOTAL_EXCERPT_MAX_CHARS: usize = WEB_SOURCE_EXCERPT_MIN_CHARS * MAX_WEB_SOURCES;
 const COMPACT_CONTEXT_HEADING: &str = "# Earlier compacted context";
 const LEGACY_EVIDENCE_HEADING: &str = "# Earlier tool evidence";
 
@@ -227,6 +229,8 @@ fn compact_older_messages(messages: &[Message]) -> String {
         }
     }
     if !web_sources.is_empty() {
+        let source_count = web_sources.len().min(MAX_WEB_SOURCES);
+        let excerpt_max_chars = web_source_excerpt_max_chars(source_count);
         rendered.push_str("\n\n## Earlier web source evidence\n");
         rendered.push_str(
             "These pages were opened and read directly. Preserve their URLs and excerpts when producing the final report.\n",
@@ -237,11 +241,22 @@ fn compact_older_messages(messages: &[Message]) -> String {
                 rendered.push_str(&format!("  Title: {title}\n"));
             }
             if !excerpt.is_empty() {
-                rendered.push_str(&format!("  Evidence excerpt: {excerpt}\n"));
+                rendered.push_str(&format!(
+                    "  Evidence excerpt: {}\n",
+                    truncate_plain(&excerpt, excerpt_max_chars)
+                ));
             }
         }
     }
     rendered
+}
+
+fn web_source_excerpt_max_chars(source_count: usize) -> usize {
+    if source_count == 0 {
+        return 0;
+    }
+    (WEB_SOURCE_TOTAL_EXCERPT_MAX_CHARS / source_count.min(MAX_WEB_SOURCES))
+        .clamp(WEB_SOURCE_EXCERPT_MIN_CHARS, WEB_SOURCE_EXCERPT_MAX_CHARS)
 }
 
 fn collect_web_source_evidence(value: &Value, sources: &mut BTreeMap<String, (String, String)>) {
@@ -490,6 +505,37 @@ mod tests {
         assert!(compacted.contains("https://arxiv.org/abs/2604.08516"));
         assert!(compacted.contains("MolmoWeb: Open Visual Web Agent"));
         assert!(compacted.contains("Pass@4 is 94.7%."));
+    }
+
+    #[test]
+    fn compacted_context_preserves_late_web_results_for_small_source_sets() {
+        let messages = tool_exchange(
+            "read-1",
+            "web_read",
+            json!({
+                "url": "https://arxiv.org/abs/2511.12997",
+                "title": "WebCoach",
+                "text": format!(
+                    "{}Evaluations on WebVoyager increase task success from 47% to 61%.",
+                    "method and architecture context ".repeat(50)
+                )
+            }),
+        );
+
+        let compacted = compact_older_messages(&messages);
+
+        assert!(compacted.contains("Evaluations on WebVoyager"));
+        assert!(compacted.contains("47% to 61%"));
+    }
+
+    #[test]
+    fn web_source_excerpt_budget_stays_bounded_as_source_count_grows() {
+        assert_eq!(web_source_excerpt_max_chars(0), 0);
+        assert_eq!(web_source_excerpt_max_chars(1), 2_000);
+        assert_eq!(web_source_excerpt_max_chars(3), 2_000);
+        assert_eq!(web_source_excerpt_max_chars(15), 1_920);
+        assert_eq!(web_source_excerpt_max_chars(24), 1_200);
+        assert_eq!(web_source_excerpt_max_chars(100), 1_200);
     }
 
     #[test]
