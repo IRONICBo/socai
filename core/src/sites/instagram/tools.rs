@@ -10,6 +10,7 @@ use crate::cdp::PageSession;
 use crate::sites::actions::{
     ActionActor, ActionPreview, ActionStore, ActionTarget, SocialActionKind, SocialActionStatus,
 };
+use crate::sites::post_archive::is_byte_range_preview;
 use crate::sites::registry::{
     required_string, ArgKind, BoxFuture, CommandArg, NativeSiteAdapter, SiteCommand, SlowWhen,
 };
@@ -22,6 +23,12 @@ use crate::sites::skill_cli::{
 };
 
 const SITE_ID: &str = "instagram";
+const VIEW_COUNT_FIELDS: [&str; 4] = [
+    "view_count",
+    "view_count_text",
+    "view_count_approximate",
+    "view_count_source",
+];
 const HOME_URL: &str = "https://www.instagram.com/";
 const HOST_ROOT: &str = "instagram.com";
 const RESERVED_PROFILE_NAMES: &[&str] = &[
@@ -65,8 +72,107 @@ fn instagram_tools(page: Arc<PageSession>) -> Vec<Arc<dyn Tool>> {
         Arc::new(ProfileTool { page: page.clone() }),
         Arc::new(GetPostsTool { page: page.clone() }),
         Arc::new(CommentTool { page: page.clone() }),
-        Arc::new(PageStateTool { page }),
+        Arc::new(PageStateTool { page: page.clone() }),
+        instagram_wait_for_login_tool(page),
     ]
+}
+
+pub fn instagram_wait_for_login_tool(page: Arc<PageSession>) -> Arc<dyn Tool> {
+    Arc::new(WaitForInstagramLoginTool { page })
+}
+
+/// Open Instagram if needed and read `loginState` until it is `in` or a settled `out`.
+/// `remote` means the hosted browser, where the user cannot sign in themselves.
+pub async fn probe_instagram_login(page: &PageSession) -> anyhow::Result<String> {
+    if page.is_remote_browser() {
+        return Ok("remote".into());
+    }
+    ensure_site_page(page, HOST_ROOT, HOME_URL).await?;
+    let mut state = poll_instagram_login(page, 8).await?;
+    if state == "out" {
+        let url = current_url(page).await.unwrap_or_default();
+        if !instagram_login_form_url(&url) {
+            navigate_https(page, HOME_URL).await?;
+            state = poll_instagram_login(page, 8).await?;
+        }
+    }
+    Ok(state)
+}
+
+pub fn instagram_login_agent_note(state: &str) -> String {
+    match state {
+        "in" => "\n\n## Instagram sign-in\n\
+            A fresh check just now shows Instagram is already signed in. \
+            Ignore any earlier message in this conversation that said Instagram was signed out \
+            or that the user still needs to log in. Do not mention login, do not ask the user \
+            to sign in, and do not call `wait_for_instagram_login`. Continue the task immediately.\n"
+            .into(),
+        "out" => "\n\n## Instagram sign-in\n\
+            Instagram is signed out in the connected Chrome, and the login page is open. \
+            Tell the user, in their language, to sign in to Instagram in that Chrome window. \
+            Then call `wait_for_instagram_login`. Continue the Instagram part of the task \
+            only after it returns `logged_in: true`. Do not treat the login page as an empty result.\n"
+            .into(),
+        "remote" => "\n\n## Instagram sign-in\n\
+            This session uses socai's hosted browser. If Instagram is signed out, tell the user \
+            hosted Instagram is temporarily unavailable and to try again later. Do not ask them \
+            to type an Instagram password, and do not call `wait_for_instagram_login`.\n"
+            .into(),
+        _ => "\n\n## Instagram sign-in\n\
+            Instagram login was not readable yet. After opening Instagram, run the `loginState` \
+            browser tool. If `login` is `out`, tell the user to sign in in the connected Chrome \
+            and call `wait_for_instagram_login`. If `login` is `in`, continue without asking \
+            them to sign in.\n"
+            .into(),
+    }
+}
+
+/// Instagram's first paint is often the logged-out form, then the signed-in
+/// shell replaces it. `in` returns immediately. `out` is returned only after
+/// that shell has stayed logged out, so a loading frame is not a login prompt.
+const INSTAGRAM_LOGGED_OUT_SETTLE: Duration = Duration::from_secs(6);
+
+async fn poll_instagram_login(page: &PageSession, seconds: u64) -> anyhow::Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(seconds.max(1));
+    let mut out_since: Option<Instant> = None;
+    let mut latest;
+    loop {
+        let state =
+            crate::sites::learning::run_site_browser_tool(page, SITE_ID, "loginState", None)
+                .await?;
+        latest = state
+            .get("login")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        if latest == "in" {
+            return Ok(latest);
+        }
+        if latest == "out" {
+            let since = out_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= INSTAGRAM_LOGGED_OUT_SETTLE {
+                return Ok(latest);
+            }
+        } else {
+            out_since = None;
+        }
+        if Instant::now() >= deadline {
+            // A short poll that only saw the loading login form is not signed out.
+            if latest == "out" {
+                return Ok("unknown".into());
+            }
+            return Ok(latest);
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+}
+
+fn instagram_login_form_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let path = parsed.path().trim_end_matches('/');
+    path.is_empty() || path == "/accounts/login" || path == "/accounts/emailsignup"
 }
 
 pub static INSTAGRAM_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
@@ -155,7 +261,7 @@ pub static INSTAGRAM_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
         SiteCommand {
             name: "profile",
             tool_name: "profile",
-            about: "Read an Instagram profile and collect visible post and reel cards.",
+            about: "Read an Instagram profile and collect visible post and reel cards. A private profile returns private and private_notice instead of a public grid.",
             args: &[
                 CommandArg {
                     key: "profile",
@@ -702,7 +808,7 @@ impl Tool for ProfileTool {
     }
 
     fn description(&self) -> &str {
-        "Read an Instagram profile by @handle or URL and collect visible post and reel cards."
+        "Read an Instagram profile by @handle or URL and collect visible post and reel cards. When the profile is private, the result includes private and private_notice; the grid is hidden and a displayed post count of 0 is not an empty public account."
     }
 
     fn input_schema(&self) -> Value {
@@ -746,7 +852,7 @@ impl Tool for ProfileTool {
                 json!({ "profile": locator, "url": url, "state": state }),
             )));
         }
-        let posts = invoke_browser_tool(
+        let mut posts = invoke_browser_tool(
             &self.page,
             ctx,
             SITE_ID,
@@ -762,6 +868,76 @@ impl Tool for ProfileTool {
                 "profile_posts_unavailable",
                 json!({ "profile": locator, "url": url }),
             )));
+        }
+        // The Posts grid has no view overlay. Read only the observed same-profile
+        // Reels tab and attach counts by id, retaining the original post sample.
+        if let Some(reels_url) = state
+            .get("reels_url")
+            .and_then(Value::as_str)
+            .filter(|tab| {
+                !tab.is_empty()
+                    && *tab != url
+                    && state.get("private").and_then(Value::as_bool) != Some(true)
+            })
+        {
+            let enrichment: anyhow::Result<Option<&str>> = async {
+                let reels_url = instagram_profile_url(reels_url)?;
+                navigate_https(&self.page, &reels_url).await?;
+                let reels_state =
+                    wait_for_browser_tool(&self.page, SITE_ID, "profileDetail", None, wait_seconds)
+                        .await?;
+                if let Some(reason) = gate_reason(&reels_state) {
+                    return Ok(Some(reason));
+                }
+                if reels_state.get("ok").and_then(Value::as_bool) == Some(true) {
+                    let reels = invoke_browser_tool(
+                        &self.page,
+                        ctx,
+                        SITE_ID,
+                        "profilePosts",
+                        Some(&json!({ "limit": num })),
+                        true,
+                    )
+                    .await?;
+                    if let (Some(cards), Some(readings)) = (posts.as_array_mut(), reels.as_array())
+                    {
+                        for card in cards {
+                            if let Some(reading) = readings.iter().find(|reel| {
+                                reel.get("id") == card.get("id")
+                                    && reel.get("view_count").and_then(Value::as_u64).is_some()
+                            }) {
+                                for key in VIEW_COUNT_FIELDS {
+                                    if let Some(value) = reading.get(key) {
+                                        card[key] = value.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                navigate_https(&self.page, &url).await?;
+                let restored =
+                    wait_for_browser_tool(&self.page, SITE_ID, "profileDetail", None, wait_seconds)
+                        .await?;
+                if let Some(reason) = gate_reason(&restored) {
+                    return Ok(Some(reason));
+                }
+                if restored.get("ok").and_then(Value::as_bool) != Some(true) {
+                    return Ok(Some("profile_reload_unavailable"));
+                }
+                Ok(None)
+            }
+            .await;
+            let reason = match enrichment {
+                Ok(reason) => reason,
+                Err(_) => Some("profile_views_unavailable"),
+            };
+            if let Some(reason) = reason {
+                return Ok(json_result(&failure_payload(
+                    reason,
+                    compact_profile(&state, &posts),
+                )));
+            }
         }
         let mut payload = compact_profile(&state, &posts);
         if deep > 0 {
@@ -856,7 +1032,7 @@ impl Tool for CommentTool {
     }
 
     fn description(&self) -> &str {
-        "Comment on an explicitly selected Instagram post or Reel with real CDP pointer and keyboard events. Refuses login gates, ambiguous editors, existing drafts or exact comments, route changes, and submit retries."
+        "Comment only when the user explicitly requests the exact Instagram post or Reel and exact text. Preserve both without inventing additional writes. Uses real CDP pointer and keyboard events and refuses login gates, ambiguous editors, existing drafts or exact comments, route changes, and submit retries. Treat commit_unknown as unknown and never retry it automatically."
     }
 
     fn input_schema(&self) -> Value {
@@ -1335,6 +1511,88 @@ impl Tool for PageStateTool {
         let _ = wait_for_browser_tool(&self.page, SITE_ID, "pageState", None, wait_seconds).await?;
         let state = invoke_browser_tool(&self.page, ctx, SITE_ID, "pageState", None, false).await?;
         Ok(json_result(&state))
+    }
+}
+
+struct WaitForInstagramLoginTool {
+    page: Arc<PageSession>,
+}
+
+const WAIT_FOR_INSTAGRAM_LOGIN_DEFAULT_SECS: i64 = 180;
+const WAIT_FOR_INSTAGRAM_LOGIN_MAX_SECS: i64 = 600;
+
+#[async_trait]
+impl Tool for WaitForInstagramLoginTool {
+    fn name(&self) -> &str {
+        "wait_for_instagram_login"
+    }
+
+    fn description(&self) -> &str {
+        "Call only after loginState has stayed out. If Instagram is already signed in, do not \
+         call this and do not ask the user to log in. When it is called, it opens the Instagram \
+         login page and waits until they sign in. Returns logged_in true when done, or \
+         logged_in false on timeout. Do not ask the user to type a password into a hosted browser."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Seconds to wait before returning (default 180, max 600)."
+                }
+            }
+        })
+    }
+
+    async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        if self.page.is_remote_browser() {
+            return Ok(json_result(&json!({
+                "logged_in": false,
+                "remote_browser": true,
+                "message": "Hosted Instagram login is operated by socai. Tell the user hosted \
+                            Instagram is temporarily unavailable and to try again later.",
+            })));
+        }
+        ensure_site_page(&self.page, HOST_ROOT, HOME_URL).await?;
+        if poll_instagram_login(&self.page, 2).await? == "in" {
+            return Ok(json_result(&json!({
+                "logged_in": true,
+                "message": "Already logged in to Instagram. Continue the original task.",
+            })));
+        }
+        let url = current_url(&self.page).await.unwrap_or_default();
+        if !instagram_login_form_url(&url) {
+            navigate_https(&self.page, HOME_URL).await?;
+        }
+        let timeout = get_i64(
+            &input,
+            "timeout_seconds",
+            WAIT_FOR_INSTAGRAM_LOGIN_DEFAULT_SECS,
+        )
+        .clamp(10, WAIT_FOR_INSTAGRAM_LOGIN_MAX_SECS);
+        let deadline = Instant::now() + Duration::from_secs(timeout as u64);
+        loop {
+            if poll_instagram_login(&self.page, 2).await? == "in" {
+                return Ok(json_result(&json!({
+                    "logged_in": true,
+                    "message": "Instagram login detected. Continue the original task.",
+                })));
+            }
+            if Instant::now() >= deadline {
+                return Ok(json_result(&json!({
+                    "logged_in": false,
+                    "timed_out": true,
+                    "message": format!(
+                        "Still not logged in to Instagram after {timeout}s. Ask the user to \
+                         sign in on instagram.com in the connected Chrome, then call \
+                         wait_for_instagram_login again."
+                    ),
+                })));
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
     }
 }
 
@@ -1940,11 +2198,7 @@ async fn wait_for_post_media(
             .get("video_url")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let video_url = if overlay_video.is_empty() {
-            card_video_url
-        } else {
-            overlay_video
-        };
+        let video_url = playable_instagram_video_url(overlay_video, card_video_url);
         let has_video = latest.get("kind").and_then(Value::as_str) == Some("reel");
         let author_ready = latest
             .pointer("/author/username")
@@ -2055,6 +2309,16 @@ fn compact_profile(state: &Value, posts: &Value) -> Value {
             profile[key] = json!(value);
         }
     }
+    if state.get("private").and_then(Value::as_bool) == Some(true) {
+        profile["private"] = json!(true);
+        if let Some(notice) = state
+            .get("private_notice")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            profile["private_notice"] = json!(notice);
+        }
+    }
     profile
 }
 
@@ -2077,6 +2341,11 @@ fn compact_profile_posts(posts: &Value) -> Value {
                     .filter(|value| !value.is_empty())
                 {
                     item["thumbnail_url"] = json!(thumb);
+                }
+                for key in VIEW_COUNT_FIELDS {
+                    if let Some(value) = post.get(key) {
+                        item[key] = value.clone();
+                    }
                 }
                 item
             })
@@ -2117,15 +2386,42 @@ fn compact_opened_post(id: &str, entity: &Value, comments: &Value, card_video_ur
     {
         post["media"] = json!(media);
     }
-    let video_url = entity
-        .get("video_url")
-        .and_then(Value::as_str)
-        .filter(|url| !url.is_empty())
-        .unwrap_or(card_video_url);
+    let video_url = playable_instagram_video_url(
+        entity
+            .get("video_url")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        card_video_url,
+    );
     if !video_url.is_empty() {
         post["video_url"] = json!(video_url);
+        if let Some(media) = post.get_mut("media").and_then(Value::as_array_mut) {
+            if let Some(video) = media
+                .iter_mut()
+                .find(|item| item.get("type").and_then(Value::as_str) == Some("video"))
+            {
+                let current = video.get("url").and_then(Value::as_str).unwrap_or("");
+                if current.is_empty() || is_byte_range_preview(current) {
+                    if let Some(object) = video.as_object_mut() {
+                        object.insert("url".into(), json!(video_url));
+                    }
+                }
+            }
+        }
     }
     post
+}
+
+/// A search card carries the full file. The open reel often exposes only a
+/// `bytestart`/`byteend` fragment, which is not playable and must not replace it.
+fn playable_instagram_video_url<'a>(overlay: &'a str, card: &'a str) -> &'a str {
+    if !overlay.is_empty() && !is_byte_range_preview(overlay) {
+        overlay
+    } else if !card.is_empty() && !is_byte_range_preview(card) {
+        card
+    } else {
+        ""
+    }
 }
 
 fn compact_comments(comments: &Value) -> Value {
@@ -2187,7 +2483,24 @@ async fn read_instagram_post(
     wait_seconds: f64,
 ) -> anyhow::Result<Value> {
     let url = instagram_post_url(locator)?;
-    navigate_https(page, &url).await?;
+    if let Err(error) = navigate_https(page, &url).await {
+        if error.chain().any(|source| {
+            source
+                .to_string()
+                .contains("net::ERR_HTTP_RESPONSE_CODE_FAILURE")
+        }) {
+            return Ok(failure_payload(
+                "post_navigation_rejected",
+                json!({
+                    "input": locator,
+                    "url": url,
+                    "retryable": false,
+                    "navigation_error": "http_response_code_failure",
+                }),
+            ));
+        }
+        return Err(error);
+    }
     let detail = wait_for_browser_tool(page, SITE_ID, "postDetail", None, wait_seconds).await?;
     if let Some(reason) = gate_reason(&detail) {
         return Ok(failure_payload(
@@ -2231,8 +2544,8 @@ fn instagram_profile_url(locator: &str) -> anyhow::Result<String> {
             .flatten()
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>();
-        if parts.len() != 1 || !valid_instagram_username(parts[0]) {
-            anyhow::bail!("Instagram profile URL must identify exactly one profile");
+        if !matches!(parts.as_slice(), [_] | [_, "reels"]) || !valid_instagram_username(parts[0]) {
+            anyhow::bail!("Instagram profile URL must identify one profile or its Reels tab");
         }
         url.set_query(None);
         url.set_fragment(None);
@@ -2304,4 +2617,48 @@ fn instagram_post_shortcode(raw_url: &str) -> Option<String> {
         return None;
     }
     Some(shortcode.to_string())
+}
+
+#[cfg(test)]
+mod view_count_tests {
+    use super::*;
+
+    #[test]
+    fn profile_projection_preserves_view_precision_and_unknowns() {
+        let cards = json!([
+            {"id":"Fixture123", "kind":"reel", "url":"https://www.instagram.com/reel/Fixture123/",
+             "view_count":26500, "view_count_text":"26.5K", "view_count_approximate":true,
+             "view_count_source":"visible_reels_grid"},
+            {"id":"Missing123", "view_count":null, "view_count_source":"unavailable"}
+        ]);
+        let posts = compact_profile_posts(&cards);
+        for key in [
+            "view_count",
+            "view_count_text",
+            "view_count_approximate",
+            "view_count_source",
+        ] {
+            assert_eq!(posts[0][key], cards[0][key]);
+        }
+        assert!(posts[1]["view_count"].is_null());
+        assert_eq!(posts[1]["view_count_source"], "unavailable");
+        assert!(posts[0].get("is_pinned").is_none());
+    }
+
+    #[test]
+    fn profile_url_accepts_only_the_profile_and_reels_tab() {
+        assert_eq!(
+            instagram_profile_url("https://www.instagram.com/creator/reels/?x=1").unwrap(),
+            "https://www.instagram.com/creator/reels/"
+        );
+        for url in [
+            "https://evil.example/creator/reels/",
+            "https://secret@www.instagram.com/creator/reels/",
+            "https://www.instagram.com/creator/tagged/",
+            "https://www.instagram.com/reels/",
+            "https://www.instagram.com/creator/reels/extra/",
+        ] {
+            assert!(instagram_profile_url(url).is_err(), "accepted {url}");
+        }
+    }
 }

@@ -271,11 +271,25 @@ html[data-language="zh"] .hero h1 {
 }
 
 .hero__subtitle {
-  max-width: 48em;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: 46em;
   margin: 0 auto 36px;
   color: var(--fg-soft);
   font-size: clamp(14px, 1.7vw, 16px);
   line-height: 1.55;
+}
+
+.hero__subtitle-lead,
+.hero__subtitle-rest {
+  display: block;
+  max-width: 100%;
+}
+
+.hero__subtitle-rest {
+  max-width: 40em;
   text-wrap: balance;
 }
 
@@ -284,6 +298,96 @@ html[data-language="zh"] .hero h1 {
   align-items: stretch;
   justify-content: center;
   gap: 10px;
+}
+
+.hero__actions .button {
+  height: 44px;
+}
+
+.hero__actions .button--primary {
+  gap: 8px;
+  padding: 0 18px;
+  font-size: 14px;
+}
+
+.hero__actions .button--secondary {
+  gap: 8px;
+  padding: 0 16px;
+  font-size: 13px;
+}
+
+.hero__actions .button__glyph,
+.hero__actions .button__external {
+  font-size: 12px;
+}
+
+.hero__install {
+  width: min(100%, 640px);
+  margin: 28px auto 0;
+}
+
+.hero__install-lead {
+  margin: 0 0 12px;
+  color: var(--ink-0);
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+}
+
+.hero__install-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  text-align: left;
+}
+
+.hero__install-row code {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 400;
+  letter-spacing: var(--ls-mono);
+  line-height: 1.45;
+}
+
+.hero__install-copy {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.hero__install-copy:hover {
+  background: var(--surface-2);
+  color: var(--ink-0);
+}
+
+.hero__install-copy.is-copied {
+  color: var(--ink-0);
+}
+
+.hero__install-copy .icon-check {
+  display: none;
+}
+
+.hero__install-copy.is-copied .icon-copy {
+  display: none;
+}
+
+.hero__install-copy.is-copied .icon-check {
+  display: block;
 }
 
 .button {

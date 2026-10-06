@@ -1,6 +1,9 @@
+use socai_core::telemetry::task_context::{self, TaskLink, TaskRegistration};
 use socai_core::telemetry::tool_call::{summarize_tool_args, summarize_tool_result};
 use socai_core::telemetry::{
-    query_text_enabled, redact_secrets, telemetry_enabled, Telemetry, TelemetrySource,
+    browser_disconnect_details, browser_source_category, query_text_enabled,
+    redact_telemetry_error, task_text_enabled, telemetry_enabled, tool_failure_error_type,
+    Telemetry, TelemetrySource,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -123,6 +126,8 @@ struct DaemonTelemetry {
     enabled: bool,
     #[serde(default = "default_true")]
     include_query_text: bool,
+    #[serde(default = "default_true")]
+    include_task_text: bool,
 }
 
 impl Default for DaemonTelemetry {
@@ -130,6 +135,7 @@ impl Default for DaemonTelemetry {
         Self {
             enabled: true,
             include_query_text: true,
+            include_task_text: true,
         }
     }
 }
@@ -216,6 +222,7 @@ struct DaemonEndpoint {
 struct DaemonState {
     runtime: SocaiRuntime,
     telemetry: Telemetry,
+    current_task: Option<TaskLink>,
 }
 
 /// Request metadata and read-only runtime access that must stay available
@@ -232,6 +239,7 @@ struct ToolTraceContext {
     site_id: String,
     command: String,
     tool_name: String,
+    task_properties: Map<String, Value>,
 }
 
 #[cfg(test)]
@@ -264,7 +272,11 @@ pub async fn run_daemon() -> Result<()> {
         last_activity: Mutex::new(Instant::now()),
     });
     let telemetry = Telemetry::new(&paths.home, TelemetrySource::CliDaemon);
-    let state = Arc::new(Mutex::new(DaemonState { runtime, telemetry }));
+    let state = Arc::new(Mutex::new(DaemonState {
+        runtime,
+        telemetry,
+        current_task: None,
+    }));
     let command_gate = Arc::new(Mutex::new(()));
     let stop = Arc::new(Notify::new());
     let mut idle_check = tokio::time::interval(Duration::from_secs(60));
@@ -685,6 +697,34 @@ async fn handle_request(
             ));
         }
 
+        if command == "__task_begin" {
+            let mut registration: TaskRegistration = serde_json::from_value(request.args)
+                .map_err(|_| anyhow!("invalid task registration"))?;
+            let include_text = telemetry.enabled && telemetry.include_task_text;
+            registration.sanitize(include_text)?;
+            let link = registration.link(include_text);
+            // The same gate as site commands gives task boundaries a defined order.
+            // A running command keeps its original task for its entire lifecycle.
+            let _gate = command_gate.lock_owned().await;
+            let mut state = state.lock().await;
+            let is_new =
+                state.current_task.as_ref().map(|task| &task.task_id) != Some(&link.task_id);
+            if is_new && telemetry.enabled {
+                state.telemetry.capture(
+                    "socai_cli_task_context",
+                    registration.event_properties(include_text),
+                );
+            }
+            state.current_task = Some(link.clone());
+            *control.last_activity.lock().await = Instant::now();
+            return Ok(json!({
+                "schema_version": 1,
+                "task_id": link.task_id,
+                "task_context_status": link.task_context_status,
+                "telemetry_enabled": telemetry.enabled,
+            }));
+        }
+
         let site_id = if request.site.trim().is_empty() {
             "xhs"
         } else {
@@ -751,6 +791,7 @@ impl DaemonState {
             spec.tool_name,
             &args,
             telemetry,
+            self.current_task.as_ref(),
         );
         // Marks browser work in flight for the whole command, so the remote
         // idle reaper never releases the session under a running tool.
@@ -862,6 +903,7 @@ impl ToolCallTrace {
         tool_name: &str,
         input: &Value,
         telemetry: &DaemonTelemetry,
+        current_task: Option<&TaskLink>,
     ) -> Self {
         Self::start_with_telemetry(
             ToolTelemetry::production(telemetry_client, telemetry.enabled),
@@ -873,6 +915,7 @@ impl ToolCallTrace {
             tool_name,
             input,
             telemetry.include_query_text,
+            task_context::correlation_properties(current_task, telemetry.include_task_text),
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -886,12 +929,14 @@ impl ToolCallTrace {
         tool_name: &str,
         input: &Value,
         include_query_text: bool,
+        task_properties: Map<String, Value>,
     ) -> Self {
         let context = ToolTraceContext {
             request_id: request_id.to_string(),
             site_id: site_id.to_string(),
             command: command.to_string(),
             tool_name: tool_name.to_string(),
+            task_properties,
         };
 
         let mut properties = trace_context_props(&context);
@@ -966,7 +1011,7 @@ impl Drop for ToolCallTrace {
 }
 
 fn trace_context_props(context: &ToolTraceContext) -> Map<String, Value> {
-    let mut props = Map::new();
+    let mut props = context.task_properties.clone();
     props.insert("request_id".into(), json!(context.request_id));
     props.insert("command".into(), json!(context.command));
     props.insert("tool_name".into(), json!(context.tool_name));
@@ -989,6 +1034,10 @@ fn finish_tool_call_props(
         Some(Err(err)) => {
             props.insert("outcome".into(), json!("failed"));
             props.insert("ok".into(), json!(false));
+            props.insert(
+                "error_type".into(),
+                json!(tool_failure_error_type(&format!("{err:#}"))),
+            );
             props.insert("error".into(), json!(error_summary(err)));
         }
         None => {
@@ -1017,7 +1066,7 @@ fn error_summary(err: &anyhow::Error) -> String {
 }
 
 fn short_redacted_error(error: &str) -> String {
-    redact_secrets(error)
+    redact_telemetry_error(error)
         .lines()
         .next()
         .unwrap_or("command failed")
@@ -1083,52 +1132,6 @@ fn browser_connect_props(
     Some(props)
 }
 
-fn browser_disconnect_details(reason: &str) -> (&'static str, &'static str) {
-    let reason = reason.to_ascii_lowercase();
-    if reason == "user_disconnected" {
-        ("user_disconnected", "browser disconnected by user")
-    } else if reason.contains("permission denied") || reason.contains("access denied") {
-        (
-            "browser_profile_access_denied",
-            "browser profile access denied",
-        )
-    } else if reason.contains("no chrome/chromium executable") {
-        ("chrome_not_found", "chrome executable not found")
-    } else if reason.contains("singleton") || reason.contains("another chrome instance") {
-        (
-            "browser_profile_conflict",
-            "browser profile is already in use",
-        )
-    } else if reason.contains("managed chrome") {
-        (
-            "managed_chrome_launch_failed",
-            "managed chrome failed to start",
-        )
-    } else if reason.contains("remote browser") || reason.contains("hosted") {
-        ("remote_browser_failed", "remote browser connection failed")
-    } else if reason.contains("websocket") {
-        (
-            "browser_websocket_failed",
-            "browser websocket connection failed",
-        )
-    } else if reason.contains("timed out") || reason.contains("timeout") {
-        ("browser_connect_timeout", "browser connection timed out")
-    } else if reason.contains("connection lost") || reason.contains("transport") {
-        (
-            "browser_transport_disconnected",
-            "browser transport disconnected",
-        )
-    } else {
-        ("browser_connect_failed", "browser connection failed")
-    }
-}
-
-fn browser_source_category(source: &str) -> &str {
-    source
-        .split_once(':')
-        .map_or(source, |(category, _)| category)
-}
-
 async fn send_request(
     site: &str,
     command: &str,
@@ -1149,6 +1152,7 @@ async fn send_request(
         telemetry: DaemonTelemetry {
             enabled: telemetry_enabled(),
             include_query_text: query_text_enabled(),
+            include_task_text: task_text_enabled(),
         },
     };
     let (reader, mut writer) = stream.into_split();
@@ -1562,6 +1566,7 @@ mod tests {
             site_id: "xhs".into(),
             command: "search".into(),
             tool_name: "search".into(),
+            task_properties: Map::new(),
         }
     }
 
@@ -1577,6 +1582,10 @@ mod tests {
             "search",
             &json!({ "query": "synthetic", "num_notes": 1 }),
             false,
+            Map::from_iter([
+                ("task_id".into(), json!("external-task-1")),
+                ("task_context_status".into(), json!("provided")),
+            ]),
         );
         (trace, recorded)
     }
@@ -1600,6 +1609,11 @@ mod tests {
         );
         assert_eq!(events[2].1.get("outcome"), Some(&json!("completed")));
         assert_eq!(events[2].1.get("ok"), Some(&json!(true)));
+        for (_, props) in events.iter() {
+            assert_eq!(props.get("task_id"), Some(&json!("external-task-1")));
+            assert_eq!(props.get("task_context_status"), Some(&json!("provided")));
+            assert!(props.get("task_text").is_none());
+        }
     }
 
     #[test]
@@ -1645,6 +1659,7 @@ mod tests {
             "search",
             &json!({ "query": "synthetic" }),
             false,
+            Map::new(),
         );
         drop(trace);
 
@@ -1668,16 +1683,59 @@ mod tests {
 
         let mut failed = trace_context_props(&trace_context());
         let failure: Result<Value> = Err(anyhow!(
-            "CDP disconnected with Authorization: Bearer very-secret-token"
+            "navigation to https://www.instagram.com/p/private-shortcode/?token=hidden failed with Authorization: Bearer very-secret-token"
         ));
         finish_tool_call_props(&mut failed, 84, Some(&failure));
         assert_eq!(failed.get("outcome"), Some(&json!("failed")));
         assert_eq!(failed.get("ok"), Some(&json!(false)));
+        assert_eq!(
+            failed.get("error_type"),
+            Some(&json!("tool_execution_failed"))
+        );
         let error = failed
             .get("error")
             .and_then(Value::as_str)
             .expect("failure error");
         assert!(!error.contains("very-secret-token"));
+        assert!(!error.contains("private-shortcode"));
+        assert!(!error.contains("token=hidden"));
+        assert!(error.contains("https://www.instagram.com/<redacted>"));
+
+        let mut websocket_failed = trace_context_props(&trace_context());
+        let websocket_failure: Result<Value> = Err(anyhow!(
+            "browser websocket ws://127.0.0.1:9222/devtools/browser/private did not respond"
+        ));
+        finish_tool_call_props(&mut websocket_failed, 61_000, Some(&websocket_failure));
+        assert_eq!(
+            websocket_failed.get("error_type"),
+            Some(&json!("browser_websocket_failed"))
+        );
+
+        let mut timed_out = trace_context_props(&trace_context());
+        let timeout_failure: Result<Value> =
+            Err(anyhow!("CDP command timed out: Runtime.evaluate"));
+        finish_tool_call_props(&mut timed_out, 60_001, Some(&timeout_failure));
+        assert_eq!(timed_out.get("error_type"), Some(&json!("tool_timeout")));
+
+        let mut protocol_failed = trace_context_props(&trace_context());
+        let protocol_failure: Result<Value> = Err(anyhow!(
+            "CDP command failed (DOM.querySelector): Could not find node with given id"
+        ));
+        finish_tool_call_props(&mut protocol_failed, 3, Some(&protocol_failure));
+        assert_eq!(
+            protocol_failed.get("error_type"),
+            Some(&json!("tool_execution_failed"))
+        );
+        for raw in [
+            "connect ws://[::1]:9222/devtools/browser/private-session failed",
+            "navigation to HTTPS://www.instagram.com/p/private/?q=private#fragment failed",
+            "navigation to https://example.com/p/o'private?query=private#fragment failed",
+            "invalid Instagram username or profile URL: private user",
+            "invalid Instagram username or profile URL: bad\nprivate-user",
+        ] {
+            let redacted = short_redacted_error(raw);
+            assert!(!redacted.contains("private"), "leaked from {raw}");
+        }
 
         let mut interrupted = trace_context_props(&trace_context());
         finish_tool_call_props(&mut interrupted, 126, None);

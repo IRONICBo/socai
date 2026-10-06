@@ -103,6 +103,10 @@ impl NativeSiteAdapter {
     }
 }
 
+/// Compatibility name used by external workers built before the native
+/// adapter registry was renamed.
+pub type SiteSpec = NativeSiteAdapter;
+
 /// Every registered site. Site order is also CLI help order.
 static NATIVE_SITE_ADAPTERS: &[&NativeSiteAdapter] = &[
     &crate::sites::xhs::XHS_NATIVE_ADAPTER,
@@ -111,6 +115,7 @@ static NATIVE_SITE_ADAPTERS: &[&NativeSiteAdapter] = &[
     &crate::sites::instagram::INSTAGRAM_NATIVE_ADAPTER,
     &crate::sites::linkedin::LINKEDIN_NATIVE_ADAPTER,
     &crate::sites::x::X_NATIVE_ADAPTER,
+    &crate::sites::web::WEB_SITE,
 ];
 
 pub fn all_native_site_adapters() -> &'static [&'static NativeSiteAdapter] {
@@ -122,6 +127,11 @@ pub fn find_native_site_adapter(id: &str) -> Option<&'static NativeSiteAdapter> 
         .iter()
         .copied()
         .find(|site| site.id == id)
+}
+
+/// Backward-compatible lookup for independently deployed agent workers.
+pub fn find_site(id: &str) -> Option<&'static SiteSpec> {
+    find_native_site_adapter(id)
 }
 
 /// Extract a required non-empty string arg from a command args object.

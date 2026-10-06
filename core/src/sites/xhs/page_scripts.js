@@ -1,4 +1,5 @@
 const SocaiXhsPageScripts = (() => {
+  const browserAction = typeof socaiAction === "function" ? socaiAction : async (perform) => perform();
   // ── tiny DOM helpers ─────────────────────────────────────────
   const $ = (sel, root = document) => (root || document).querySelector(sel);
   const $$ = (sel, root = document) => Array.from((root || document).querySelectorAll(sel));
@@ -307,9 +308,11 @@ const SocaiXhsPageScripts = (() => {
 
   function pageState() {
     const url = location.href;
+    const path = location.pathname.replace(/\/+$/, '');
     let state = 'unknown';
     if (/xiaohongshu\.com\/user\/profile\//.test(url)) state = 'profile_page';
-    else if (/\/(?:explore|discovery|search_result)\/[^/?#]+/.test(url) || getNoteOverlay()) state = 'note_detail';
+    else if (/^\/board\/[^/]+$/.test(path)) state = 'board_page';
+    else if (/^\/board\/[^/]+\/[^/]+/.test(path) || /\/(?:explore|discovery|search_result)\/[^/?#]+/.test(url) || getNoteOverlay()) state = 'note_detail';
     else if (url.includes('/search_result')) state = 'search_results';
     else if (/xiaohongshu\.com/.test(url)) state = 'homepage';
     return {
@@ -1104,6 +1107,28 @@ const SocaiXhsPageScripts = (() => {
     return { verified, verification: label };
   }
 
+  // Gender shown on the profile being viewed: 'male' / 'female', or '' when
+  // the account doesn't show one. The page state carries a numeric enum
+  // (`user.userPageData.basicInfo.gender`: 0 = male, 1 = female, 2 = not
+  // set) — not `user.userInfo.gender`, which is the signed-in viewer's. 0 is
+  // a real value, so the state is matched strictly: a missing field must not
+  // coerce to male. The DOM renders the header's first tag inside a `.gender`
+  // wrapper whether or not a gender is set; only its sprite icon (`#male` /
+  // `#female`) carries the signal, so fall back to that.
+  function profileGender() {
+    try {
+      const user = unwrapStateValue((window.__INITIAL_STATE__ || {}).user) || {};
+      const pageData = unwrapStateValue(user.userPageData) || {};
+      const info = unwrapStateValue(pageData.basicInfo) || {};
+      const raw = unwrapStateValue(info.gender);
+      if (raw === 0 || raw === '0') return 'male';
+      if (raw === 1 || raw === '1') return 'female';
+    } catch (e) {}
+    const use = $('.user-tags .gender use');
+    const ref = use ? String(use.getAttribute('xlink:href') || use.getAttribute('href') || '') : '';
+    return ((ref.match(/#(male|female)$/i) || [])[1] || '').toLowerCase();
+  }
+
   function profileInfo() {
     const displayName = firstVisibleText(
       ['.user-name', '.profile-name', '.nickname', '.name', 'h1'],
@@ -1126,6 +1151,7 @@ const SocaiXhsPageScripts = (() => {
       avatar_url: profileAvatarUrl(),
       bio,
       ip_location: ipLocation,
+      gender: profileGender(),
       verified: verification.verified,
       verification: verification.verification,
       followers: statText('粉丝'),
@@ -1154,6 +1180,187 @@ const SocaiXhsPageScripts = (() => {
 
   function profileCards() {
     return searchCards();
+  }
+
+  // ── own favorites albums (我 → 收藏 → 专辑 → /board/<id>) ──
+  // Selectors below were read from the signed-in profile, not copied from
+  // another site: the sidebar entry is `li.user.side-bar-component`, profile
+  // tabs are `.reds-tab-item`, album cards are `a.board-card`, and an open
+  // album is `/board/<id>` with notes in `board.boardFeedsMap`.
+
+  function sidebarMe() {
+    const links = $$('.user.side-bar-component a, li.user.side-bar-component a')
+      .filter((el) => isVisible(el) && norm(text(el)) === '我');
+    const el = links.find(inViewport) || links[0];
+    if (!el) return { ok: false, error: 'me_not_found' };
+    const href = absUrl(el.getAttribute('href') || el.href);
+    const profileId = (href.match(/\/user\/profile\/([^/?#]+)/) || [])[1] || '';
+    const point = ownedClickPoint(el);
+    if (!point) return { ok: false, error: 'me_not_clickable', profile_id: profileId, href };
+    return { ok: true, profile_id: profileId, href, ...point };
+  }
+
+  function profileTab(arg) {
+    const label = norm(arg && arg.label).replace(/\s+/g, '');
+    if (!label) return { ok: false, error: 'tab_label_required' };
+    const matches = $$('.reds-tab-item').filter((el) => {
+      if (!isVisible(el)) return false;
+      const value = norm(text(el)).replace(/\s+/g, '');
+      return value === label || value.startsWith(`${label}・`) || value.startsWith(`${label}·`);
+    });
+    const visible = matches.filter(centerInView);
+    if (!visible.length) {
+      return { ok: false, error: matches.length ? 'tab_not_in_view' : 'tab_not_found', label };
+    }
+    const el = visible.find((item) => item.classList.contains('active')) || visible[0];
+    const point = ownedClickPoint(el);
+    return {
+      ok: !!point,
+      label,
+      text: norm(text(el)),
+      active: el.classList.contains('active'),
+      error: point ? '' : 'tab_not_clickable',
+      ...(point || {}),
+    };
+  }
+
+  function albumIdentity(card) {
+    const href = absUrl(card.getAttribute('href') || card.href);
+    const boardId = (href.match(/\/board\/([^/?#]+)/) || [])[1] || '';
+    const info = card.querySelector('.board-info') || card;
+    const named = info.querySelector('.name, .title');
+    let name = named ? norm(text(named)) : '';
+    const infoText = norm(text(info));
+    if (!name || /笔记[・·]/.test(name)) {
+      name = infoText.replace(/\s*笔记[・·]\s*\d+.*$/, '').trim();
+    }
+    const noteCount = (infoText.match(/笔记[・·]\s*(\d+)/) || [])[1] || '';
+    return { board_id: boardId, name, note_count: noteCount, href };
+  }
+
+  function centerInView(el) {
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    return x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight;
+  }
+
+  function favoriteAlbums() {
+    const seen = new Set();
+    const albums = [];
+    const cards = $$('a.board-card').filter(isVisible);
+    const ordered = [...cards.filter(centerInView), ...cards.filter((card) => !centerInView(card))];
+    for (const card of ordered) {
+      const item = albumIdentity(card);
+      if (!item.board_id || seen.has(item.board_id)) continue;
+      seen.add(item.board_id);
+      const point = elementCenter(card);
+      albums.push({ ...item, ...point, in_view: centerInView(card) });
+    }
+    return albums;
+  }
+
+  function albumCard(arg) {
+    const wantedName = norm(arg && arg.name).replace(/\s+/g, '');
+    const wantedId = norm(arg && arg.board_id);
+    if (!wantedName && !wantedId) return { ok: false, error: 'album_name_required' };
+    const cards = $$('a.board-card').filter(isVisible);
+    const matches = cards.filter((card) => {
+      const item = albumIdentity(card);
+      if (wantedId && item.board_id === wantedId) return true;
+      return !!wantedName && item.name.replace(/\s+/g, '') === wantedName;
+    });
+    const ids = [];
+    for (const card of matches) {
+      const id = albumIdentity(card).board_id;
+      if (id && !ids.includes(id)) ids.push(id);
+    }
+    if (ids.length > 1) {
+      return {
+        ok: false,
+        error: 'album_ambiguous',
+        matches: ids.map((id) => albumIdentity(matches.find((card) => albumIdentity(card).board_id === id))),
+      };
+    }
+    const card = matches.find(centerInView);
+    if (!card) {
+      return { ok: false, error: matches.length ? 'album_not_in_view' : 'album_not_found' };
+    }
+    const point = ownedClickPoint(card);
+    if (!point) return { ok: false, error: 'album_not_clickable', ...albumIdentity(card) };
+    return { ok: true, ...albumIdentity(card), ...point };
+  }
+
+  function profileSubtabs() {
+    const tabs = $$('.reds-tab-item').filter(centerInView).map((el) => ({
+      text: norm(text(el)).replace(/\s+/g, ''),
+      active: el.classList.contains('active'),
+      ...elementCenter(el),
+    })).filter((tab) => /[・·]/.test(tab.text));
+    return { ok: tabs.length > 0, tabs };
+  }
+
+  function stateAlbumNotes(boardId) {
+    try {
+      const board = unwrapStateValue((window.__INITIAL_STATE__ || {}).board) || {};
+      const map = unwrapStateValue(board.boardFeedsMap) || {};
+      const feed = unwrapStateValue(map[boardId]) || {};
+      const hasMore = unwrapStateValue(feed.hasMore) === true;
+      const raw = unwrapStateValue(feed.notes) || [];
+      if (!Array.isArray(raw)) return { has_more: hasMore, notes: [] };
+      const notes = raw.map((item, index) => {
+        const note = unwrapStateValue(item) || {};
+        const user = unwrapStateValue(note.user) || {};
+        const interact = unwrapStateValue(note.interactInfo) || {};
+        const cover = unwrapStateValue(note.cover) || {};
+        const id = String(unwrapStateValue(note.noteId) || '');
+        const token = String(unwrapStateValue(note.xsecToken) || '');
+        const userId = String(unwrapStateValue(user.userId || user.userid) || '');
+        const typeRaw = String(unwrapStateValue(note.type) || '');
+        const likes = unwrapStateValue(interact.likedCount);
+        const coverUrl = cleanImageUrl(
+          unwrapStateValue(cover.urlDefault) || unwrapStateValue(cover.urlPre) || unwrapStateValue(cover.url) || '',
+        );
+        return {
+          note_id: id,
+          title: String(unwrapStateValue(note.displayTitle) || ''),
+          author: String(unwrapStateValue(user.nickname || user.nickName) || ''),
+          author_id: userId,
+          author_url: userId ? `https://www.xiaohongshu.com/user/profile/${userId}` : '',
+          likes: likes == null ? '' : String(likes),
+          cover_url: coverUrl,
+          type: typeRaw === 'normal' ? 'image' : typeRaw,
+          position: index,
+          xsec_token: token,
+          link: id && token
+            ? `https://www.xiaohongshu.com/explore/${id}?xsec_token=${encodeURIComponent(token)}&xsec_source=pc_board`
+            : (id ? `https://www.xiaohongshu.com/explore/${id}` : ''),
+        };
+      }).filter((note) => note.note_id);
+      return { has_more: hasMore, notes };
+    } catch (e) {
+      return { has_more: false, notes: [] };
+    }
+  }
+
+  function albumNotes() {
+    const path = location.pathname.replace(/\/+$/, '');
+    const boardId = (path.match(/^\/board\/([^/]+)$/) || [])[1] || '';
+    const info = document.querySelector('.board-info');
+    const header = norm(text(info));
+    const name = norm(text(info && info.querySelector('.name'))) || header.replace(/\s*暂无简介[\s\S]*$/, '').trim();
+    const declared = (header.match(/笔记[・·]\s*(\d+)/) || [])[1] || '';
+    const fromState = boardId ? stateAlbumNotes(boardId) : { has_more: false, notes: [] };
+    const notes = fromState.notes.length ? fromState.notes : searchCards();
+    return {
+      ok: !!boardId && !!info,
+      board_id: boardId,
+      name,
+      declared_count: declared,
+      has_more: fromState.has_more,
+      url: location.href,
+      notes,
+    };
   }
 
   // ── hydration wait — single round-trip Promise loop ──────────
@@ -1670,7 +1877,7 @@ const SocaiXhsPageScripts = (() => {
   // Click every visible "展开 N 条回复 / 展开更多回复" button to load the next batch
   // of replies. These are Vue-bound divs, so a synthetic .click() drives the same
   // handler a human click would. Skips "收起" (collapse). Returns how many fired.
-  function expandCommentReplies(opts = {}) {
+  async function expandCommentReplies(opts = {}) {
     const root = getNoteRoot();
     const scope = $('.comments-el', root) || root;
     const max = Number(opts.max_clicks) || 60;
@@ -1679,7 +1886,7 @@ const SocaiXhsPageScripts = (() => {
     let clicked = 0;
     for (const b of buttons) {
       if (clicked >= max) break;
-      try { b.click(); clicked += 1; } catch (e) { /* ignore */ }
+      try { await browserAction(() => b.click()); clicked += 1; } catch (e) { /* ignore */ }
     }
     return { ok: true, clicked, remaining: Math.max(0, buttons.length - clicked) };
   }
@@ -1845,5 +2052,11 @@ const SocaiXhsPageScripts = (() => {
     carouselImages,
     profileInfo,
     profileCards,
+    sidebarMe,
+    profileTab,
+    profileSubtabs,
+    favoriteAlbums,
+    albumCard,
+    albumNotes,
   };
 })();

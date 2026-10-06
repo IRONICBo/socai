@@ -1,22 +1,29 @@
+mod agent_integration;
 mod daemon;
 mod progress;
+mod task;
 mod tui;
 mod version;
 
+use std::process::ExitCode;
+
 use anyhow::Result;
 use clap::{Arg, ArgAction, ArgMatches};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use socai_core::cloud as socai_pro;
 use socai_core::config as socai_config;
 use socai_core::sites::{
-    all_native_site_adapters, find_native_site_adapter, ArgKind, CommandArg, NativeSiteAdapter,
-    SiteCommand,
+    all_native_site_adapters, available_site_skills, find_native_site_adapter, ArgKind, CommandArg,
+    NativeSiteAdapter, SiteCommand,
 };
 
 fn build_cli() -> clap::Command {
     let mut root = clap::Command::new("socai")
         .about("socai — site-savvy browser agent")
         .version(env!("CARGO_PKG_VERSION"))
+        .after_help("External agents: call socai task begin with the user's original question once per new task. Subsequent site commands join the daemon's current task automatically.")
+        .subcommand(task::command())
+        .subcommand(agent_integration::command())
         .subcommand(
             clap::Command::new("version")
                 .about("Print installed version and latest release status.")
@@ -103,6 +110,24 @@ fn build_cli() -> clap::Command {
                                 .value_name("TEXT")
                                 .help("Optional device label shown in server records."),
                         ),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("capabilities")
+                .about(
+                    "Print installed site skills and stable CLI commands as machine-readable JSON.",
+                )
+                .arg(
+                    Arg::new("site")
+                        .long("site")
+                        .value_name("ID")
+                        .help("Only report one site id."),
+                )
+                .arg(
+                    Arg::new("pretty")
+                        .long("pretty")
+                        .action(ArgAction::SetTrue)
+                        .help("Pretty-print the JSON result."),
                 ),
         )
         .subcommand(clap::Command::new("__daemon").hide(true));
@@ -219,7 +244,7 @@ async fn run_site_command(
     site: &'static NativeSiteAdapter,
     command: &'static SiteCommand,
     matches: &ArgMatches,
-) -> Result<()> {
+) -> Result<ExitCode> {
     let args = collect_args(command, matches)?;
     let timeout = if command.slow.applies(&args) {
         daemon::LONG_COMMAND_TIMEOUT
@@ -244,19 +269,43 @@ async fn run_site_command(
     };
     renderer.finish();
     let result = result?;
-    print_command_result(&result, matches.get_flag("pretty"))
+    print_command_result(&result, matches.get_flag("pretty"))?;
+    // stdout stays the full report, partial results included. The exit status
+    // repeats its `ok: false` for callers that only check the status.
+    let data = result.get("data").unwrap_or(&result);
+    if data.get("ok").and_then(Value::as_bool) != Some(false) {
+        return Ok(ExitCode::SUCCESS);
+    }
+    let reason = data
+        .get("reason")
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.is_empty());
+    match reason {
+        Some(reason) => eprintln!("socai {} {}: ok=false ({reason})", site.id, command.name),
+        None => eprintln!("socai {} {}: ok=false", site.id, command.name),
+    }
+    Ok(ExitCode::FAILURE)
 }
 
 fn should_warn_for_update(subcommand: &str) -> bool {
     !matches!(
         subcommand,
-        "__daemon" | "update" | "version" | "status" | "config" | "pro"
+        "__daemon"
+            | "update"
+            | "version"
+            | "status"
+            | "config"
+            | "pro"
+            | "task"
+            | "integrate"
+            | "capabilities"
     )
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<ExitCode> {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
                 "info,async_tungstenite=off,tungstenite=off,hyper=off,reqwest=off".into()
@@ -267,7 +316,7 @@ async fn main() -> Result<()> {
     let matches = build_cli().get_matches();
     let Some((name, sub_matches)) = matches.subcommand() else {
         tui::run().await?;
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     };
     if should_warn_for_update(name) {
         version::maybe_warn_if_outdated().await;
@@ -291,7 +340,13 @@ async fn main() -> Result<()> {
             }
         }
         "config" => run_config_command(sub_matches)?,
+        "task" => task::run(sub_matches).await?,
+        "integrate" => agent_integration::run(sub_matches)?,
         "pro" => run_pro_command(sub_matches).await?,
+        "capabilities" => print_capabilities(
+            sub_matches.get_one::<String>("site").map(String::as_str),
+            sub_matches.get_flag("pretty"),
+        )?,
         "stop" => {
             // Graceful shutdown reaches whoever owns the IPC endpoint; the
             // sweep then kills any orphan daemon from any binary or SOCAI_HOME,
@@ -318,11 +373,111 @@ async fn main() -> Result<()> {
             let command = site
                 .command(command_name)
                 .ok_or_else(|| anyhow::anyhow!("unknown {name} command: {command_name}"))?;
-            run_site_command(site, command, command_matches).await?;
+            return run_site_command(site, command, command_matches).await;
         }
     }
 
+    Ok(ExitCode::SUCCESS)
+}
+
+fn print_capabilities(site_filter: Option<&str>, pretty: bool) -> Result<()> {
+    let manifests = available_site_skills()?;
+    let mut platforms = Vec::new();
+
+    for manifest in manifests {
+        if site_filter.is_some_and(|site| site != manifest.id) {
+            continue;
+        }
+        let native = find_native_site_adapter(&manifest.id);
+        let commands = native
+            .map(|adapter| {
+                adapter
+                    .commands
+                    .iter()
+                    .map(command_capability)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let browser_tools = manifest.browser_tools.keys().cloned().collect::<Vec<_>>();
+        platforms.push(json!({
+            "id": manifest.id,
+            "name": manifest.name,
+            "domains": manifest.domains,
+            "browser_tools": browser_tools,
+            "native_cli": native.is_some(),
+            "commands": commands,
+        }));
+    }
+
+    for adapter in all_native_site_adapters() {
+        if platforms
+            .iter()
+            .any(|platform| platform.get("id").and_then(Value::as_str) == Some(adapter.id))
+            || site_filter.is_some_and(|site| site != adapter.id)
+        {
+            continue;
+        }
+        platforms.push(json!({
+            "id": adapter.id,
+            "name": adapter.about,
+            "domains": [],
+            "browser_tools": [],
+            "native_cli": true,
+            "commands": adapter
+                .commands
+                .iter()
+                .map(command_capability)
+                .collect::<Vec<_>>(),
+        }));
+    }
+
+    if let Some(site) = site_filter {
+        if platforms.is_empty() {
+            anyhow::bail!("unknown site capability: {site}");
+        }
+    }
+
+    let output = json!({
+        "schema_version": 1,
+        "platforms": platforms,
+    });
+    if pretty {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("{}", serde_json::to_string(&output)?);
+    }
     Ok(())
+}
+
+fn command_capability(command: &SiteCommand) -> Value {
+    json!({
+        "name": command.name,
+        "tool_name": command.tool_name,
+        "description": command.about,
+        "arguments": command
+            .args
+            .iter()
+            .map(|arg| json!({
+                "key": arg.key,
+                "long": arg.long,
+                "value_name": arg.value_name,
+                "description": arg.help,
+                "required": arg.required,
+                "kind": arg_kind_name(&arg.kind),
+            }))
+            .collect::<Vec<_>>(),
+        "common_flags": ["pretty", "debug-snapshot"],
+    })
+}
+
+fn arg_kind_name(kind: &ArgKind) -> &'static str {
+    match kind {
+        ArgKind::Str => "string",
+        ArgKind::StrList => "string_list",
+        ArgKind::Int => "integer",
+        ArgKind::Flag => "boolean",
+        ArgKind::KeyValueMap => "key_value_map",
+    }
 }
 
 async fn run_pro_command(matches: &ArgMatches) -> Result<()> {

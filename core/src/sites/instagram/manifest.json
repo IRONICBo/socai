@@ -4,6 +4,14 @@
   "domains": ["instagram.com", "*.instagram.com"],
   "notes": ["knowledge.md"],
   "browserTools": {
+    "loginState": {
+      "description": "Read whether the current Instagram tab is signed in, signed out, or not yet hydrated. Signed in is the Messages nav link. Signed out is the homepage password form or a Log In link to /accounts/login.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiInstagramPageScripts",
+      "callable": "loginState",
+      "args": {},
+      "returns": { "type": "object", "description": "Tri-state Instagram login: in, out, or unknown." }
+    },
     "pageState": {
       "description": "Read the current Instagram route, authentication gate, challenge, rate-limit, and hydration state.",
       "path": "page_scripts.js",
@@ -13,7 +21,7 @@
       "returns": { "type": "object", "description": "Current Instagram page state." }
     },
     "searchState": {
-      "description": "Verify that Instagram reached an active keyword search surface and distinguish results, an explicit empty state, and login or challenge gates.",
+      "description": "After navigating to https://www.instagram.com/explore/search/keyword/?q=<encoded-query>, verify the active keyword search surface and distinguish results, an explicit empty state, and login or challenge gates. If that route is unavailable, navigate to the homepage, use openSearch/setSearchQuery, then verify again.",
       "path": "page_scripts.js",
       "binding": "window.SocaiInstagramPageScripts",
       "callable": "searchState",
@@ -41,6 +49,7 @@
       "returns": { "type": "object", "description": "Ordered account suggestions, or an explicit empty or gate state." }
     },
     "setSearchQuery": {
+      "action": true,
       "description": "Set a query in the visible Instagram search input and dispatch input events; this never follows, likes, comments, or sends messages.",
       "path": "page_scripts.js",
       "binding": "window.SocaiInstagramPageScripts",
@@ -88,6 +97,7 @@
       "returns": { "type": "array", "description": "Visible Instagram search candidates." }
     },
     "scrollResults": {
+      "action": true,
       "description": "Scroll an Instagram search surface by one bounded viewport step to hydrate more candidates.",
       "path": "page_scripts.js",
       "binding": "window.SocaiInstagramPageScripts",
@@ -99,15 +109,15 @@
       "returns": { "type": "object", "description": "Search scroll and candidate-count state." }
     },
     "profileDetail": {
-      "description": "Extract the active Instagram profile, biography, visible counts, external URL, and canonical identity.",
+      "description": "Extract the active Instagram profile, biography, visible counts, external URL, and canonical identity. Includes private and private_notice when the locked profile empty state is visible.",
       "path": "page_scripts.js",
       "binding": "window.SocaiInstagramPageScripts",
       "callable": "profileDetail",
       "args": {},
-      "returns": { "type": "object", "description": "Visible Instagram profile details or an explicit gate state." }
+      "returns": { "type": "object", "description": "Visible Instagram profile details. private and private_notice are present when the profile grid is locked behind follow. Otherwise an explicit gate state." }
     },
     "profilePosts": {
-      "description": "Collect post and reel cards across the active Instagram profile's lazy grid up to limit.",
+      "description": "Collect post and reel cards across the active Instagram profile's lazy grid up to limit. Grid order is not recency evidence because pinned posts may appear first; open selected cards and use postDetail.published_at before making recency claims.",
       "path": "page_scripts.js",
       "binding": "window.SocaiInstagramPageScripts",
       "callable": "profilePosts",
@@ -118,6 +128,7 @@
       "returns": { "type": "array", "description": "Visible Instagram profile posts and reels." }
     },
     "scrollPosts": {
+      "action": true,
       "description": "Scroll an Instagram profile grid by one bounded step to hydrate more posts and reels.",
       "path": "page_scripts.js",
       "binding": "window.SocaiInstagramPageScripts",
@@ -163,7 +174,7 @@
       "binding": "window.SocaiInstagramPageScripts",
       "callable": "postDetail",
       "args": {},
-      "returns": { "type": "object", "description": "Visible Instagram post details or an explicit gate state." }
+      "returns": { "type": "object", "description": "Visible Instagram post details or an explicit gate state. Nullable metrics are unavailable rather than zero; complete/missing_fields describe only the declared metadata fields." }
     },
     "comments": {
       "description": "Collect comments and expanded replies across the active Instagram post or reel up to limit; never likes, replies, or submits anything.",
@@ -176,6 +187,7 @@
       "returns": { "type": "array", "description": "Accumulated, deduplicated Instagram comments." }
     },
     "scrollComments": {
+      "action": true,
       "description": "Load the next bounded batch of Instagram comments and collapsed replies using read-only expansion controls.",
       "path": "page_scripts.js",
       "binding": "window.SocaiInstagramPageScripts",

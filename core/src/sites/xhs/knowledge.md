@@ -29,6 +29,8 @@ The default interactive XHS tools are intentionally high level:
 
 - `search` — the topic/keyword search macro, and the single XHS search tool.
 - `author_scan` — author/profile macro.
+- `albums` — list the signed-in account's favorites albums (我 → 收藏 → 专辑).
+- `album` — notes from one of those albums, chosen by the name `albums` returns.
 - `get_notes` — revisit specific notes by previously collected note id + xsec token.
 - `comment` — write one explicit comment to one user-selected complete note URL.
 - `follow` — follow the verified author of one user-selected complete note URL.
@@ -64,7 +66,8 @@ wait-then-one-retry cycle until success or cancellation.
 
 ## Login Detection
 
-All high-level macros run a pre-flight login gate: if logged out they return
+`search`, `author_scan`, `albums`, `album`, `get_notes`, `comment`, and `follow`
+run a pre-flight login gate: if logged out they return
 `{ok:false, reason:"login_required"}` immediately (login is read from the
 persistent sidebar, so a dismissed QR modal is never mistaken for a session).
 
@@ -99,6 +102,13 @@ artifacts, and return a compact bundle. They differ only in where they enter:
 
 Both flows keep opening notes by clicking their cards. Their card/note URLs
 carry the xsec token needed for a later `get_notes` call.
+
+`albums()` lists the signed-in account's favorites albums. `album(album=...)`
+opens one of those albums by the name `albums` returned: 我, then 收藏, then
+专辑, then the named album. It returns that album's note cards and does not
+open them. Omit `num_notes` to collect until the album stops loading. Use
+`get_notes` with a returned note id and xsec token when the body or comments
+are needed.
 
 On the homepage, the visible AI-search submit button may not be mounted until
 after text is entered. Homepage feed cards are not proof that a search ran: a

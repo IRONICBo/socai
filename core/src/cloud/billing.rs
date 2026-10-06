@@ -47,6 +47,19 @@ pub struct PaymentPlan {
     pub points: i64,
     pub duration_days: i64,
     pub auto_renews: bool,
+    #[serde(default)]
+    pub stripe: Option<StripePlan>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StripePlan {
+    pub plan_id: String,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub points: i64,
+    pub sandbox: bool,
+    pub subscription_status: Option<String>,
+    pub cancel_at_period_end: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +69,10 @@ pub struct PaymentOrder {
     pub code_url: Option<String>,
     pub payment_url: Option<String>,
     pub amount_fen: i64,
+    #[serde(default)]
+    pub amount_minor: Option<i64>,
+    #[serde(default)]
+    pub currency: Option<String>,
     pub points: i64,
     pub duration_days: i64,
     pub expires_at: Option<String>,
@@ -164,6 +181,27 @@ pub async fn create_alipay_order(plan_id: &str, request_id: &str) -> Result<Paym
         .await?)
 }
 
+pub async fn create_stripe_order(plan_id: &str, request_id: &str) -> Result<PaymentOrder> {
+    let response = authenticated_request(reqwest::Method::POST, "/v1/billing/stripe/orders")?
+        .json(&json!({"plan_id": plan_id, "request_id": request_id}))
+        .send()
+        .await
+        .context("failed to create Stripe checkout")?;
+    Ok(require_success(response, "Stripe checkout")
+        .await?
+        .json()
+        .await?)
+}
+
+pub async fn cancel_stripe_subscription() -> Result<()> {
+    let response = authenticated_request(reqwest::Method::POST, "/v1/billing/stripe/cancel")?
+        .send()
+        .await
+        .context("failed to cancel Stripe renewal")?;
+    require_success(response, "Stripe subscription cancellation").await?;
+    Ok(())
+}
+
 pub async fn payment_order(order_id: &str) -> Result<PaymentOrder> {
     if !order_id
         .chars()
@@ -214,7 +252,10 @@ pub async fn settle_llm_task(task_id: &str, final_status: &str) -> Result<LlmSet
         anyhow::bail!("invalid hosted LLM final status");
     }
     let path = format!("/v1/llm/tasks/{task_id}/settle?final_status={final_status}");
-    let response = authenticated_request(reqwest::Method::POST, &path)?
+    let gateway = super::guest::llm_gateway_config_for_task(Some(task_id))?;
+    let response = http_client()?
+        .post(format!("{}{path}", gateway.base_url))
+        .bearer_auth(gateway.device_token)
         .send()
         .await
         .context("failed to settle hosted LLM task")?;
@@ -222,6 +263,8 @@ pub async fn settle_llm_task(task_id: &str, final_status: &str) -> Result<LlmSet
         .await?
         .json()
         .await?;
-    cache_balance_points(settlement.balance_points);
+    if !super::guest::is_guest_task(task_id) {
+        cache_balance_points(settlement.balance_points);
+    }
     Ok(settlement)
 }

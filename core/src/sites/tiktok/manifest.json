@@ -2,7 +2,7 @@
   "id": "tiktok",
   "name": "TikTok",
   "domains": ["tiktok.com", "*.tiktok.com"],
-  "notes": ["knowledge.md"],
+  "notes": [],
   "browserTools": {
     "pageState": {
       "description": "Read the current TikTok page, login, challenge, and hydration state.",
@@ -13,7 +13,7 @@
       "returns": { "type": "object", "description": "Current page state." }
     },
     "searchState": {
-      "description": "Read the active TikTok search route and result state.",
+      "description": "Before accepting videoCards, verify the active TikTok search route and distinguish hydrated results or an explicit empty result from login, CAPTCHA, rate-limit, query-mismatch, and unhydrated states; blocked or unhydrated states are not empty results.",
       "path": "page_scripts.js",
       "binding": "window.SocaiTikTokPageScripts",
       "callable": "searchState",
@@ -21,7 +21,7 @@
       "returns": { "type": "object", "description": "Search transition and result state." }
     },
     "videoCards": {
-      "description": "Collect TikTok video cards across the current lazy result or author grid up to limit.",
+      "description": "Collect TikTok video cards across the current lazy result or author grid up to limit. On search routes, call searchState first and accept an empty array only when it confirms an explicit empty result.",
       "path": "page_scripts.js",
       "binding": "window.SocaiTikTokPageScripts",
       "callable": "videoCards",
@@ -33,6 +33,7 @@
       "returns": { "type": "array", "description": "Visible TikTok video cards." }
     },
     "scrollFeed": {
+      "action": true,
       "description": "Scroll the current TikTok feed or grid by a bounded amount.",
       "path": "page_scripts.js",
       "binding": "window.SocaiTikTokPageScripts",
@@ -84,6 +85,7 @@
       "returns": { "type": "array", "description": "Accumulated, deduplicated comments." }
     },
     "scrollComments": {
+      "action": true,
       "description": "Scroll the active TikTok comment panel.",
       "path": "page_scripts.js",
       "binding": "window.SocaiTikTokPageScripts",

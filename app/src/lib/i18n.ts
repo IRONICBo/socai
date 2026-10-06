@@ -66,6 +66,10 @@ const messages = {
     en: "hosted browser not connected — it reconnects when you send.",
     zh: "云端浏览器未连接 — 发送时会自动重连。",
   },
+  "chrome.managedAutoReconnect": {
+    en: "chrome connects automatically when you send.",
+    zh: "发送时会自动连接 chrome。",
+  },
   "chrome.remoteDebuggingHelp": {
     en: "open chrome remote debugging ↗",
     zh: "打开 chrome 远程调试 ↗",
@@ -152,6 +156,23 @@ const messages = {
   "auth.login": { en: "sign in", zh: "登录" },
   "auth.loginAria": { en: "sign in to socai", zh: "登录 socai" },
   "auth.accountAria": { en: "open account menu", zh: "打开账号菜单" },
+  "auth.googleLogin": { en: "Sign in with Google", zh: "使用 Google 登录" },
+  "auth.googleLink": { en: "Link Google account", zh: "绑定 Google 账号" },
+  "auth.googleLinked": { en: "Google linked: {email}", zh: "已绑定 Google：{email}" },
+  "auth.signIn": { en: "Sign In", zh: "登录" },
+  "auth.phoneLogin": { en: "Sign in with Phone", zh: "手机号登录" },
+  "auth.trialUsed": { en: "Sign in to continue using socai.", zh: "登录后继续使用 socai。" },
+  "agent.useOwnKey": { en: "Use my own LLM API key instead", zh: "改用自己的 LLM API Key" },
+  "agent.provider": { en: "Provider", zh: "提供商" },
+  "auth.googleWaiting": { en: "Continue in your browser to sign in with Google.", zh: "请在浏览器中完成 Google 登录。" },
+  "auth.googlePreparing": { en: "Opening Google sign-in…", zh: "正在打开 Google 登录…" },
+  "auth.googleBrowserFailed": { en: "Could not open your browser. Check your default browser and try again.", zh: "无法打开浏览器，请检查默认浏览器设置后重试。" },
+  "auth.googleCancel": { en: "cancel", zh: "取消" },
+  "auth.googleNotConfigured": { en: "Google sign-in is not available yet. Please use phone sign-in.", zh: "Google 登录暂未开通，请先使用手机号登录。" },
+  "auth.googleTimeout": { en: "Google sign-in timed out. Please try again.", zh: "Google 登录超时，请重试。" },
+  "auth.googleConflict": { en: "This Google account or socai account is already linked. Sign in with the original account.", zh: "该 Google 账号或 socai 账号已有绑定，请使用原账号登录。" },
+  "auth.googleFailed": { en: "Google sign-in failed. Please try again.", zh: "Google 登录失败，请重试。" },
+  "auth.or": { en: "or", zh: "或" },
   "auth.loginTitle": { en: "sign in with phone", zh: "手机号登录" },
   "auth.loginAgentHint": {
     en: "sign in to get {points} points of agent credit",
@@ -233,15 +254,15 @@ const messages = {
 
   "subscription.label": { en: "subscribe", zh: "订阅" },
   "subscription.aria": { en: "open subscription", zh: "打开订阅" },
-  "subscription.upgradePro": { en: "upgrade to pro", zh: "升级到 Pro" },
-  "subscription.renewPro": { en: "renew pro", zh: "续订 Pro" },
+  "subscription.upgradePro": { en: "upgrade to pro for more usage", zh: "升级到pro，获取更多额度" },
+  "subscription.manage": { en: "manage subscription", zh: "管理订阅" },
   "subscription.proPoints": { en: "500 points", zh: "500 点数" },
   "subscription.proXhs": { en: "use xiaohongshu without signing in", zh: "免登录小红书" },
   "subscription.active": { en: "subscribed", zh: "已订阅" },
   "subscription.inactive": { en: "not subscribed", zh: "未订阅" },
   "subscription.loginHint": {
-    en: "sign in with your phone number before subscribing.",
-    zh: "请先使用手机号登录，再开通订阅。",
+    en: "sign in before subscribing.",
+    zh: "请先登录，再开通订阅。",
   },
   "subscription.login": { en: "sign in to continue", zh: "登录后继续" },
   "subscription.loadFailed": {
@@ -261,6 +282,18 @@ const messages = {
     en: "Includes hosted AI access with no API key setup. Your own API key remains available in settings.",
     zh: "包含免配置 API Key 的云端模型用量；你仍可在设置中使用自己的 API Key。",
   },
+  "subscription.perMonth": { en: "/month", zh: "/月" },
+  "subscription.monthlyPoints": { en: "{points} points per month", zh: "每月{points}点数" },
+  "subscription.pointCount": { en: "{points} points", zh: "{points}点数" },
+  "subscription.stripePayment": { en: "pay with Stripe", zh: "Stripe支付" },
+  "subscription.autoRenew": { en: "Renews monthly until cancelled. Tax calculated at checkout.", zh: "每月自动续费，可取消；税费在结账时计算。" },
+  "subscription.renewalCancelled": { en: "Renewal cancelled. Access continues until the paid period ends.", zh: "已取消续费，权益保留至已付款账期结束。" },
+  "subscription.sandbox": { en: "Test mode \u00b7 no real charges", zh: "测试模式 · 不产生真实扣款" },
+  "subscription.paymentAttention": { en: "Subscription payment needs attention. Check your Stripe receipt or contact support.", zh: "订阅付款需处理，请查看 Stripe 邮件或联系客服。" },
+  "subscription.cancelRenewal": { en: "cancel automatic renewal", zh: "取消自动续费" },
+  "subscription.stripe": { en: "subscribe", zh: "订阅" },
+  "subscription.stripeOpened": { en: "Checkout opened in your browser. Complete payment there, then return to socai.", zh: "已在浏览器打开结账页，完成付款后返回 socai。" },
+  "subscription.openCheckout": { en: "open checkout again", zh: "重新打开结账页" },
   "subscription.wechatPay": { en: "pay with WeChat", zh: "微信扫码支付" },
   "subscription.alipay": { en: "pay with Alipay", zh: "支付宝支付" },
   "subscription.alipayOpened": {
@@ -271,13 +304,11 @@ const messages = {
     en: "open Alipay checkout again",
     zh: "重新打开支付宝收银台",
   },
-  "subscription.awaitingPayment": { en: "awaiting payment", zh: "等待支付" },
   "subscription.qrAria": { en: "WeChat Pay QR code", zh: "微信支付二维码" },
   "subscription.scanHint": {
     en: "scan with WeChat on your phone. Payment is confirmed automatically.",
     zh: "请使用手机微信扫码，支付成功后会自动确认。",
   },
-  "subscription.expires": { en: "QR code expires at {time}.", zh: "二维码将在 {time} 失效。" },
   "subscription.success": { en: "subscription active", zh: "订阅已开通" },
   "subscription.successHint": {
     en: "{points} points added. Access is active until {date}.",
@@ -517,8 +548,8 @@ const messages = {
   },
   "task.replySend": { en: "send", zh: "发送" },
   "task.preflightModelConfig": {
-    en: "the selected model is not ready. configure its api key or account connection in the model menu, then try again.",
-    zh: "当前模型尚未完成配置。请在右上角模型菜单中添加 API Key 或完成账号连接，然后重试。",
+    en: "the selected model is not ready. configure its api key or account connection in the account menu, then try again.",
+    zh: "当前模型尚未完成配置。请在右上角账号菜单中添加 API Key 或完成账号连接，然后重试。",
   },
   "task.preflightAuth": {
     en: "your socai account is signed out. sign in, then send the task again.",
@@ -552,6 +583,10 @@ const messages = {
     en: "this device has used up today's hosted browser time. try again tomorrow, or switch the browser source to a local chrome in settings.",
     zh: "本设备今日的云端浏览器时长已用完。请明天再试，或在设置中将浏览器来源切换为本地 chrome。",
   },
+  "task.instagramLogin": {
+    en: "instagram is signed out in the connected chrome. sign in there, and this task continues after you sign in.",
+    zh: "当前 chrome 尚未登录 Instagram。请在已连接的 chrome 中完成登录，登录后任务会继续。",
+  },
   "task.preflightXhsLogin": {
     en: "xiaohongshu is signed out in the connected chrome profile. complete sign-in there, then try again.",
     zh: "当前 chrome 配置文件尚未登录小红书。请在已连接的 chrome 中完成登录，然后重试。",
@@ -571,12 +606,12 @@ const messages = {
   "task.errorCode": { en: "error code: {code}", zh: "错误码：{code}" },
   "task.apiErrorAuthTitle": { en: "model authentication failed", zh: "模型认证失败" },
   "task.apiErrorAuth": {
-    en: "{provider} rejected the current API key. update it in the model menu at the top right, then send the task again.",
-    zh: "{provider} 拒绝了当前 API Key。请在右上角模型菜单中更新 API Key，然后重新发送任务。",
+    en: "{provider} rejected the current API key. update it in the account menu at the top right, then send the task again.",
+    zh: "{provider} 拒绝了当前 API Key。请在右上角账号菜单中更新 API Key，然后重新发送任务。",
   },
   "task.apiErrorAuthOwnKey": {
-    en: "{provider} rejected the API key you provided. update it in the model menu at the top right.",
-    zh: "{provider} 拒绝了您提供的 API Key。请在右上角模型菜单中更新 API Key。",
+    en: "{provider} rejected the API key you provided. update it in the account menu at the top right.",
+    zh: "{provider} 拒绝了您提供的 API Key。请在右上角账号菜单中更新 API Key。",
   },
   "task.apiErrorBalanceTitle": { en: "model balance is insufficient", zh: "模型余额不足" },
   "task.apiErrorBalance": {
@@ -614,7 +649,7 @@ const messages = {
   },
   "task.apiErrorModelNotActivated": {
     en: "the selected model is not enabled for the current {provider} account. this task has stopped and will not retry automatically. enable the model in the provider console, or switch to an enabled model and send the task again.",
-    zh: "当前 {provider} 账号尚未开通所选模型。本次任务已停止，不会自动重试。请先在模型服务商控制台开通该模型，或在右上角模型菜单切换到已开通的模型后重新发送。",
+    zh: "当前 {provider} 账号尚未开通所选模型。本次任务已停止，不会自动重试。请先在模型服务商控制台开通该模型，或在右上角账号菜单切换到已开通的模型后重新发送。",
   },
   "task.apiErrorModelNotActivatedOwnKey": {
     en: "the account for your {provider} API key does not have the selected model enabled. this task has stopped and will not retry automatically. enable the model in the provider console, or use an enabled model or API key and send the task again.",
@@ -665,11 +700,20 @@ const messages = {
     zh: "socai 内置模型无需 API Key，注册账号即可免费领取 {points} 点额度，继续当前任务。",
   },
   "task.apiErrorSwitchManagedHint": {
-    en: "or switch to socai's built-in model in the model menu, which runs on account points without an API key.",
-    zh: "也可以在模型菜单中切换到 socai 内置模型，使用账号点数、无需 API Key。",
+    en: "or switch to socai's built-in model in the account menu, which runs on account points without an API key.",
+    zh: "也可以在账号菜单中切换到 socai 内置模型，使用账号点数、无需 API Key。",
   },
 
+  "artifact.intermediate": { en: "Intermediate files ({count})", zh: "中间文件（{count}）" },
   "artifact.listAria": { en: "generated files", zh: "生成的文件" },
+  "artifact.more": { en: "More", zh: "更多" },
+  "artifact.moreAria": { en: "More options for {name}", zh: "{name} 的更多操作" },
+  "artifact.openInFinder": { en: "Open in Finder", zh: "在访达中显示" },
+  "artifact.revealFailed": { en: "Could not show file in Finder", zh: "无法在访达中显示文件" },
+  "artifact.saveAs": { en: "Save As", zh: "另存为" },
+  "artifact.saving": { en: "Saving…", zh: "保存中…" },
+  "artifact.savedToDownloads": { en: "Saved to Downloads", zh: "已保存到下载目录" },
+  "artifact.saveFailed": { en: "Could not save file", zh: "保存失败" },
   "artifact.download": { en: "download", zh: "下载" },
   "artifact.downloading": { en: "downloading…", zh: "下载中…" },
   "artifact.downloadFailed": { en: "retry download", zh: "重试下载" },
@@ -761,17 +805,22 @@ const messages = {
   "feishu.retry": { en: "try again", zh: "重试" },
   "feishu.close": { en: "close", zh: "关闭" },
 
+  "platform.sources": { en: "sources", zh: "平台" },
+  "platform.select": { en: "research platforms (select one or more)", zh: "研究平台（可多选，至少选择一个）" },
+  "platform.auto": { en: "Auto", zh: "自动选择" },
+  "platform.xhs": { en: "Xiaohongshu", zh: "小红书" },
+  "platform.dy": { en: "Douyin", zh: "抖音" },
   "task.hero": {
     en: "what should socai research?",
     zh: "想让 socai 研究什么？",
   },
   "task.lede": {
-    en: "start a one-shot browser task. socai opens a temporary chrome tab, runs the agent, saves the result, then closes the tab.",
-    zh: "启动一次性浏览器任务。socai 会打开临时 chrome 标签页、运行智能体、保存结果，然后关闭标签页。",
+    en: "find evidence-backed answers across social platforms.",
+    zh: "从社交平台的信息中，找到有依据的答案。",
   },
   "task.addKeyHint": {
-    en: "add an api key in the model menu (top right) to run.",
-    zh: "在右上角模型菜单中添加 api key 后即可运行。",
+    en: "add an api key in the account menu (top right) to run.",
+    zh: "在右上角账号菜单中添加 api key 后即可运行。",
   },
   "task.agentPlaceholder": {
     en: "tell socai what you want researched…",
@@ -780,8 +829,9 @@ const messages = {
   "task.today": { en: "today", zh: "今天" },
   "task.yesterday": { en: "yesterday", zh: "昨天" },
 
-  "note.seen": { en: "notes the agent saw", zh: "智能体看过的笔记" },
+  "note.seen": { en: "posts the agent saw", zh: "智能体看过的帖子" },
   "note.openOriginal": { en: "open original ↗", zh: "查看原文 ↗" },
+  "note.imageUnavailable": { en: "image unavailable", zh: "图片暂不可用" },
   "note.videoUnavailable": { en: "video unavailable", zh: "视频不可用" },
   "note.noMedia": { en: "no media", zh: "无媒体" },
   "note.likes": { en: "likes", zh: "赞" },
@@ -1236,6 +1286,7 @@ export function taskStatusLabel(status: TaskStatusKey): string {
 export function formatTaskInterruptionMessage(message: string): string {
   const appClosed = "app was closed before this task finished";
   const normalized = message.trim().toLowerCase();
+  if (normalized === "instagram_login_required") return t("task.instagramLogin");
   if (normalized === appClosed || normalized === `[task interrupted: ${appClosed}]`) {
     return t("task.interruptedAppClosed");
   }

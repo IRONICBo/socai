@@ -1,4 +1,5 @@
 (function () {
+  const browserAction = typeof socaiAction === "function" ? socaiAction : async (perform) => perform();
   function text(node) {
     return (node && (node.innerText || node.textContent) || '').replace(/\s+/g, ' ').trim();
   }
@@ -71,9 +72,11 @@
 
   function pageState() {
     const bodyText = text(document.body);
-    const signedIn = !!document.querySelector(
-      'a[href*="/user/self"] img, [data-e2e="live-avatar"] img'
-    );
+    // The header links the signed-in account's avatar to /user/self. The other
+    // /user/self links (side nav, account menu) are in every session and hold
+    // icons, not images. [data-e2e="live-avatar"] is on every avatar, the
+    // viewed author's included, so it says nothing about the session.
+    const signedIn = !!document.querySelector('a[href*="/user/self"] img');
     const inputs = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"], [role="searchbox"]'))
       .filter(visible)
       .slice(0, 8)
@@ -117,15 +120,27 @@
     };
   }
 
-  function searchInput() {
-    const candidates = [
+  const SEARCH_INPUT_SELECTORS = [
       '[data-e2e="searchbar-input"]',
       'input[placeholder*="搜索"]',
       'textarea[placeholder*="搜索"]',
       '[contenteditable="true"][data-e2e*="search"]',
       '[role="searchbox"]',
-    ];
-    const input = candidates.flatMap((selector) => Array.from(document.querySelectorAll(selector))).find(visible);
+  ];
+
+  function findSearchInput() {
+    for (const selector of SEARCH_INPUT_SELECTORS) {
+      const input = Array.from(document.querySelectorAll(selector)).find((candidate) => {
+        if (!visible(candidate) || candidate.getAttribute('aria-hidden') === 'true') return false;
+        return parseFloat(window.getComputedStyle(candidate).opacity || '1') >= 0.1;
+      });
+      if (input) return input;
+    }
+    return null;
+  }
+
+  function searchInput() {
+    const input = findSearchInput();
     if (!input) {
       return { ok: false, error: 'search_input_not_found', state: pageState() };
     }
@@ -138,6 +153,27 @@
       placeholder: input.getAttribute('placeholder') || '',
       value: input.value || text(input),
     };
+  }
+
+  function selectSearchInput() {
+    const input = findSearchInput();
+    if (!input) return { ok: false, error: 'search_input_not_found' };
+    input.focus();
+    let value = '';
+    if (input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement) {
+      value = String(input.value || '');
+      input.setSelectionRange(0, value.length);
+    } else if (input.isContentEditable) {
+      value = String(input.textContent || '');
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    } else {
+      return { ok: false, error: 'unsupported_search_input' };
+    }
+    return { ok: true, value };
   }
 
   function setNativeValue(el, value) {
@@ -154,10 +190,10 @@
     const query = String((arg && arg.query) || '').trim();
     const loc = searchInput();
     if (!loc.ok) return loc;
-    const input = document.elementFromPoint(loc.input.x, loc.input.y);
-    const target = input && (input.matches('input, textarea, [contenteditable="true"]')
-      ? input
-      : input.closest('input, textarea, [contenteditable="true"]'));
+    // Resolve the same visible DOM input directly. A full-page login overlay
+    // can make elementFromPoint return the overlay even while the header
+    // search input remains present and focusable underneath it.
+    const target = findSearchInput();
     if (!target) {
       return { ok: false, error: 'search_input_target_missing', loc };
     }
@@ -268,26 +304,59 @@
     return parts.reduce((total, part) => total * 60 + part, 0);
   }
 
-  function statText(selectors, labels, root) {
-    const scope = root && root.querySelectorAll ? root : document;
-    const node = firstVisibleWithin(scope, selectors);
-    if (node) return text(node).replace(/^(点赞|评论|分享|收藏|播放)\s*/, '');
-    const body = text(scope);
-    for (const label of labels) {
-      const after = body.match(new RegExp(`${label}\\s*([0-9.,]+(?:万|w|W|k|K)?)`));
-      if (after) return after[1];
-      const before = body.match(new RegExp(`([0-9.,]+(?:万|w|W|k|K)?)\\s*${label}`));
-      if (before) return before[1];
+  // The action bar that carries the count hooks is display:none outside the
+  // immersive player, so it is read without a visibility filter, and only
+  // inside the work's own player: a page-wide lookup can read another work.
+  // A zero count is drawn as the bare label (收藏, 分享); only a number is a value.
+  function statCount(player, selector) {
+    const value = text(player && player.querySelector(selector));
+    return /^\d[\d.,]*(?:万|亿|[wWkKmMbB])?\+?$/.test(value) ? value : '';
+  }
+
+  // The detail page prints 发布时间 in the browser's own time zone, so the same
+  // work shows a different calendar day on a remote browser. Report the instant
+  // in Beijing time, the zone Douyin dates are quoted in.
+  function publishTime(videoId) {
+    const raw = text(firstVisible(['[data-e2e="detail-video-publish-time"]']))
+      .replace(/^发布时间\s*[:：]\s*/, '');
+    const parts = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})$/);
+    if (!parts) return raw;
+    const [year, month, day, hour, minute] = parts.slice(1).map(Number);
+    const local = new Date(year, month - 1, day, hour, minute);
+    let instant = local.getTime();
+    if (Number.isNaN(instant)) return raw;
+    // In the hour a clock falls back, a wall time names two instants and Date
+    // takes the first. A work is created before it is published, so the
+    // creation second in its id rules the first one out when it is too early.
+    const fallBack = (new Date(instant + 3 * 3600 * 1000).getTimezoneOffset() - local.getTimezoneOffset()) * 60 * 1000;
+    const second = new Date(instant + fallBack);
+    if (fallBack > 0 && second.getHours() === hour && second.getMinutes() === minute) {
+      const created = /^\d+$/.test(videoId) ? Number(BigInt(videoId) >> 32n) * 1000 : NaN;
+      if (!(created < instant + fallBack + 60 * 1000)) return raw;
+      if (created >= instant + 60 * 1000) instant += fallBack;
     }
-    return '';
+    return `${new Date(instant + 8 * 3600 * 1000).toISOString().slice(0, 19)}+08:00`;
+  }
+
+  // The share-card meta is the only node that names this work's cover. Player
+  // <img> nodes are avatars and next-video thumbnails.
+  function shareCardCover(videoId) {
+    const frameId = (metaContent('lark:url:video_iframe_url').match(/\/light\/([^/?#]+)/) || [])[1] || '';
+    return videoId && frameId === videoId ? metaContent('lark:url:video_cover_image_url') : '';
   }
 
   function allowedMediaUrl(raw) {
+    const value = String(raw || '').trim();
+    if (!value || /^(data|blob):/i.test(value)) return '';
     try {
-      const url = new URL(raw, location.href);
+      const url = new URL(value, location.href);
       if (url.protocol !== 'https:' || url.username || url.password || url.port) return '';
       if (url.pathname.toLowerCase().endsWith('.m3u8')) return '';
       const host = url.hostname.toLowerCase();
+      const sitePage = host === 'douyin.com' || host === 'www.douyin.com' || host === 'm.douyin.com';
+      if (sitePage && !/mime_type=video|\.mp4(?:[?#]|$)|\/aweme\/v1\/play|\/video\/tos\//i.test(`${url.pathname}${url.search}`)) {
+        return '';
+      }
       const suffixes = [
         'douyinvod.com', 'douyinpic.com', 'douyin.com', 'byteimg.com',
         'zjcdn.com', 'bytecdn.cn', 'snssdk.com', 'pstatp.com', 'volccdn.com',
@@ -344,6 +413,28 @@
       source_urls: candidates.filter((item) => item.kind === 'video').map((item) => item.url),
       candidates,
     };
+  }
+
+  function httpsCover(img) {
+    const found = [];
+    const push = (raw) => {
+      const value = String(raw || '').trim();
+      if (!value || /^(data|blob):/i.test(value)) return;
+      try {
+        const url = new URL(value, location.href);
+        if (url.protocol === 'https:' && !found.includes(url.href)) found.push(url.href);
+      } catch (_) {}
+    };
+    const nodes = img ? [img, ...Array.from((img.parentElement || img).querySelectorAll('img, source'))] : [];
+    for (const node of nodes) {
+      push(node.currentSrc);
+      push(node.getAttribute('src'));
+      push(node.getAttribute('data-src'));
+      for (const part of (node.getAttribute('srcset') || '').split(',')) {
+        push(part.trim().split(/\s+/)[0]);
+      }
+    }
+    return found[0] || '';
   }
 
   function videoCards(arg) {
@@ -432,7 +523,8 @@
         comments: '',
         shares: '',
         views: '',
-        cover_url: normUrl((img && (img.currentSrc || img.src)) || ''),
+        cover_url: httpsCover(img),
+        video_url: allowedMediaUrl((card.querySelector('video') && (card.querySelector('video').currentSrc || card.querySelector('video').src)) || ''),
         duration_seconds: durationSeconds(duration),
         position: cards.length,
       });
@@ -531,14 +623,9 @@
     if (video && video.paused && video.src && video.src.startsWith('blob:')) {
       video.play().catch(() => {});
     }
-    const coverNode = firstVisible([
-      'img[elementtiming="lcp_ele"]',
-      '[data-e2e="detail-video-player"] img',
-      '[class*="player"] img',
-    ]);
-    const cover = normUrl((video && video.poster) ||
-      (coverNode && (coverNode.currentSrc || coverNode.src)) || '');
+    const cover = normUrl((video && video.poster) || shareCardCover(state.video_id));
     const media = collectVideoInfo(video, cover);
+    const actionBar = video && video.closest('[data-e2e="player-container"]');
     const hashtagSet = new Set();
     for (const match of description.matchAll(/#([^#\s]+)/g)) hashtagSet.add(match[1]);
     for (const link of (detailRoot || document).querySelectorAll('a[href*="/search/"]')) {
@@ -553,16 +640,16 @@
       title,
       description,
       hashtags: Array.from(hashtagSet).slice(0, 30),
-      created_at: text(firstVisible(['[data-e2e="video-create-time"]', 'time', '[class*="create-time"]'])),
+      created_at: publishTime(state.video_id),
       author: text(authorLink) || text(authorTextLink) || (authorAvatar && authorAvatar.alt || '') || structuredAuthor.name ||
         text(firstVisible(['[data-e2e="video-author-name"]', '[class*="author-name"]'])),
       author_id: authorIdFromUrl(authorUrl),
       author_url: authorUrl,
-      likes: statText(['[data-e2e="like-count"]', '[class*="like-count"]'], ['点赞'], detailRoot),
-      comments_count: statText(['[data-e2e="comment-count"]', '[class*="comment-count"]'], ['评论'], detailRoot),
-      shares: statText(['[data-e2e="share-count"]', '[class*="share-count"]'], ['分享'], detailRoot),
-      favorites: statText(['[data-e2e="collect-count"]', '[class*="collect-count"]'], ['收藏'], detailRoot),
-      views: statText(['[data-e2e="view-count"]', '[class*="view-count"]'], ['播放'], detailRoot),
+      likes: statCount(actionBar, '[data-e2e="video-player-digg"]'),
+      comments_count: statCount(actionBar, '[data-e2e="feed-comment-icon"]'),
+      shares: statCount(actionBar, '[data-e2e="video-player-share"]'),
+      favorites: statCount(actionBar, '[data-e2e="video-player-collect"]'),
+      views: '',
       duration_seconds: video ? Math.round(Number(video.duration) || 0) : 0,
       cover_url: cover,
       video: media,
@@ -670,7 +757,7 @@
       if (!visible(control) || control.disabled) continue;
       const label = `${text(control)} ${control.getAttribute('aria-label') || ''}`.trim();
       if (!expandPattern.test(label)) continue;
-      control.click();
+      await browserAction(() => control.click());
       clicked += 1;
       if (clicked >= 6) break;
     }
@@ -684,16 +771,46 @@
     if (!scrollable || scrollable === document) scrollable = document.scrollingElement || document.documentElement;
     const beforeY = scrollable.scrollTop || window.scrollY;
     const step = Math.max(360, Math.floor((scrollable.clientHeight || window.innerHeight) * 0.8));
-    if (typeof scrollable.scrollBy === 'function') {
-      scrollable.scrollBy({ top: step, left: 0, behavior: 'auto' });
-    } else {
-      scrollable.scrollTop = beforeY + step;
-    }
+    await browserAction(() => {
+      if (typeof scrollable.scrollBy === 'function') {
+        scrollable.scrollBy({ top: step, left: 0, behavior: 'auto' });
+      } else {
+        scrollable.scrollTop = beforeY + step;
+      }
+    });
     await new Promise((resolve) => setTimeout(resolve, 500));
     const after = commentTreeCount(comments({ limit: 999 }));
     const y = scrollable.scrollTop || window.scrollY;
     const atEnd = y + (scrollable.clientHeight || window.innerHeight) >= scrollable.scrollHeight - 8;
     return { ok: true, before, after, clicked, grew: after > before, y, at_end: clicked === 0 && atEnd };
+  }
+
+  // The works tab shows an in-place message with a 刷新 control ("服务异常，
+  // 重新刷新拉取数据") in place of cards when the list request comes back as
+  // HTTP 200 with no body, which is how Douyin turns a session away.
+  function authorPostsFailure() {
+    const grid = document.querySelector('[data-e2e="user-post-list"]');
+    if (!grid || cardNodes(grid).length) return null;
+    const control = Array.from(grid.querySelectorAll('span'))
+      .find((node) => node.children.length === 0 && text(node) === '刷新');
+    return control ? { control, message: text(control.parentElement) } : null;
+  }
+
+  async function refreshAuthorPosts() {
+    const failure = authorPostsFailure();
+    if (!failure) return { ok: false, error: 'refresh_control_not_found' };
+    // The login panel covers the grid in a logged-out session, so a pointer
+    // click at the control's coordinates would land on the panel instead.
+    await browserAction(() => failure.control.click());
+    return { ok: true };
+  }
+
+  // A logged-out session mounts the login panel and keeps a 登录 button in the
+  // page header; both are gone once an account is signed in.
+  function loggedOut() {
+    if (document.querySelector('#login-panel-new')) return true;
+    return Array.from(document.querySelectorAll('header button'))
+      .some((button) => /^(登录|Log ?in)$/i.test(text(button)));
   }
 
   function authorState() {
@@ -711,6 +828,7 @@
       '[data-e2e="user-bio"], [data-e2e="user-post-list"], [data-e2e="user-info"], [data-e2e="user-detail"], [class*="user-info"], [class*="userInfo"]'
     );
     const hasProfile = displayName.length > 0 && hasProfileEvidence;
+    const postsFailure = authorPostsFailure();
     return {
       ok: !!authorId && hasProfile,
       site: 'dy',
@@ -721,6 +839,101 @@
       login_required: loginBlocked(hasProfile),
       challenge_required: challengeRequired(),
       unavailable: /用户不存在|账号已注销|页面不存在/.test(bodyText),
+      logged_out: loggedOut(),
+      posts_error: postsFailure ? postsFailure.message : '',
+    };
+  }
+
+  // Douyin draws emoji as <img alt="♌"> nodes, which innerText leaves out.
+  function textWithEmoji(node, skip) {
+    const walk = (current) => Array.from(current.childNodes).map((child) => {
+      if (child === skip) return '';
+      if (child.nodeType === 3) return child.nodeValue || '';
+      if (child.nodeType !== 1) return '';
+      return child.tagName === 'IMG' ? (child.getAttribute('alt') || '') : walk(child);
+    }).join('');
+    return node ? walk(node).replace(/\s+/g, ' ').trim() : '';
+  }
+
+  // The profile route is server-rendered from a `self.__pace_f.push([1,
+  // "<id>:<json>"])` chunk that holds the author record. It is the one place
+  // on the page with the whole bio: the header joins the lines, cuts the text
+  // at 30 characters, and only shows the rest on hover.
+  function embeddedAuthorBio(authorId) {
+    const find = (value, depth) => {
+      if (!value || typeof value !== 'object' || depth > 8) return null;
+      if (value.secUid === authorId) return value;
+      for (const child of Object.values(value)) {
+        const found = find(child, depth + 1);
+        if (found) return found;
+      }
+      return null;
+    };
+    for (const script of document.querySelectorAll('script')) {
+      const source = script.textContent || '';
+      if (!authorId || !source.startsWith('self.__pace_f.push(') || !source.includes(authorId)) continue;
+      try {
+        const chunk = JSON.parse(source.slice(source.indexOf('(') + 1, source.lastIndexOf(')')))[1];
+        const record = find(JSON.parse(chunk.slice(chunk.indexOf(':') + 1)), 0);
+        if (record) {
+          // Flight string encoding: "$undefined" is no value, "$$…" is text
+          // that starts with "$", and any other "$…" points at another chunk.
+          const desc = typeof record.desc === 'string' ? record.desc : '';
+          if (desc === '$undefined') return '';
+          if (/^\$[^$]/.test(desc)) return null;
+          return desc.replace(/^\$\$/, '$').replace(/\s+/g, ' ').trim();
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  // Rows of [data-e2e="user-info"] in page order: name (plus the 认证 badge),
+  // counters, the 抖音号 / IP属地 / gender-age line, an optional
+  // 最新作品发布时间 line, the bio when the author wrote one, then entry cards.
+  // Their class names are hashed, so each row is recognized by what it holds.
+  function authorHeader(authorId) {
+    const root = firstVisible(['[data-e2e="user-detail"]']) || document;
+    const info = root.querySelector('[data-e2e="user-info"]');
+    const rows = info ? Array.from(info.children) : [];
+    const metaIndex = rows.findIndex((row) => /^抖音号[:：]/.test(text(row)));
+    const metaLeaves = metaIndex < 0 ? [] : Array.from(rows[metaIndex].querySelectorAll('span'))
+      .filter((node) => node.children.length === 0);
+    const metaValue = (pattern) => {
+      const leaf = metaLeaves.find((node) => pattern.test(text(node)));
+      return leaf ? text(leaf).match(pattern)[1].trim() : '';
+    };
+    // The tag reads "36岁", or 男 / 女 when the age is hidden. A set gender
+    // adds an icon, and only the female glyph is drawn through a mask
+    // (id "woman_svg__a").
+    const tagLeaf = metaLeaves.find((node) => /^(\d{1,3}岁|男|女)$/.test(text(node)));
+    const tag = text(tagLeaf);
+    const icon = tagLeaf ? tagLeaf.parentElement.querySelector('svg') : null;
+    const female = tag === '女' || !!(icon && icon.querySelector('[id^="woman_svg"]'));
+
+    let bio = embeddedAuthorBio(authorId);
+    if (bio === null) {
+      // Without the record, read the row the header shows. Entry cards take
+      // the same slot when there is no bio, and they carry icons.
+      const next = metaIndex < 0 ? [] : rows.slice(metaIndex + 1).filter((row) => row.tagName !== 'P');
+      const bioRow = next.length && !next[0].querySelector('svg') ? next[0] : null;
+      const more = bioRow && Array.from(bioRow.querySelectorAll('span'))
+        .find((node) => node.children.length === 0 && /^(更多|登录后查看更多)$/.test(text(node)));
+      // A cut bio ends in "..." and is followed by a 更多 control.
+      const shown = textWithEmoji(bioRow, more && more.parentElement);
+      bio = /(\.\.\.|…)$/.test(shown) ? shown : textWithEmoji(bioRow);
+    }
+
+    const avatar = info && Array.from(info.parentElement.querySelectorAll('img'))
+      .find((img) => !info.contains(img) && /头像$/.test(img.getAttribute('alt') || ''));
+    return {
+      handle: metaValue(/^抖音号[:：]\s*(\S+)/),
+      ip_location: metaValue(/^IP属地[:：]\s*(.+)$/),
+      gender: female ? 'female' : (tag === '男' || icon) ? 'male' : '',
+      age: (tag.match(/^(\d{1,3})岁$/) || [])[1] || '',
+      bio,
+      avatar_url: httpsCover(avatar),
+      verified: !!(info && info.querySelector('[data-e2e="badge-role-name"]')),
     };
   }
 
@@ -748,13 +961,7 @@
       '[class*="nickname"]',
     ]);
     const displayName = text(nameNode) || metaContent('og:title').replace(/的抖音| - 抖音$/, '').trim();
-    const profileRoot = firstVisible(['[data-e2e="user-detail"]']) || document;
-    const bioNode = firstVisible(['[data-e2e="user-bio"]', '[class*="signature"]', '[class*="user-desc"]']) ||
-      Array.from(profileRoot.querySelectorAll('span')).filter(visible).find((node) => {
-        const value = text(node);
-        return node.children.length === 0 && value.length >= 12 && value !== displayName &&
-          !/^(关注|粉丝|获赞|作品|喜欢|抖音号：|IP属地：)/.test(value);
-      });
+    const header = authorHeader(state.author_id);
     const postGrid = firstVisible([
       '[data-e2e="user-post-list"]',
       '[class*="user-post-list"]',
@@ -770,16 +977,19 @@
     for (const card of cards) {
       if (!card.author) card.author = displayName;
     }
-    const handleMatch = text(profileRoot).match(/抖音号：\s*([^\s]+)/);
     return {
       entity_type: 'author',
       platform: 'douyin',
       author_id: state.author_id,
       display_name: displayName,
-      handle: handleMatch ? handleMatch[1] : '',
+      handle: header.handle,
       url: location.href,
-      bio: text(bioNode) || metaContent('description'),
-      verified: !!document.querySelector('[class*="verified"], [class*="verify"], [aria-label*="认证"]'),
+      avatar_url: header.avatar_url,
+      bio: header.bio,
+      ip_location: header.ip_location,
+      gender: header.gender,
+      age: header.age,
+      verified: header.verified,
       followers: profileStat('粉丝', '[data-e2e="user-info-fans"]'),
       following: profileStat('关注', '[data-e2e="user-info-follow"]'),
       likes: profileStat('获赞', '[data-e2e="user-info-like"]'),
@@ -827,6 +1037,7 @@
   window.SocaiDouyinPageScripts = {
     pageState,
     searchInput,
+    selectSearchInput,
     setSearchInput,
     searchState,
     videoCards,
@@ -837,5 +1048,6 @@
     scrollComments,
     authorState,
     authorProfile,
+    refreshAuthorPosts,
   };
 })();

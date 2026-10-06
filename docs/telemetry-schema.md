@@ -54,6 +54,7 @@ included by default.
 | --- | --- |
 | `SOCAI_TELEMETRY=off` | Disables telemetry for that CLI command request. |
 | `SOCAI_TELEMETRY_QUERY_TEXT=off` | Keeps telemetry enabled but omits `query_text`. |
+| `SOCAI_TELEMETRY_TASK_TEXT=off` | CLI external-agent task registration only: omits the user prompt before IPC and capture. Keeps task correlation. Does not change desktop task text or search query controls. |
 | `SOCAI_TELEMETRY_CHAT_TEXT=off` | Keeps telemetry enabled but omits content from run traces: LLM chat content (`gen_ai.input.messages` / `gen_ai.output.messages` / `gen_ai.system_instructions`) on `chat` spans and note summaries (`socai.notes`) on `execute_tool` spans. |
 
 The off values accepted by the CLI are:
@@ -146,15 +147,16 @@ a filter the proxy enforces). Any new client field reaches Axiom automatically.
 | `query_text_enabled` | boolean | Whether query text was included for this command. |
 | `query_text` | string | Search query text when enabled. Omitted when redacted. |
 | `query_len` | number | Query length in Unicode scalar values. Kept even when text is redacted. |
-| `metadata` | object | Explicit optional CLI parameters only. Defaults are omitted. |
+| `metadata` | object | Privacy-safe shapes of explicit optional CLI parameters. Defaults are omitted. Booleans/numbers retain their values; arbitrary strings, arrays, and objects become lengths/counts. |
 
 Current metadata keys:
 
 | Metadata key | Type | Source CLI flag | Omitted when |
 | --- | --- | --- | --- |
-| `metadata.tab` | string | `search --tab <value>` | `--tab` is not passed or is empty. |
+| `metadata.tab_len` | number | Character length of `search --tab <value>`; the value itself is not sent. | `--tab` is not passed or is empty. |
 | `metadata.num_notes` | number | `search --num-notes <n>` | `--num-notes` is not passed. |
 | `metadata.debug_snapshot` | boolean | `--debug-snapshot` | `--debug-snapshot` is not passed / false. |
+| `metadata.posts_count` | number | Number of entries supplied to a multi-post command; post locators are not sent. | The list is missing or empty. |
 
 ### Duration, status, and safe result metrics
 
@@ -163,7 +165,7 @@ Current metadata keys:
 | `duration_ms` | number | Command runtime in milliseconds. |
 | `outcome` | string | Terminal state: `completed` or `failed` on `socai_tool_call`, and `interrupted` on `socai_tool_call_interrupted`; browser events additionally use `requested` and `disconnected`. |
 | `ok` | boolean | Whether the command returned successfully. |
-| `error` | string | Secret-redacted, first-line command error when `ok=false`; browser failures use a path-free summary. |
+| `error` | string | Secret-redacted, first-line command error when `ok=false`; URL paths, queries, and fragments are replaced by an origin-level marker. |
 | `error_type` | string | Stable failure class when available; interrupted commands use `command_interrupted`, and browser failures use a browser-specific category. |
 | `attempt` | number | Browser connection attempt number on `socai_browser_connect` requested events. |
 | `result_ok` | boolean | Safe `data.ok` result flag when present. |
@@ -173,10 +175,14 @@ Current metadata keys:
 | `notes_count` | number | Count of note result entries when present. |
 | `notes_skipped_count` | number | Count of notes marked skipped when present. |
 | `has_run_dir` | boolean | Whether the command returned a run directory. |
+| `login_detected` | boolean | Whether a login-wait tool verified a signed-in session from the live page. |
+| `login_wait_timed_out` | boolean | Whether a login-wait tool reached its bounded timeout without verifying login. |
+| `remote_browser` | boolean | Whether a login-wait result refers to a hosted remote browser session. |
 | `failure_reason` | string | Semantic failure reason when a tool returns `ok=false`. |
 | `page_error` | string | Error or reason associated with the unexpected page/control diagnostic, for example `not_profile_page` or `search_input_not_found`. |
-| `page_url` | string | Unexpected page URL without query or fragment, so access failures can be identified without reporting XHS tokens. |
-| `page_ocr_text` | string | Secret-redacted OCR from the center 70% when XHS has an unexpected page state or a required page control is missing, capped at 200 Unicode characters. |
+| `page_url` | string | Origin of an unexpected page URL; path, query, fragment, account, and post locators are omitted. |
+| `page_path_depth` | number | Number of non-empty URL path segments, retained without their values. |
+| `page_ocr_text_len` | integer | Character count of OCR captured for an unexpected page state; recognized page text itself is never uploaded. |
 | `page_ocr_region` | string | OCR crop identifier; currently `center_70_percent`. |
 | `page_ocr_truncated` | boolean | Whether the recognized page text exceeded 200 characters. |
 | `page_ocr_error` | string | Best-effort screenshot/OCR failure detail when no page text could be produced. |
@@ -187,6 +193,78 @@ Current metadata keys:
 | `recovery_tool` | string | Agent tool recommended for the recognized blocker; currently `wait_for_rate_limit`. |
 | `waited_seconds` | integer | Actual randomized cooldown duration returned by a wait tool. |
 | `proxy_version` | number | Added by the proxy. Current value: `1`. |
+
+## CLI external-agent task context
+
+External agents begin each new task with the user's original question:
+
+```bash
+socai task begin "Research why consumers repurchase sugar-free tea"
+socai xhs search "sugar-free tea repeat purchase"
+socai dy search "sugar-free tea reviews"
+```
+
+The daemon keeps a **current task** in memory. Each successful `task begin`
+sets a new boundary; subsequent site commands join it automatically. No extra
+parameters or shell environment variables are needed on ordinary commands.
+Registration and site commands share the same FIFO command gate: a begin waits
+for an in-flight command, which retains its original task on all lifecycle
+rows. Multiple agents sharing a daemon share this boundary; the latest begin
+applies to all subsequent commands, regardless of which agent invokes them.
+Use separate `SOCAI_HOME` directories when independent daemon sessions are needed.
+A daemon restart (including idle expiry or replacement after an upgrade) clears
+the current task; register again before continuing. Earlier on-disk per-task
+metadata is not read. There is no implicit recovery from other agent sessions.
+
+For long or multiline prompts, `socai task begin --context-file <path>` accepts
+UTF-8 JSON containing `user_prompt` (string or null when unavailable) and optional
+`agent_host` (short identifier, default `unknown`). `--context-file -` reads
+stdin. Positional input optionally accepts `--agent-host <identifier>`.
+Unknown JSON fields are rejected; input is bounded to 128 KiB. The response is
+JSON with `schema_version: 1`, `task_id`, `task_context_status`, and
+`telemetry_enabled`. The returned ID is for analysis, not a required CLI argument.
+Registration starts/reuses the daemon without connecting Chrome. Only the user
+prompt is collected as task content; there is no generated task summary.
+
+The daemon emits **`socai_cli_task_context`**, `source: cli_daemon`, once per
+registration. Associated tool start, browser, terminal, and interruption events
+carry a snapshot of `task_id`, `agent_host`, `capture_method`, and
+`task_context_status`; they never repeat task text.
+
+| Field | Meaning |
+| --- | --- |
+| `task_id` | UUID shared by CLI commands between task boundaries. Independent of daemon `session_id` and command `request_id`. |
+| `task_context_schema_version` | `1`, on the registration event. |
+| `agent_host` | Explicit caller identifier or `unknown`; not inferred from parent processes. |
+| `capture_method` | Fixed to `agent_reported`; not independently verified host capture. |
+| `task_text` | Supplied `user_prompt`, scrubbed before IPC and capped at 8,000 characters. Registration event only. |
+| `task_text_truncated` | Whether the prompt exceeded the client cap. Present with that text. |
+| `task_context_status` | `provided`: original prompt supplied; `missing`: registered without the original prompt; `disabled`: task content disabled; `not_provided`: no current task in this daemon. |
+
+Join registration and tool events using **`install_id` + `task_id`**. Report
+coverage separately from captured use cases. `provided` describes registration,
+not confirmed remote delivery; telemetry remains best-effort and registration
+events can be lost. Repeating `task begin` is a new task, even for identical text;
+an immediate IPC retry with the same generated ID does not duplicate the event.
+
+Prompt collection is enabled by default. `SOCAI_TELEMETRY_TASK_TEXT=off` removes
+the prompt before IPC and capture while retaining the task boundary and metadata.
+`SOCAI_TELEMETRY=off` suppresses all events for the invocation. Both switches are
+evaluated per invocation, independently of the daemon's startup environment.
+They do not retract earlier events. Search query text and desktop task prompts
+retain their existing controls. Ordinary use requires no settings interaction.
+
+Only correlation metadata is retained in daemon state. Enabled registration
+text appears in the existing local `telemetry/events.jsonl` buffer; no additional
+per-task files are written. The caller owns its JSON input file and can remove
+it after registration. Missing original text does not block research. Invalid
+registration leaves the previous current task unchanged; it does not create a
+new boundary. Older CLIs do not support registration and can still run ordinary
+site commands.
+
+Implementation: `core/src/telemetry/task_context.rs`, `cli/src/task.rs`, and
+`cli/src/daemon.rs`. The existing proxy accepts these scalar fields and the
+`task_text` 8,000-character allowance; no proxy deployment is required.
 
 ## Desktop events
 
@@ -259,14 +337,15 @@ forms back to the agent turn shown in the trace viewer. Neither form includes
 the exported content, document URL/ID, chat ID, or Feishu account/profile.
 
 `socai_tool_call` mirrors the CLI tool trace's argument summary: the tool's
-`query` argument is lifted to `query_text` + `query_len`, a `note_id` argument
-collapses to a `note_id_present` boolean (the raw id is not sent), and any other
-scalar arguments go under `metadata` — with the `tab_label` arg renamed to `tab`
-and empty strings dropped, matching the CLI. Note bodies, comments, and normal
-scraped content are never included. The sole output-text exception is a
-secret-redacted, 200-character OCR excerpt from the center 70% of the viewport
-when XHS lands on an unexpected page or a required page control cannot be
-found; this is accompanied by the page URL with its query and fragment removed.
+`query` argument is lifted to `query_text` + `query_len`; other boolean/number
+arguments go under `metadata`, while strings, arrays, and objects become
+`*_len`, `*_count`, and `*_field_count`. This secure default covers newly-added
+parameters without forwarding note ids, usernames, post locators, comments, or
+other free text. Note bodies, comments, and normal scraped content are never
+included. The sole output-text exception is a secret-redacted, 200-character
+OCR excerpt from the center 70% of the viewport when XHS lands on an unexpected
+page or a required page control cannot be found; its URL is reduced to origin
+and path depth.
 
 Unlike the CLI's `query_text`, **the desktop has no opt-out for `task_text`**: it
 is sent whenever desktop telemetry is enabled. `SOCAI_TELEMETRY=off` is the only
@@ -353,6 +432,9 @@ pipeline for reading what an agent actually did:
   previous LLM call), `gen_ai.output.messages` (that call's full response,
   including reasoning/thinking content and tool calls), and
   `gen_ai.system_instructions` (once per run, again when it changes).
+  Tool-call arguments inside these messages use the same privacy-safe summary
+  as event telemetry instead of the original argument object. Tool-result text
+  remains part of content-bearing chat telemetry and follows the chat-text gate.
 - `execute_tool` spans — the argument summary (query text under the
   `SOCAI_TELEMETRY_QUERY_TEXT` gate), count-only result metrics, and
   `socai.notes`: id/title/caption/stats summaries of notes the tool returned.
@@ -369,9 +451,10 @@ pipeline for reading what an agent actually did:
   `socai.pro_subscribed` when logged in. No device token or server user id is
   included.
 
-Never uploaded, regardless of settings: image bytes/screenshots, Anthropic
-thinking signatures, encrypted reasoning items, and browser cookies/session
-storage. For secrets, every uploaded text field — chat content, the root
+Never uploaded, regardless of settings: raw structured tool arguments (except
+explicitly enabled query text), image bytes/screenshots, Anthropic thinking
+signatures, encrypted reasoning items, and browser cookies/session storage.
+For secrets, every uploaded text field — chat content, the root
 `socai.task_text`, and `query_text` on both pipelines — passes a client-side
 scrubber for secret-shaped values before upload: `sk-`-prefixed api keys,
 JWT-shaped tokens, `Bearer` header values, and sensitive JSON fields
@@ -399,8 +482,8 @@ note summaries. It is **not** a text-free trace: the root span still carries
 `socai.task_text` (only `SOCAI_TELEMETRY=off` suppresses it), and tool spans
 still carry the `socai.query_text` / `socai.metadata` argument summaries.
 Query text has its own gate — `SOCAI_TELEMETRY_QUERY_TEXT=off` — which also
-redacts the `query` argument inside chat tool-call parts (tool *results* can
-still echo the query; removing those requires the chat gate).
+omits query text from the safe summaries inside chat tool-call parts (tool
+*results* can still echo the query; removing those requires the chat gate).
 `SOCAI_TELEMETRY=off` disables the desktop telemetry pipeline entirely,
 including trace upload.
 
@@ -427,8 +510,9 @@ Proxy behavior in `site/api/telemetry.js`:
 
 CLI behavior in `cli/src/daemon.rs`:
 
-- Error summaries are first-line strings capped to 240 characters before proxy
-  sanitization.
+- Error summaries are secret-redacted first-line strings capped to 240
+  characters before proxy sanitization. HTTP(S)/WebSocket URLs retain only the
+  origin plus a `<redacted>` marker.
 - Safe result metrics are counts/booleans only, not raw XHS content.
 
 ## Example: normal `search` trace
@@ -466,7 +550,7 @@ Representative Axiom row after proxy sanitization:
   "query_len": 6,
   "metadata": {
     "num_notes": 12,
-    "tab": "latest"
+    "tab_len": 6
   },
   "duration_ms": 42130,
   "ok": true,

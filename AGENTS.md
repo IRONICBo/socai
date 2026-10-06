@@ -4,10 +4,10 @@ The repo has a Rust core (`core/`), a Rust CLI (`cli/`), and a Tauri 2 desktop
 app (`app/`). The Rust core is the active shared implementation for
 CLI/TUI/Tauri.
 
-Build, run, local-dev workflows, and the reference-docs index live in
-[DEVELOPMENT.md](./DEVELOPMENT.md). The [README](./README.md) is user-facing
-only (CLI install + usage, desktop download); keep developer material out of it
-and in DEVELOPMENT.md instead.
+Install, commands, browser setup, local development, and the reference-docs index
+live in [docs/guide.md](./docs/guide.md). Keep usage and development documentation
+in that guide, with developer workflows under [Local development](./docs/guide.md#local-development).
+The [README](./README.md) is the user-facing product pitch.
 
 ## Engineering rules
 
@@ -16,6 +16,9 @@ and in DEVELOPMENT.md instead.
   without a test. It is fine (and expected) to *update* an existing test when you
   change an API it already covers, but do not create new `#[test]` functions or
   grow `mod tests` on your own initiative.
+- **Add new features and new platforms by following [rsi](./skills/rsi/SKILL.md).**
+  When adding a capability or supporting another site, follow that skill's
+  instructions.
 
 ## Rust core — `core/`
 
@@ -47,7 +50,7 @@ Rules:
 ## Desktop app — `app/`
 
 Stack: Tauri 2.11 (Rust shell) + Vite 6 + vanilla TypeScript (no UI framework).
-Bundle identifier `com.socai.app`. Product name lowercase `socai`.
+Bundle identifier `com.socai.app`.
 
 Layout:
 
@@ -65,11 +68,14 @@ pnpm exec tauri build --bundles app   # → target/release/bundle/macos/socai.ap
 
 Rules:
 
-- **Brand is always lowercase `socai`** — productName, window title, hero text,
-  error strings, comments. No Title Case anywhere.
-- **Design system is monochrome.** Use tokens from `app/src/styles.css`
-  (`--ink-0..9`, `--canvas`, `--fg`, `--line`, etc.). **No accent colors.**
-  Status is filled vs hollow, never hue.
+- **Monochrome applies only to the desktop app's primary UI** — navigation,
+  layout surfaces, typography, and core controls. Use tokens from
+  `app/src/styles.css` (`--ink-0..9`, `--canvas`, `--fg`, `--line`, etc.) for
+  those elements. This rule does not apply to the website or other surfaces.
+  Brand/platform icons, media, data visualizations, and supporting content may
+  use color when it makes them easier to recognize and understand. Prioritize
+  user comprehension over visual uniformity; never use color alone to convey
+  status (also use text, shape, or filled/hollow treatment).
 - **Hairlines, not shadows.** `--line` (#e5e5e5) carries all structural
   separation. `--shadow-pop` is reserved for popovers only.
 - **Use the type-scale classes** — `.t-display`, `.t-h1`, `.t-h2`, `.t-h3`,
@@ -102,6 +108,31 @@ Gotchas:
 - The Vite dev server ignores `src-tauri/**` (see `vite.config.ts`) so Rust
   file changes don't cause spurious frontend reloads. Rust edits trigger a
   full Tauri shell restart instead.
+
+## WorkBuddy ecosystem packages — `plugins/workbuddy/`
+
+Skill and expert packages published to the WorkBuddy / CodeBuddy marketplace.
+Layout, packaging, and upload paths are documented in
+[`plugins/workbuddy/README.md`](./plugins/workbuddy/README.md).
+
+Rules:
+
+- **The Xiaohongshu skill source of truth is `plugins/workbuddy/xiaohongshu-socai/`.**
+  `xiaohongshu-research-expert/skills/` is a build artifact injected by
+  `build.sh` — never edit it by hand. The multi-platform WorkBuddy skill has
+  its own source at `plugins/workbuddy/socai-social-research/`.
+- **Run `plugins/workbuddy/build.sh` after any skill change.** It validates
+  frontmatter / `plugin.json` against the open-platform spec before zipping, so
+  a spec violation fails the build instead of failing upload. Three zips are
+  produced: the Xiaohongshu skill, the multi-platform skill, and the expert
+  (with the Xiaohongshu skill inlined).
+- Expert display copy has hard constraints the validator enforces:
+  `displayDescription.zh` must be 40–50 characters, `tags` and `quickPrompts`
+  must each have exactly 3 entries, `defaultInitPrompt` must equal
+  `quickPrompts[0]`, and the avatar must be ≤500KB.
+- Keep the expert's product category at `05-MarketingGrowth`. Do not move it to
+  `02-Engineering` — WorkBuddy's audience is office knowledge workers, and that
+  category gets no traffic.
 
 ## WeChat group QR maintenance
 

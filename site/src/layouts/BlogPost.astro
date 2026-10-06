@@ -30,7 +30,7 @@ const siteUrl = "https://socai.io";
 const canonicalUrl = `${siteUrl}${Astro.url.pathname.replace(/\/$/, "")}`;
 const socialImageUrl = ogImage
     ? `${siteUrl}${ogImage}`
-    : `${siteUrl}/social-card.png`;
+    : `${siteUrl}/social-card.png?v=2`;
 const defaultLanguage = isZh ? "zh" : "en";
 const defaultHtmlLanguage = isZh ? "zh-CN" : "en";
 const dateIso = date ? new Date(date).toISOString().slice(0, 10) : undefined;

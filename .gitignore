@@ -7,6 +7,14 @@ __pycache__/
 !.claude/skills/
 !.claude/skills/**
 
+# Cursor local hooks and settings
+/.cursor/
+
+# WorkBuddy local agent memory (per-project notes, never commit)
+# Root-scoped: only the repo-root .workbuddy/ (agent memory) is ignored.
+# plugins/workbuddy/ is committed source — different path, unaffected.
+/.workbuddy/
+
 # macOS
 .DS_Store
 **/.DS_Store
@@ -28,6 +36,13 @@ local/
 
 # Rust workspace
 target/
+
+# Packaged marketplace uploads (regenerate with plugins/workbuddy/build.sh)
+plugins/workbuddy/dist/
+plugins/socai-social-research/dist/
+
+# Skill deliverables written into whatever workspace the skill runs in
+socai-reports/
 
 # Parity scratch runs (commit fixtures intentionally, not ad-hoc smoke runs)
 parity/phase1_smoke/

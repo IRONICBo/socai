@@ -1,0 +1,17 @@
+---
+import '../styles/creator-showcase.css';
+interface Props { id: string; platform: string; icon: string; title: string; prompt: string; language?: 'en' | 'zh'; steps: { label: string; address: string }[]; }
+const { id, platform, icon, title, prompt, steps, language = 'en' } = Astro.props;
+const last = steps.length - 1;
+const order = [last, ...steps.slice(0,last).map((_,i)=>i)];
+---
+<section class="creator-showcase" id={id} data-showcase-language={language} aria-labelledby={`${id}-title`} lang={language === 'zh' ? 'zh-CN' : 'en'}>
+  <header class="cs-heading"><img src={icon} width="26" height="26" alt={platform}/><h2 id={`${id}-title`}>{title}</h2></header>
+  <div class="cs-task"><span class="cs-you">{language === 'zh' ? '你' : 'You'}</span><p><strong>{prompt}</strong></p></div>
+  <div class="cs-workflow cs-unified" data-creator-workflow aria-label={`${platform} ${language === 'zh' ? '工作流示例' : 'workflow example'}`}>
+    <div class="cs-browser-bar"><span class="cs-window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="cs-address" data-cs-address>{steps[last].address}</span></div>
+    <nav class="cs-steps" aria-label={language === 'zh' ? '查看结果与过程' : 'Results and workflow'}>{order.map(index => <button type="button" data-cs-step={index} data-address={steps[index].address} aria-pressed={index === last}>{steps[index].label}</button>)}</nav>
+    <slot />
+  </div>
+</section>
+<script>import '../scripts/creator-showcase';</script>

@@ -8,7 +8,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::agent::compaction::truncate;
@@ -18,7 +18,7 @@ use crate::agent::tool::{
 use crate::agent::{make_run_dir, Backend as LlmProvider, Tool, ToolContext, ToolResult};
 use crate::cdp::{with_snapshot_recording, PageSession};
 use crate::media::{
-    background_media_run_is_cancelled, background_video_download_semaphore,
+    background_media_is_stopped, background_video_download_semaphore,
     current_background_media_generation, emit_background_media_event, ocr_diagnostics, ocr_warm_up,
     reserve_background_video_download, subscribe_background_media_cancellation, timing_delta,
     wait_for_background_media_cancellation, BackgroundMediaEvent, MediaProcessor, TimingSnapshot,
@@ -140,6 +140,8 @@ pub fn xhs_tools_with_llm_provider(
             always_ocr: false,
             asr_enabled,
         }),
+        Arc::new(AlbumTool { page: page.clone() }),
+        Arc::new(AlbumsTool { page: page.clone() }),
         Arc::new(WaitForLoginTool { page: page.clone() }),
         Arc::new(WaitForRateLimitTool),
         Arc::new(PageStateTool { page }),
@@ -179,6 +181,8 @@ pub fn xhs_macro_tools_with_llm_provider(
             always_ocr: true,
             asr_enabled,
         }),
+        Arc::new(AlbumTool { page: page.clone() }),
+        Arc::new(AlbumsTool { page: page.clone() }),
         Arc::new(CommentTool { page: page.clone() }),
         Arc::new(FollowTool { page: page.clone() }),
         Arc::new(WaitForLoginTool { page }),
@@ -360,7 +364,7 @@ pub static XHS_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
             name: "author",
             tool_name: "author_scan",
             about: "Open a Xiaohongshu author's profile and print their header (avatar, bio, \
-                    xhs id, IP location, follower/following/like counts) plus their notes. By default \
+                    xhs id, IP location, gender, follower/following/like counts) plus their notes. By default \
                     opens each note for its body + top comments; with --preview, returns only \
                     the note cards.",
             args: &[
@@ -433,6 +437,40 @@ pub static XHS_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
             // can take a while; give it the longer budget.
             slow: SlowWhen::Always,
             run: run_author_scan,
+        },
+        SiteCommand {
+            name: "albums",
+            tool_name: "albums",
+            about: "List the signed-in account's Xiaohongshu favorites albums from 我 → 收藏 → 专辑.",
+            args: &[],
+            slow: SlowWhen::Always,
+            run: run_albums,
+        },
+        SiteCommand {
+            name: "album",
+            tool_name: "album",
+            about: "Open one of your Xiaohongshu favorites albums from 我 → 收藏 → 专辑 \
+                    and return its note cards.",
+            args: &[
+                CommandArg {
+                    key: "album",
+                    long: None,
+                    value_name: "ALBUM",
+                    help: "Album name shown on the 专辑 tab.",
+                    required: true,
+                    kind: ArgKind::Str,
+                },
+                CommandArg {
+                    key: "num_notes",
+                    long: Some("num-notes"),
+                    value_name: "N",
+                    help: "Maximum notes to return. Omit to collect until the album stops loading.",
+                    required: false,
+                    kind: ArgKind::Int,
+                },
+            ],
+            slow: SlowWhen::Always,
+            run: run_album,
         },
         SiteCommand {
             name: "comment",
@@ -753,6 +791,56 @@ fn run_search(
             progress,
         )
         .await
+    })
+}
+
+fn run_albums(
+    page: Arc<PageSession>,
+    _args: Value,
+    debug_snapshot: bool,
+    _progress: Option<ToolProgressSender>,
+) -> BoxFuture<Value> {
+    Box::pin(async move {
+        let run_dir = make_run_dir("xhs_albums");
+        let mut data = with_snapshot_recording(&page, &run_dir, debug_snapshot, async {
+            XhsPageRuntime::new(&page).list_favorite_albums().await
+        })
+        .await?;
+        annotate_remote_login_gate(&page, &mut data);
+        Ok(json!({
+            "command": "albums",
+            "run_dir": run_dir.to_string_lossy(),
+            "data": data,
+        }))
+    })
+}
+
+fn run_album(
+    page: Arc<PageSession>,
+    args: Value,
+    debug_snapshot: bool,
+    _progress: Option<ToolProgressSender>,
+) -> BoxFuture<Value> {
+    Box::pin(async move {
+        let album = required_string(&args, "album")?;
+        let num_notes = args
+            .get("num_notes")
+            .and_then(Value::as_i64)
+            .filter(|n| *n > 0)
+            .map(|n| n as usize);
+        let run_dir = make_run_dir("xhs_album");
+        let mut data = with_snapshot_recording(&page, &run_dir, debug_snapshot, async {
+            XhsPageRuntime::new(&page)
+                .collect_favorite_album(&album, num_notes)
+                .await
+        })
+        .await?;
+        annotate_remote_login_gate(&page, &mut data);
+        Ok(json!({
+            "command": "album",
+            "run_dir": run_dir.to_string_lossy(),
+            "data": data,
+        }))
     })
 }
 
@@ -1163,6 +1251,16 @@ const REMOTE_LOGIN_NOTE: &str = "the hosted browser's shared login is unavailabl
      is temporarily unavailable and to try again later; do NOT ask them to scan a QR \
      and do NOT call wait_for_login.";
 
+const INTERACTIVE_REMOTE_LOGIN_NOTE: &str = "the user can control this cloud browser's \
+     live view. Call wait_for_login and keep the current browser session open while the \
+     user signs in; continue the original tool when login is detected.";
+
+fn interactive_remote_login_enabled() -> bool {
+    std::env::var("SOCAI_REMOTE_LOGIN_MODE")
+        .ok()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("interactive"))
+}
+
 /// Mark a `reason: login_required` result as coming from a remote hosted
 /// browser so the agent reports a socai-side outage instead of starting the
 /// local login protocol. No-op for local browsers or other failure reasons.
@@ -1173,8 +1271,13 @@ fn annotate_remote_login_gate(page: &PageSession, value: &mut Value) {
         return;
     }
     if let Some(obj) = value.as_object_mut() {
-        obj.insert("remote_browser".into(), Value::Bool(true));
-        obj.insert("note".into(), json!(REMOTE_LOGIN_NOTE));
+        if interactive_remote_login_enabled() {
+            obj.insert("cloud_login_supported".into(), Value::Bool(true));
+            obj.insert("note".into(), json!(INTERACTIVE_REMOTE_LOGIN_NOTE));
+        } else {
+            obj.insert("remote_browser".into(), Value::Bool(true));
+            obj.insert("note".into(), json!(REMOTE_LOGIN_NOTE));
+        }
     }
 }
 
@@ -2310,7 +2413,7 @@ fn spawn_background_video_downloads(
         .background_media_generation
         .unwrap_or_else(current_background_media_generation);
     let run_dir = ctx.run_dir.to_string_lossy().into_owned();
-    if background_media_run_is_cancelled(&run_dir) {
+    if background_media_is_stopped(generation, &run_dir) {
         return;
     }
 
@@ -2417,7 +2520,7 @@ fn spawn_background_video_downloads(
                     Ok(permit) => permit,
                     Err(_) => return,
                 },
-                _ = wait_for_background_media_cancellation(&run_dir, &mut cancellation) => {
+                _ = wait_for_background_media_cancellation(generation, &run_dir, &mut cancellation) => {
                     if set_recorded_video_status(&ctx, &note_id, None, None) {
                         emit_background_note_update(&ctx, &note_id);
                     }
@@ -2427,7 +2530,7 @@ fn spawn_background_video_downloads(
             let download = media.download_video_file(&video, &note_id, &title, &referer);
             let completed_video = tokio::select! {
                 video = download => video,
-                _ = wait_for_background_media_cancellation(&run_dir, &mut cancellation) => {
+                _ = wait_for_background_media_cancellation(generation, &run_dir, &mut cancellation) => {
                     if set_recorded_video_status(&ctx, &note_id, None, None) {
                         emit_background_note_update(&ctx, &note_id);
                     }
@@ -2435,7 +2538,7 @@ fn spawn_background_video_downloads(
                 },
             };
             drop(permit);
-            if background_media_run_is_cancelled(&run_dir) {
+            if background_media_is_stopped(generation, &run_dir) {
                 if set_recorded_video_status(&ctx, &note_id, None, None) {
                     emit_background_note_update(&ctx, &note_id);
                 }
@@ -3624,6 +3727,13 @@ impl Tool for GetNotesTool {
         });
         if !stop_reason.is_empty() {
             payload["reason"] = json!(stop_reason);
+        } else if successful != targets.len() {
+            // Direct-note entries carry detailed local diagnostics, but the
+            // lean result intentionally removes their error text before it is
+            // returned to the model or telemetry. Preserve a stable,
+            // content-free top-level outcome so partial batch failures remain
+            // diagnosable without exposing note data or runtime errors.
+            payload["reason"] = json!("note_read_failed");
         }
         promote_page_diagnostic(&mut payload);
         // Mid-scan blockers surface as a top-level `reason` too; mark login
@@ -4637,10 +4747,38 @@ impl Tool for FollowTool {
         let action_id = receipt.action_id().to_string();
 
         // The receipt transitions above fsync to disk. Re-locate and re-own the
-        // follow control only after that potentially slow work, then dispatch
-        // immediately. A coordinate captured before reservation could now be
-        // an "已关注" toggle (and a second click would unfollow) or a different
-        // element after layout movement.
+        // follow control only after that potentially slow work. Pacing and the
+        // debug snapshot must also finish before the final validation: a
+        // coordinate captured before either delay could become an "已关注"
+        // toggle (and a second click would unfollow) or a different element
+        // after layout movement. The guard keeps the platform action lane
+        // exclusive and dispatches without another wait or snapshot.
+        let prepared_click = match self.page.prepare_pointer_click().await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let (persisted_receipt, receipt_error) =
+                    match store.finish_commit(&action_id, false) {
+                        Ok(receipt) => (Some(receipt), None),
+                        Err(receipt_error) => (None, Some(format!("{receipt_error:#}"))),
+                    };
+                return Ok(json_result(&json!({
+                    "ok": false,
+                    "status": "commit_unknown",
+                    "reason": "click_preparation_failed_after_reservation",
+                    "action_id": action_id,
+                    "note_id": expected_note_id,
+                    "author_id": author_id,
+                    "author_url": author_url,
+                    "interaction": "none",
+                    "platform_api_called": false,
+                    "submit_click_count": 0,
+                    "dispatch_skipped": true,
+                    "preparation_error": format!("{error:#}"),
+                    "receipt_error": receipt_error,
+                    "receipt": persisted_receipt,
+                })));
+            }
+        };
         let dispatch_validation: anyhow::Result<(f64, f64, Value)> = async {
             let page_state = xhs.run_script("pageState", None).await?;
             let login_state = xhs.run_script("loginState", None).await?;
@@ -4679,6 +4817,7 @@ impl Tool for FollowTool {
         let (follow_x, follow_y, dispatch_follow) = match dispatch_validation {
             Ok(validated) => validated,
             Err(error) => {
+                drop(prepared_click);
                 let (persisted_receipt, receipt_error) =
                     match store.finish_commit(&action_id, false) {
                         Ok(receipt) => (Some(receipt), None),
@@ -4702,8 +4841,7 @@ impl Tool for FollowTool {
                 })));
             }
         };
-        let dispatch_error = self
-            .page
+        let dispatch_error = prepared_click
             .click(follow_x, follow_y)
             .await
             .err()
@@ -4937,6 +5075,49 @@ pub struct WaitForLoginTool {
     page: Arc<PageSession>,
 }
 
+/// One human-ready generation per active run. Hosted frontends use this to
+/// wake a login waiter immediately after the user releases browser control;
+/// local/native flows continue to rely on normal polling.
+static LOGIN_RESUME_SIGNALS: OnceLock<
+    Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<u64>>>,
+> = OnceLock::new();
+
+fn login_resume_signals(
+) -> &'static Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<u64>>> {
+    LOGIN_RESUME_SIGNALS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn login_resume_receiver(run_id: &str) -> tokio::sync::watch::Receiver<u64> {
+    let mut signals = login_resume_signals()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    signals
+        .entry(run_id.to_owned())
+        .or_insert_with(|| tokio::sync::watch::channel(0).0)
+        .subscribe()
+}
+
+/// Notify an active `wait_for_login` call that the user says the browser is
+/// ready. The waiter still verifies the live page before it resumes.
+pub fn signal_login_resume(run_id: &str) {
+    let mut signals = login_resume_signals()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let sender = signals
+        .entry(run_id.to_owned())
+        .or_insert_with(|| tokio::sync::watch::channel(0).0);
+    let next = sender.borrow().saturating_add(1);
+    sender.send_replace(next);
+}
+
+/// Release the small per-run signal cell when a host reaches a terminal state.
+pub fn clear_login_resume(run_id: &str) {
+    login_resume_signals()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(run_id);
+}
+
 /// How long `wait_for_login` polls before giving up so the agent can re-prompt.
 const WAIT_FOR_LOGIN_DEFAULT_SECS: i64 = 180;
 const WAIT_FOR_LOGIN_MAX_SECS: i64 = 600;
@@ -4966,7 +5147,7 @@ impl Tool for WaitForLoginTool {
         })
     }
 
-    async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let xhs = XhsPageRuntime::new(&self.page);
         // Already logged in? Return right away — nothing to wait for.
         if xhs.is_logged_in().await.unwrap_or(false) {
@@ -4975,9 +5156,10 @@ impl Tool for WaitForLoginTool {
                 "message": "Already logged in. Re-run the original tool.",
             })));
         }
-        // A remote hosted browser has no window the user could scan a QR in;
-        // its shared login is socai-operated. Fail fast instead of polling.
-        if self.page.is_remote_browser() {
+        // Operator-managed hosted browsers have no user-visible window. Cloud
+        // Session Workers explicitly opt into an interactive Kernel live view,
+        // where the same polling protocol can safely wait for the user.
+        if self.page.is_remote_browser() && !interactive_remote_login_enabled() {
             return Ok(json_result(&json!({
                 "logged_in": false,
                 "remote_browser": true,
@@ -4990,11 +5172,27 @@ impl Tool for WaitForLoginTool {
         let timeout = get_i64(&input, "timeout_seconds", WAIT_FOR_LOGIN_DEFAULT_SECS)
             .clamp(10, WAIT_FOR_LOGIN_MAX_SECS);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout as u64);
+        let mut human_ready = login_resume_receiver(&ctx.run_id);
         loop {
             if xhs.is_logged_in().await.unwrap_or(false) {
+                clear_login_resume(&ctx.run_id);
                 return Ok(json_result(&json!({
                     "logged_in": true,
                     "message": "Login detected. Re-run the original tool to continue.",
+                })));
+            }
+            // A manual "continue" accelerates verification; it does not bypass
+            // a visible logged-out wall. The full gate tolerates sidebar class
+            // changes after a successful QR redirect that make the strict
+            // one-shot selector inconclusive.
+            if *human_ready.borrow_and_update() > 0
+                && xhs.login_gate(false).await.unwrap_or(LoginGate::Required) == LoginGate::LoggedIn
+            {
+                clear_login_resume(&ctx.run_id);
+                return Ok(json_result(&json!({
+                    "logged_in": true,
+                    "human_confirmed": true,
+                    "message": "Login confirmed from the live browser. Re-run the original tool.",
                 })));
             }
             if std::time::Instant::now() >= deadline {
@@ -5008,8 +5206,103 @@ impl Tool for WaitForLoginTool {
                     ),
                 })));
             }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                changed = human_ready.changed() => {
+                    if changed.is_err() {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
+            }
         }
+    }
+}
+
+pub struct AlbumsTool {
+    page: Arc<PageSession>,
+}
+
+#[async_trait]
+impl Tool for AlbumsTool {
+    fn name(&self) -> &str {
+        "albums"
+    }
+
+    fn description(&self) -> &str {
+        "List the signed-in account's Xiaohongshu favorites albums. Clicks 我, \
+         then 收藏, then 专辑, and returns each album name, id, and note count. \
+         Use album afterwards to read one album's notes."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
+    }
+
+    async fn call(&self, _input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let mut value = XhsPageRuntime::new(&self.page)
+            .list_favorite_albums()
+            .await?;
+        annotate_remote_login_gate(&self.page, &mut value);
+        Ok(json_result(&value))
+    }
+}
+
+pub struct AlbumTool {
+    page: Arc<PageSession>,
+}
+
+#[async_trait]
+impl Tool for AlbumTool {
+    fn name(&self) -> &str {
+        "album"
+    }
+
+    fn description(&self) -> &str {
+        "Open one favorites album from the signed-in Xiaohongshu account. Clicks \
+         我 in the left sidebar, then 收藏, then 专辑, then the named album, and \
+         returns that album's note cards (title, author, likes, cover, note id, \
+         and xsec token). Does not open each note; pass a returned note id and \
+         xsec token to get_notes when the body or comments are needed."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "album": {
+                    "type": "string",
+                    "description": "Album name shown on the 专辑 tab."
+                },
+                "num_notes": {
+                    "type": "integer",
+                    "description": "Maximum notes to return. Omit to collect until the album stops loading."
+                }
+            },
+            "required": ["album"],
+            "additionalProperties": false
+        })
+    }
+
+    async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let album = get_str(&input, "album")
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("missing album"))?
+            .to_string();
+        let num_notes = input
+            .get("num_notes")
+            .and_then(Value::as_i64)
+            .filter(|n| *n > 0)
+            .map(|n| n as usize);
+        let mut value = XhsPageRuntime::new(&self.page)
+            .collect_favorite_album(&album, num_notes)
+            .await?;
+        annotate_remote_login_gate(&self.page, &mut value);
+        Ok(json_result(&value))
     }
 }
 
@@ -6153,7 +6446,7 @@ impl Tool for SearchTool {
 ///
 /// Composite macro mirroring `search`, but entered from an author's profile
 /// page instead of a search query: open `…/user/profile/<id>` → read the author
-/// header (avatar, bio, xhs id, IP location, follower/following/like counts) → collect
+/// header (avatar, bio, xhs id, IP location, gender, follower/following/like counts) → collect
 /// note summary cards in page order (scrolling to reach `num_notes`) → by
 /// default open each note and read its body + top comments. With `preview =
 /// true` it returns the note cards only, without opening any note — the fast
@@ -6181,7 +6474,7 @@ impl Tool for AuthorScanTool {
     fn description(&self) -> &str {
         "Xiaohongshu author/creator scan: open an author's profile page by id → \
          read the author header (display name, xhs id, avatar url, bio, IP location, \
-         official-verification/认证 status when present, \
+         gender when shown, official-verification/认证 status when present, \
          follower/following/liked-&-collected counts) → collect their note \
          summary cards in page order (pass `num_notes` to scroll the grid for \
          more, omit for just the first screen) → open each collected note and \
@@ -6340,6 +6633,7 @@ impl Tool for AuthorScanTool {
             avatar_url: get_str(&info, "avatar_url").unwrap_or("").to_string(),
             bio: get_str(&info, "bio").unwrap_or("").to_string(),
             ip_location: get_str(&info, "ip_location").unwrap_or("").to_string(),
+            gender: get_str(&info, "gender").unwrap_or("").to_string(),
             verified: info
                 .get("verified")
                 .and_then(Value::as_bool)

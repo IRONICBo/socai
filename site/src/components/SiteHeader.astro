@@ -86,14 +86,14 @@ const t = (path: string) => message(messages, path, language);
                 class="language-toggle__button"
                 type="button"
                 data-lang-option="zh"
-                aria-pressed="true">中文</button
+                aria-pressed={language === "zh" ? "true" : "false"}>中文</button
             >
             <span class="language-toggle__divider" aria-hidden="true"></span>
             <button
                 class="language-toggle__button"
                 type="button"
                 data-lang-option="en"
-                aria-pressed="false">en</button
+                aria-pressed={language === "en" ? "true" : "false"}>en</button
             >
         </div>
     </nav>

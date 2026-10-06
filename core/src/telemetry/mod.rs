@@ -7,10 +7,106 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
+pub mod task_context;
 pub mod tool_call;
 pub mod trace;
 
-pub use trace::redact_secrets;
+pub use trace::{redact_secrets, redact_telemetry_error};
+
+/// Reduce a browser endpoint source to its stable category before telemetry.
+///
+/// Runtime source strings may suffix `active_port` or `managed_profile` with a
+/// local filesystem path. The category is enough for operational grouping and
+/// prevents profile directories and OS usernames from leaving the device.
+pub fn browser_source_category(source: &str) -> &str {
+    source
+        .split_once(':')
+        .map_or(source, |(category, _)| category)
+}
+
+/// Convert a browser disconnect reason into stable, content-free telemetry.
+///
+/// Runtime errors may contain local paths, profile names, or remote details,
+/// so callers should emit only this classification instead of the raw reason.
+pub fn browser_disconnect_details(reason: &str) -> (&'static str, &'static str) {
+    let reason = reason.to_ascii_lowercase();
+    if reason == "user_disconnected" {
+        ("user_disconnected", "browser disconnected by user")
+    } else if reason.contains("permission denied") || reason.contains("access denied") {
+        (
+            "browser_profile_access_denied",
+            "browser profile access denied",
+        )
+    } else if reason.contains("no chrome/chromium executable") {
+        ("chrome_not_found", "chrome executable not found")
+    } else if reason.contains("singleton") || reason.contains("another chrome instance") {
+        (
+            "browser_profile_conflict",
+            "browser profile is already in use",
+        )
+    } else if reason.contains("managed chrome") {
+        (
+            "managed_chrome_launch_failed",
+            "managed chrome failed to start",
+        )
+    } else if reason.contains("remote browser") || reason.contains("hosted") {
+        ("remote_browser_failed", "remote browser connection failed")
+    } else if reason.contains("websocket") {
+        (
+            "browser_websocket_failed",
+            "browser websocket connection failed",
+        )
+    } else if reason.contains("timed out") || reason.contains("timeout") {
+        ("browser_connect_timeout", "browser connection timed out")
+    } else if reason.contains("connection lost") || reason.contains("transport") {
+        (
+            "browser_transport_disconnected",
+            "browser transport disconnected",
+        )
+    } else {
+        ("browser_connect_failed", "browser connection failed")
+    }
+}
+
+/// Classify a failed tool invocation without copying its error text into the
+/// grouping key. The original telemetry summary remains separately redacted;
+/// this value is deliberately coarse and stable for operational aggregation.
+pub fn tool_failure_error_type(error: &str) -> &'static str {
+    let error = error.to_ascii_lowercase();
+    if error.contains("websocket") {
+        "browser_websocket_failed"
+    } else if error.contains("connection lost")
+        || error.contains("connection closed")
+        || error.contains("connection reset")
+        || error.contains("cdp session is closed")
+        || error.contains("transport")
+    {
+        "browser_transport_disconnected"
+    } else if error.contains("no chrome/chromium executable")
+        || error.contains("singleton")
+        || error.contains("another chrome instance")
+        || error.contains("managed chrome")
+        || error.contains("remote browser")
+        || error.contains("hosted browser")
+        || error.contains("failed to connect cdp")
+    {
+        browser_disconnect_details(&error).0
+    } else if error.contains("timed out") || error.contains("timeout") {
+        "tool_timeout"
+    } else if error.contains("permission denied") || error.contains("access denied") {
+        "permission_denied"
+    } else if error.contains("no such file") || error.contains("not found") {
+        "resource_not_found"
+    } else if error.contains("json")
+        || error.contains("serialize")
+        || error.contains("deserialize")
+        || error.contains("decode")
+    {
+        "response_decode_failed"
+    } else {
+        "tool_execution_failed"
+    }
+}
 
 const EVENT_SCHEMA_VERSION: u32 = 1;
 const TELEMETRY_ENDPOINT: &str = "https://socai.io/v1/events";
@@ -477,6 +573,14 @@ pub fn query_text_enabled() -> bool {
     )
 }
 
+/// External-agent task text has an independent, per-command opt-out.
+pub fn task_text_enabled() -> bool {
+    !env_value_is(
+        "SOCAI_TELEMETRY_TASK_TEXT",
+        &["0", "false", "off", "disabled", "no"],
+    )
+}
+
 /// Gates LLM chat content (`gen_ai.input.messages` / `gen_ai.output.messages` /
 /// `gen_ai.system_instructions`) on run-trace `chat` spans.
 pub fn chat_text_enabled() -> bool {
@@ -552,12 +656,30 @@ fn terminal_app() -> String {
 #[cfg(unix)]
 fn parent_process_name() -> String {
     let ppid = unsafe { libc::getppid() };
-    crate::util::machine::command_output("ps", &["-p", &ppid.to_string(), "-o", "comm="])
+    let command =
+        crate::util::machine::command_output("ps", &["-p", &ppid.to_string(), "-o", "comm="]);
+    parent_process_category(&command)
 }
 
 #[cfg(not(unix))]
 fn parent_process_name() -> String {
     String::new()
+}
+
+fn parent_process_category(command: &str) -> String {
+    let normalized = command.trim().replace('\\', "/");
+    let name = normalized
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or("");
+    if name.is_empty() {
+        return String::new();
+    }
+    if normalized.contains("/target/debug/") || normalized.starts_with("target/debug/") {
+        format!("{name}-debug")
+    } else {
+        name.to_string()
+    }
 }
 
 fn env_value_is(name: &str, values: &[&str]) -> bool {
@@ -668,6 +790,19 @@ mod tests {
         assert_eq!(TelemetrySource::Desktop.as_str(), "desktop");
         assert!(TelemetrySource::CliDaemon.collects_terminal_context());
         assert!(!TelemetrySource::Desktop.collects_terminal_context());
+        assert_eq!(
+            parent_process_category("/Users/private/.socai/bin/socai"),
+            "socai"
+        );
+        assert_eq!(
+            parent_process_category("./target/debug/socai"),
+            "socai-debug"
+        );
+        assert_eq!(
+            parent_process_category(r"C:\private\repo\target\debug\socai.exe"),
+            "socai.exe-debug"
+        );
+        assert_eq!(parent_process_category("/sbin/launchd"), "launchd");
     }
 
     #[test]
@@ -685,5 +820,11 @@ mod tests {
         assert_eq!(object.get("event"), Some(&json!("socai_tool_call")));
         assert_eq!(object.get("install_id"), Some(&json!("install-1")));
         assert!(!object.contains_key("created_at_ms"));
+        assert_eq!(
+            redact_telemetry_error(
+                "Incorrect API key provided: provider-specific***value. Check the dashboard"
+            ),
+            "Incorrect API key provided: [redacted]"
+        );
     }
 }

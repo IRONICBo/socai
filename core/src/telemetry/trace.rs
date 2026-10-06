@@ -351,7 +351,7 @@ impl RunTraceBuilder {
             attrs.push(attr_bool("socai.partial", true));
             attrs.push(attr_str(
                 "socai.degraded_reason",
-                &truncate_chars(&redact_secrets(reason), ERROR_MAX_CHARS),
+                &truncate_chars(&redact_telemetry_error(reason), ERROR_MAX_CHARS),
             ));
         }
 
@@ -372,7 +372,7 @@ impl RunTraceBuilder {
         if let Some(error) = error {
             root["status"] = json!({
                 "code": STATUS_CODE_ERROR,
-                "message": truncate_chars(error, ERROR_MAX_CHARS),
+                "message": truncate_chars(&redact_telemetry_error(error), ERROR_MAX_CHARS),
             });
         }
 
@@ -431,7 +431,7 @@ impl RunTraceBuilder {
         if let Some(error) = error {
             span["status"] = json!({
                 "code": STATUS_CODE_ERROR,
-                "message": truncate_chars(error, ERROR_MAX_CHARS),
+                "message": truncate_chars(&redact_telemetry_error(error), ERROR_MAX_CHARS),
             });
         }
         self.spans.push(span);
@@ -853,6 +853,72 @@ pub fn redact_secrets(text: &str) -> String {
     redact_token_runs(&text)
 }
 
+/// Error fields need a stricter boundary than user-visible chat: keep the
+/// operational message and URL origin, but never upload account/post locators,
+/// query parameters, CDP session ids, or other URL path content.
+pub fn redact_telemetry_error(text: &str) -> String {
+    let redacted = redact_url_paths(&redact_secrets(text));
+    redact_interpolated_error_values(&redacted)
+}
+
+fn redact_url_paths(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let lower = text.to_ascii_lowercase();
+    while let Some(relative_start) = ["https://", "http://", "wss://", "ws://"]
+        .iter()
+        .filter_map(|scheme| lower[cursor..].find(scheme))
+        .min()
+    {
+        let start = cursor + relative_start;
+        output.push_str(&text[cursor..start]);
+        let rest = &text[start..];
+        let end = rest
+            .char_indices()
+            .find_map(|(index, character)| {
+                (index > 0 && (character.is_whitespace() || matches!(character, '"' | '<' | '>')))
+                    .then_some(start + index)
+            })
+            .unwrap_or(text.len());
+        let candidate = &text[start..end];
+        if let Ok(url) = reqwest::Url::parse(candidate) {
+            if url.host_str().is_some() {
+                output.push_str(&url.origin().ascii_serialization());
+                output.push_str("/<redacted>");
+            } else {
+                output.push_str("[redacted-url]");
+            }
+        } else {
+            output.push_str("[redacted-url]");
+        }
+        cursor = end;
+    }
+    output.push_str(&text[cursor..]);
+    output
+}
+
+fn redact_interpolated_error_values(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let value_start = [
+        "invalid ",
+        "unsupported ",
+        "unexpected ",
+        "incorrect api key",
+    ]
+    .iter()
+    .filter_map(|marker| lower.find(marker))
+    .filter_map(|marker_start| {
+        text[marker_start..]
+            .find(": ")
+            .map(|separator| marker_start + separator + 2)
+    })
+    .min();
+    match value_start {
+        Some(value_start) => format!("{}[redacted]", &text[..value_start]),
+        None => text.to_string(),
+    }
+}
+
 /// Recursively scrub every string inside a JSON value — used for structured
 /// payloads (tool-arg `metadata`) where secrets can sit in any nested string,
 /// e.g. a desktop `shell` command carrying an `Authorization: Bearer …` header.
@@ -1070,27 +1136,16 @@ fn tool_result_text(content: &[ToolResultContent]) -> String {
         .join("\n")
 }
 
-/// Tool arguments stay structured JSON unless a secret was redacted or the
-/// serialized form is oversized, in which case they degrade to a (redacted,
-/// truncated) string form. `include_query` mirrors the events pipeline's
-/// query gate: when off, a top-level `query` string argument is redacted.
+/// Tool arguments use the same privacy-safe summary as event telemetry.
+/// `include_query` preserves the existing explicit query-text gate; every
+/// other string becomes a length and every collection becomes a count.
 fn tool_call_arguments(input: &Value, part_cap: usize, include_query: bool) -> Value {
-    let mut input = input.clone();
-    if !include_query {
-        if let Some(object) = input.as_object_mut() {
-            // Any type: a malformed tool call ({"query": {…}}) must not
-            // sidestep the gate.
-            if object.contains_key("query") {
-                object.insert("query".into(), json!("[redacted]"));
-            }
-        }
-    }
-    let rendered = input.to_string();
-    let redacted = redact_secrets(&rendered);
-    if redacted == rendered && rendered.chars().count() <= part_cap {
-        input
+    let summary = Value::Object(summarize_tool_args(input, include_query));
+    let rendered = summary.to_string();
+    if rendered.chars().count() <= part_cap {
+        summary
     } else {
-        Value::String(truncate_chars(&redacted, part_cap))
+        Value::String(truncate_chars(&rendered, part_cap))
     }
 }
 

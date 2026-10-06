@@ -21,12 +21,14 @@ use socai_core::runtime::{
     SocaiRuntime,
 };
 use socai_core::sites::xhs::XhsHistoryStore;
-use socai_core::sites::{find_native_site_adapter, site_learning_tools, NativeSiteAdapter};
+use socai_core::sites::{find_native_site_adapter, scoped_site_learning_tools, NativeSiteAdapter};
 use socai_core::telemetry::tool_call::{
     is_site_tool_result, summarize_site_tool_result, summarize_tool_args,
 };
 use socai_core::telemetry::trace::mark_run_trace_status;
-use socai_core::telemetry::{query_text_enabled, redact_secrets};
+use socai_core::telemetry::{
+    browser_disconnect_details, query_text_enabled, redact_secrets, tool_failure_error_type,
+};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Write};
@@ -34,6 +36,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 
 const TAURI_AGENT_PREAMBLE: &str =
     "You are running inside the socai desktop app as a conversational, multi-turn agent. \
@@ -54,6 +57,9 @@ const TAURI_CITATION_RULES: &str = "\n\n## Citing notes in the final answer (req
     returned by scans), cite it inline as a markdown link — \
     [<post title>](note:<note_id>) — using the exact archived note_id.\n\
     Example: 推荐 [湾区遛娃|坐小火车喂羊驼](note:65f0a1b2000000000c030d1e) 的路线。\n\
+    For Instagram, preserve the site prefix, for example \
+    [novos lugares](note:instagram:Dau5EgOkUnd); do not replace an archived \
+    note citation with its public post URL.\n\
     - Link text is the post's title; drop any square brackets inside it.\n\
     - For results that are not archived post cards, link their canonical URL instead.\n\
     - Cite each post where it is discussed, not in a separate list at the end.";
@@ -66,22 +72,42 @@ const TAURI_SITE_ROUTING_RULES: &str = "\n\n## Browser routing\n\
     only when the requested page is Xiaohongshu. Browser-tool JSON is internal \
     evidence: never paste raw JSON into the final answer. Present concise findings \
     with note citations; the desktop renders archived posts as grouped cards. JSON \
-    remains available only as a downloadable evidence artifact.";
+    stays internal unless the user explicitly requests an evidence export.";
 
 const TAURI_ARTIFACT_RULES: &str = "\n\n## Deliverable files\n\
-    After you create and verify any file the user should download, call \
+    For an analysis request, answer in the chat; do not manufacture file deliverables. \
+    Raw tool JSON, logs, and intermediate files are internal evidence. Publish them only \
+    if the user explicitly requests them. After you create and verify a requested file, call \
     `publish_artifact` with that file's path. Creating or mentioning a file \
     alone does not display a download card. Only tell the user the file is \
     downloadable after `publish_artifact` succeeds.";
 
-/// Site the desktop agent runner drives. Becomes a runtime choice once the
-/// app grows a site switcher.
+/// Stable session-page key and legacy default; selected sources are stored per task.
 const APP_SITE_ID: &str = "xhs";
 const APP_INITIAL_URL: &str = "about:blank";
 
 fn app_site() -> Result<&'static NativeSiteAdapter> {
     find_native_site_adapter(APP_SITE_ID)
         .ok_or_else(|| anyhow::anyhow!("app default site {APP_SITE_ID} is not registered"))
+}
+
+fn validate_task_sites(sites: Vec<String>) -> Result<Vec<String>, String> {
+    if sites.is_empty() {
+        return Err("select at least one platform".into());
+    }
+    let mut selected = Vec::new();
+    for site in sites {
+        if site != "auto" && find_native_site_adapter(&site).is_none() {
+            return Err(format!("unsupported platform: {site}"));
+        }
+        if !selected.contains(&site) {
+            selected.push(site);
+        }
+    }
+    if selected.len() > 1 && selected.iter().any(|site| site == "auto") {
+        return Err("auto cannot be combined with selected platforms".into());
+    }
+    Ok(selected)
 }
 
 // ── CDP connect tests (existing) ───────────────────────────────────────────
@@ -392,7 +418,12 @@ pub async fn agent_list_models() -> Result<Vec<Value>, String> {
     // win when present; otherwise the desktop restores persisted defaults even
     // if the selected provider still needs a key. The frontend uses
     // `is_default` to restore this choice across relaunches.
-    let default_provider = if provider_env_override_present() {
+    let guest = !socai_core::cloud::auth_session()
+        .map_err(|e| e.to_string())?
+        .logged_in;
+    let default_provider = if guest {
+        Some(Provider::Socai)
+    } else if provider_env_override_present() {
         resolve_provider(None, None)
             .ok()
             .or_else(configured_default_provider)
@@ -405,7 +436,7 @@ pub async fn agent_list_models() -> Result<Vec<Value>, String> {
     let mut out = Vec::new();
     for cfg in PROVIDERS {
         let credential_kind = provider_credential_kind(cfg.provider);
-        if cfg.provider == Provider::Socai && credential_kind.is_none() {
+        if cfg.provider == Provider::Socai && credential_kind.is_none() && !guest {
             continue;
         }
         let credential_kind_label = match credential_kind {
@@ -467,7 +498,7 @@ pub async fn agent_list_models() -> Result<Vec<Value>, String> {
                 "default_model": model_id,
                 "model_id": model_id,
                 "selected_model": selected_model,
-                "has_key": credential_kind.is_some(),
+                "has_key": credential_kind.is_some() || (guest && cfg.provider == Provider::Socai),
                 "credential_kind": credential_kind_label,
                 "credential_preview": credential_preview.clone(),
                 "is_default": is_default,
@@ -542,9 +573,12 @@ pub fn open_external(url: String) -> Result<(), String> {
         c
     };
 
-    command
+    let status = command
         .status()
         .map_err(|e| format!("failed to open {url}: {e}"))?;
+    if !status.success() {
+        return Err(format!("failed to open {url}: {status}"));
+    }
     Ok(())
 }
 
@@ -640,16 +674,35 @@ pub async fn agent_task_start(
     task: String,
     provider: Option<String>,
     model: Option<String>,
+    sites: Option<Vec<String>>,
 ) -> Result<AgentTaskSnapshot, String> {
+    let sites = validate_task_sites(sites.unwrap_or_else(crate::tasks::default_task_sites))?;
     let task_text = task.trim().to_string();
     if task_text.is_empty() {
         return Err("task is empty".into());
     }
-    run_task_preflight(provider.as_deref(), model.as_deref()).await?;
+    let anonymous = !socai_core::cloud::auth_session()
+        .map_err(|e| e.to_string())?
+        .logged_in;
+    let provider = if anonymous {
+        Some("socai".to_string())
+    } else {
+        provider
+    };
+    let model = if anonymous {
+        Some("managed".to_string())
+    } else {
+        model
+    };
+    let guest_trial = run_task_preflight(provider.as_deref(), model.as_deref()).await?;
 
     // One conversation = one folder under the runs root, named after the
     // first task; each turn's run dir nests inside it (turn-01_…, turn-02_…).
-    let site_id = app_site().map(|site| site.id).unwrap_or("agent");
+    let site_id = if sites.len() == 1 {
+        sites[0].as_str()
+    } else {
+        "multi"
+    };
     let conversation_dir = make_run_dir(&format!("{site_id} {task_text}"));
     let conversation = Conversation::create_at(&conversation_dir, model.clone())
         .map_err(|err| format!("failed to create desktop conversation session for task: {err}"))?;
@@ -664,9 +717,16 @@ pub async fn agent_task_start(
             model.clone(),
             run_dir.display().to_string(),
             session_dir,
+            sites,
         )
         .await;
     let task_id = snapshot.task_id.clone();
+    if let Some(trial) = &guest_trial {
+        trial.bind_task(&task_id).map_err(|e| e.to_string())?;
+    } else {
+        socai_core::cloud::prepare_account_task(&task_id).map_err(|e| e.to_string())?;
+    }
+    socai_core::media::cancel_all_background_media();
     let background_media_generation = socai_core::media::begin_background_media_generation();
     let runtime = runtime.inner().clone();
     let telemetry = telemetry.inner().clone();
@@ -680,9 +740,9 @@ pub async fn agent_task_start(
         }
         run_agent_task_background(
             app_for_task,
-            registry_for_task,
+            registry_for_task.clone(),
             runtime,
-            task_id_for_spawn,
+            task_id_for_spawn.clone(),
             task_text,
             provider,
             model,
@@ -691,6 +751,15 @@ pub async fn agent_task_start(
             telemetry,
         )
         .await;
+        if let Some(trial) = guest_trial {
+            let completed = registry_for_task
+                .get(&task_id_for_spawn)
+                .await
+                .is_some_and(|snapshot| snapshot.status == "completed");
+            if let Err(error) = trial.finish(completed) {
+                eprintln!("failed to persist guest trial completion: {error:#}");
+            }
+        }
     });
     if let Some(handle) = tasks.set_abort_handle(&task_id, join.abort_handle()).await {
         handle.abort();
@@ -722,6 +791,7 @@ pub async fn agent_task_reply(
     telemetry: State<'_, DesktopTelemetry>,
     task_id: String,
     message: String,
+    sites: Option<Vec<String>>,
 ) -> Result<AgentTaskSnapshot, String> {
     let message_text = message.trim().to_string();
     if message_text.is_empty() {
@@ -735,15 +805,27 @@ pub async fn agent_task_reply(
     if matches!(existing.status.as_str(), "queued" | "running") {
         return Err("task is still running — wait for it to finish before replying".into());
     }
+    let sites = validate_task_sites(sites.unwrap_or_else(|| existing.sites.clone()))?;
     let Some(session_dir) = existing.session_dir.as_deref() else {
         return Err("task has no conversation to continue".into());
     };
     let provider = existing.provider.clone();
     let model = existing.model.clone();
-    run_task_preflight(provider.as_deref(), model.as_deref()).await?;
-    if let Some(previous_run_dir) = existing.run_dir.as_deref() {
-        socai_core::media::cancel_background_media_for_run(previous_run_dir);
-    }
+    let anonymous = !socai_core::cloud::auth_session()
+        .map_err(|e| e.to_string())?
+        .logged_in;
+    let provider = if anonymous {
+        Some("socai".to_string())
+    } else {
+        provider
+    };
+    let model = if anonymous {
+        Some("managed".to_string())
+    } else {
+        model
+    };
+    let guest_trial = run_task_preflight(provider.as_deref(), model.as_deref()).await?;
+    socai_core::media::cancel_all_background_media();
 
     // This turn's run dir nests inside the conversation dir. Tasks created
     // before nesting have their session dir under ~/.socai/sessions; their
@@ -757,6 +839,9 @@ pub async fn agent_task_reply(
     let snapshot = registry
         .update(&task_id, |snapshot| {
             snapshot.status = "queued".into();
+            snapshot.provider = provider.clone();
+            snapshot.model = model.clone();
+            snapshot.sites = sites.clone();
             snapshot.started_at = None;
             snapshot.finished_at = None;
             snapshot.run_id = None;
@@ -778,6 +863,12 @@ pub async fn agent_task_reply(
         .await
         .ok_or_else(|| format!("unknown task: {task_id}"))?;
 
+    if let Some(trial) = &guest_trial {
+        trial.bind_task(&task_id).map_err(|e| e.to_string())?;
+    } else {
+        socai_core::cloud::prepare_account_task(&task_id).map_err(|e| e.to_string())?;
+    }
+    socai_core::media::cancel_all_background_media();
     let background_media_generation = socai_core::media::begin_background_media_generation();
     let runtime = runtime.inner().clone();
     let telemetry = telemetry.inner().clone();
@@ -791,9 +882,9 @@ pub async fn agent_task_reply(
         }
         run_agent_task_background(
             app_for_task,
-            registry_for_task,
+            registry_for_task.clone(),
             runtime,
-            task_id_for_spawn,
+            task_id_for_spawn.clone(),
             message_text,
             provider,
             model,
@@ -802,6 +893,15 @@ pub async fn agent_task_reply(
             telemetry,
         )
         .await;
+        if let Some(trial) = guest_trial {
+            let completed = registry_for_task
+                .get(&task_id_for_spawn)
+                .await
+                .is_some_and(|snapshot| snapshot.status == "completed");
+            if let Err(error) = trial.finish(completed) {
+                eprintln!("failed to persist guest trial completion: {error:#}");
+            }
+        }
     });
     if let Some(handle) = tasks.set_abort_handle(&task_id, join.abort_handle()).await {
         handle.abort();
@@ -820,7 +920,19 @@ pub async fn agent_task_reply(
     Ok(snapshot)
 }
 
-async fn run_task_preflight(provider: Option<&str>, model: Option<&str>) -> Result<(), String> {
+async fn run_task_preflight(
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<Option<socai_core::cloud::GuestTrialGuard>, String> {
+    if !socai_core::cloud::auth_session()
+        .map_err(|e| e.to_string())?
+        .logged_in
+    {
+        return socai_core::cloud::prepare_guest_trial()
+            .await
+            .map(Some)
+            .map_err(|error| format!("{error:#}"));
+    }
     let resolved_provider = ensure_llm_provider_configured_for(provider, model)
         .map_err(|error| task_preflight_error("preflight_model_config", format!("{error:#}")))?;
     if resolved_provider == Provider::Socai {
@@ -836,7 +948,7 @@ async fn run_task_preflight(provider: Option<&str>, model: Option<&str>) -> Resu
         validate_preflight_balance(wallet.balance_points)?;
     }
 
-    Ok(())
+    Ok(None)
 }
 
 struct DesktopBrowserRecovery {
@@ -894,14 +1006,20 @@ impl DesktopBrowserRecovery {
         );
     }
 
-    fn capture_recovery(&self, outcome: &str, reason: &str, duration_ms: u64) {
+    fn capture_recovery(&self, outcome: &str, reason: Option<&str>, duration_ms: u64) {
+        let (error_type, error) = reason
+            .map(browser_disconnect_details)
+            .map_or((None, None), |(error_type, error)| {
+                (Some(error_type), Some(error))
+            });
         self.telemetry.capture(
             "socai_browser_task_recovery",
             json!({
                 "task_id": self.task_id,
                 "outcome": outcome,
                 "duration_ms": duration_ms,
-                "error": (!reason.is_empty()).then(|| redacted_short_error(reason)),
+                "error_type": error_type,
+                "error": error,
             }),
         );
     }
@@ -942,7 +1060,7 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
             )
             .await;
             self.clear_task_target().await;
-            self.capture_recovery("degraded", &reason, 0);
+            self.capture_recovery("degraded", Some(&disconnect_reason), 0);
             return ToolRecoveryOutcome::Degraded { reason };
         }
         if disconnect_reason == "user_disconnected" {
@@ -953,7 +1071,7 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
             )
             .await;
             self.clear_task_target().await;
-            self.capture_recovery("degraded", &reason, 0);
+            self.capture_recovery("degraded", Some(&disconnect_reason), 0);
             return ToolRecoveryOutcome::Degraded { reason };
         }
 
@@ -965,7 +1083,9 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
         let started = std::time::Instant::now();
         let recovery_url = match tool_name {
             "read_site_skills" | "run_site_browser_tool" => self.last_page_url.read().await.clone(),
-            _ => self.home_url.to_string(),
+            "navigate_site" => self.home_url.to_string(),
+            // The other browser tools are the optional native XHS toolset.
+            _ => socai_core::sites::xhs::XHS_HOME_URL.to_string(),
         };
         if recovery_url.is_empty() {
             let reason = format!(
@@ -977,7 +1097,11 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
                 "browser recovery failed; summarizing the collected results".into(),
             )
             .await;
-            self.capture_recovery("failed", &reason, started.elapsed().as_millis() as u64);
+            self.capture_recovery(
+                "failed",
+                Some(&disconnect_reason),
+                started.elapsed().as_millis() as u64,
+            );
             return ToolRecoveryOutcome::Degraded { reason };
         }
         let replacement_guard = self
@@ -1020,7 +1144,7 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
                     "browser connection recovered; retrying the interrupted operation".into(),
                 )
                 .await;
-                self.capture_recovery("completed", "", duration_ms);
+                self.capture_recovery("completed", None, duration_ms);
                 ToolRecoveryOutcome::Recovered
             }
             Err(error) => {
@@ -1032,7 +1156,7 @@ impl ToolFailureRecovery for DesktopBrowserRecovery {
                     "browser recovery failed; summarizing the collected results".into(),
                 )
                 .await;
-                self.capture_recovery("failed", &reason, duration_ms);
+                self.capture_recovery("failed", Some(&error), duration_ms);
                 ToolRecoveryOutcome::Degraded { reason }
             }
         }
@@ -1249,7 +1373,7 @@ pub async fn agent_task_list(
     let snapshots = tasks.list().await;
     let has_cloud_session = socai_core::cloud::pro_activated();
     for snapshot in snapshots {
-        if !has_cloud_session
+        if (!has_cloud_session && !socai_core::cloud::is_guest_task(&snapshot.task_id))
             || snapshot.points_used.is_some()
             || !matches!(
                 snapshot.status.as_str(),
@@ -1321,6 +1445,7 @@ pub async fn agent_task_notes(
     let mut by_id: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     for (run_dir, _) in crate::timeline::conversation_run_dirs(&snapshot) {
         for mut note in socai_core::agent::note_store::load_notes(&run_dir) {
+            socai_core::sites::post_archive::deduplicate_post_media(&mut note);
             absolutize_note_media(&mut note, &run_dir);
             let Some(id) = note
                 .get("note_id")
@@ -1398,9 +1523,8 @@ struct SpreadsheetSheetPreview {
     truncated: bool,
 }
 
-/// Download cards include tool-registered artifacts (`artifacts/**`) and
-/// explicit user deliverables (`outputs/**`). Runtime logs, note media and
-/// model request/response traces stay private implementation detail.
+/// Download cards contain explicit user deliverables (`outputs/**`). Tool
+/// evidence (`artifacts/**`), note media and execution traces stay internal.
 #[tauri::command]
 pub async fn agent_task_artifacts(
     tasks: State<'_, AgentTaskRegistry>,
@@ -1457,6 +1581,94 @@ pub async fn agent_task_artifact_preview(
     })
     .await
     .map_err(|error| format!("artifact preview task failed: {error}"))?
+}
+
+/// Reveal a task's original artifact in Finder/Explorer. Re-resolve the path
+/// against the task's current artifact list and hold the verified file open
+/// while asking the file manager to reveal it.
+#[tauri::command]
+pub async fn agent_task_artifact_reveal(
+    tasks: State<'_, AgentTaskRegistry>,
+    task_id: String,
+    path: String,
+) -> Result<(), String> {
+    let snapshot = tasks
+        .get(&task_id)
+        .await
+        .ok_or_else(|| format!("unknown task: {task_id}"))?;
+    let artifact = task_artifacts(&snapshot)
+        .into_iter()
+        .find(|artifact| artifact.path == path)
+        .ok_or_else(|| "artifact is not part of this task".to_string())?;
+    let source = PathBuf::from(artifact.path);
+    let source_identity = artifact.identity;
+    tokio::task::spawn_blocking(move || {
+        let file = open_artifact_source(&source, &source_identity)?;
+        reveal_artifact_in_file_manager(&source, file)
+    })
+    .await
+    .map_err(|error| format!("artifact reveal task failed: {error}"))?
+}
+
+/// Ask for a destination and filename, then save a verified task artifact.
+/// Cancellation leaves the filesystem untouched.
+#[tauri::command]
+pub async fn agent_task_artifact_save_as(
+    app: AppHandle,
+    tasks: State<'_, AgentTaskRegistry>,
+    task_id: String,
+    path: String,
+) -> Result<Option<String>, String> {
+    let snapshot = tasks
+        .get(&task_id)
+        .await
+        .ok_or_else(|| format!("unknown task: {task_id}"))?;
+    let artifact = task_artifacts(&snapshot)
+        .into_iter()
+        .find(|artifact| artifact.path == path)
+        .ok_or_else(|| "artifact is not part of this task".to_string())?;
+    let source = PathBuf::from(&artifact.path);
+    let source_identity = artifact.identity;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(artifact.name)
+        .save_file(move |selected| {
+            let _ = sender.send(selected);
+        });
+    let Some(destination) = receiver
+        .await
+        .map_err(|error| format!("save dialog failed: {error}"))?
+    else {
+        return Ok(None);
+    };
+    let destination = destination
+        .into_path()
+        .map_err(|error| format!("invalid save destination: {error}"))?;
+
+    tokio::task::spawn_blocking(move || {
+        let mut source_file = open_artifact_source(&source, &source_identity)?;
+        if destination.exists()
+            && same_file::is_same_file(&source, &destination)
+                .map_err(|error| format!("could not compare artifact paths: {error}"))?
+        {
+            return Err("cannot save an artifact over its original file".to_string());
+        }
+        let parent = destination
+            .parent()
+            .ok_or_else(|| "save destination has no parent directory".to_string())?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|error| format!("could not create a temporary save file: {error}"))?;
+        std::io::copy(&mut source_file, &mut temporary)
+            .and_then(|_| temporary.flush())
+            .map_err(|error| format!("could not copy artifact: {error}"))?;
+        temporary
+            .persist(&destination)
+            .map_err(|error| format!("could not save {}: {error}", destination.display()))?;
+        Ok::<Option<String>, String>(Some(destination.to_string_lossy().to_string()))
+    })
+    .await
+    .map_err(|error| format!("artifact save task failed: {error}"))?
 }
 
 /// Copy one artifact into the user's Downloads directory. The requested path
@@ -1606,7 +1818,7 @@ fn collect_run_artifacts(
     let Ok(run_root) = run_dir.canonicalize() else {
         return;
     };
-    let mut pending = ["artifacts", "outputs"]
+    let mut pending = ["outputs", "artifacts"]
         .into_iter()
         .map(|name| run_root.join(name))
         .collect::<Vec<_>>();
@@ -2335,7 +2547,12 @@ fn absolutize_note_media(note: &mut Value, run_dir: &std::path::Path) {
             let Some(value) = item.get(key).and_then(Value::as_str) else {
                 continue;
             };
-            if value.is_empty() || std::path::Path::new(value).is_absolute() {
+            if value.is_empty()
+                || value.starts_with("https://")
+                || value.starts_with("http://")
+                || value.starts_with("asset:")
+                || std::path::Path::new(value).is_absolute()
+            {
                 continue;
             }
             item[key] = json!(base.join(value).to_string_lossy());
@@ -2367,7 +2584,7 @@ pub async fn agent_task_cancel(
         let _ = runtime.close_target(&target_id).await;
     }
     if changed {
-        if socai_core::cloud::pro_activated() {
+        if socai_core::cloud::pro_activated() || socai_core::cloud::is_guest_task(&task_id) {
             if let Some(settlement) = settle_hosted_task_with_retry(&task_id, "cancelled").await {
                 if let Some(updated) = tasks
                     .update(&task_id, |task| {
@@ -2708,16 +2925,17 @@ async fn run_agent_task_background(
     )
     .await;
 
-    let settlement = if socai_core::cloud::pro_activated() {
-        let final_status = if result.is_ok() {
-            "completed"
+    let settlement =
+        if socai_core::cloud::pro_activated() || socai_core::cloud::is_guest_task(&task_id) {
+            let final_status = if result.is_ok() {
+                "completed"
+            } else {
+                "failed"
+            };
+            settle_hosted_task_with_retry(&task_id, final_status).await
         } else {
-            "failed"
+            None
         };
-        settle_hosted_task_with_retry(&task_id, final_status).await
-    } else {
-        None
-    };
 
     let _ = registry.remove_abort_handle(&task_id).await;
 
@@ -2988,13 +3206,70 @@ async fn run_agent_task_on_session_page(
 
     ensure_llm_provider_configured_for(provider, model)?;
     let llm_provider = create_llm_provider_for_task(provider, model, &task_id)?;
-    let site = app_site()?;
+    let sites = registry
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("task registry unavailable"))?
+        .get(&task_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("task not found"))?
+        .sites;
+    let sites = validate_task_sites(sites).map_err(anyhow::Error::msg)?;
+    let auto_sources = sites[0] == "auto";
+    let available_sites = if auto_sources {
+        socai_core::sites::all_native_site_adapters()
+            .iter()
+            .map(|site| site.id.to_string())
+            .collect::<Vec<_>>()
+    } else {
+        sites.clone()
+    };
+    let recovery_home_url = if auto_sources {
+        APP_INITIAL_URL
+    } else {
+        find_native_site_adapter(&sites[0])
+            .expect("validated site")
+            .home_url
+    };
     let session_id =
         session_id.ok_or_else(|| anyhow::anyhow!("task has no conversation session"))?;
     let outcome = async {
-        let agent_tools = site.default_agent_tools.unwrap_or(site.agent_tools);
-        let mut tools = agent_tools(page.clone(), llm_provider.clone()).await?;
-        tools.extend(site_learning_tools(page.clone()));
+        let mut tools = Vec::new();
+        if available_sites.iter().any(|id| id == "xhs") {
+            let xhs = app_site()?;
+            let agent_tools = xhs.default_agent_tools.unwrap_or(xhs.agent_tools);
+            tools.extend(agent_tools(page.clone(), llm_provider.clone()).await?);
+        }
+        let mut instagram_login_note = String::new();
+        if available_sites.iter().any(|id| id == "instagram") {
+            tools.push(socai_core::sites::instagram::instagram_wait_for_login_tool(
+                page.clone(),
+            ));
+            if !auto_sources {
+                let login = match socai_core::sites::instagram::probe_instagram_login(&page).await {
+                    Ok(login) => login,
+                    Err(error) => {
+                        eprintln!("instagram login probe failed: {error:#}");
+                        "unknown".to_string()
+                    }
+                };
+                if login == "out" {
+                    if let Some(registry) = &registry {
+                        emit_task_event(
+                            &app,
+                            registry,
+                            &task_id,
+                            "assistant",
+                            "instagram_login_required".into(),
+                            None,
+                        )
+                        .await;
+                    }
+                }
+                instagram_login_note =
+                    socai_core::sites::instagram::instagram_login_agent_note(&login);
+            }
+        }
+        tools.extend(scoped_site_learning_tools(page.clone(), &available_sites));
         let browser_tools = tools.iter().map(|tool| tool.name().to_string()).collect();
         let last_page_url = page
             .page_info()
@@ -3012,8 +3287,8 @@ async fn run_agent_task_on_session_page(
                 page: page.clone(),
                 task_id: task_id.clone(),
                 session_id: session_id.clone(),
-                site_id: site.id,
-                home_url: site.home_url,
+                site_id: APP_SITE_ID,
+                home_url: recovery_home_url,
                 browser_options: browser_options.clone(),
                 browser_tools,
                 last_page_url: tokio::sync::RwLock::new(last_page_url),
@@ -3032,19 +3307,49 @@ async fn run_agent_task_on_session_page(
             rx,
         );
 
-        let agent_instructions = site
-            .default_agent_instructions
-            .unwrap_or(site.agent_instructions);
         let preamble = format!("{TAURI_AGENT_PREAMBLE}\n\n{context_note}");
+        let instructions = if !auto_sources && sites.iter().any(|id| id == "xhs") {
+            let xhs = app_site()?;
+            xhs.default_agent_instructions.unwrap_or(xhs.agent_instructions)(&preamble)
+        } else {
+            preamble
+        };
+        let source_instructions = if auto_sources {
+            format!(
+                "\n\n## Sources: automatic\nThe user asked you to choose the platform(s) that fit this request. \
+                 Available platforms: {}. Choose based on the actual question; use one or several \
+                 only when the research needs them. Begin on the blank tab, navigate to the chosen \
+                 site's home URL with navigate_site, read the returned skill and use its tools. \
+                 Do not visit every site by default. Explain any access failure or coverage gap. \
+                 Cite evidence from the sites actually used; do not claim coverage of unused sites.",
+                available_sites.iter().filter_map(|id| find_native_site_adapter(id))
+                    .map(|site| format!("{} ({})", site.id, site.home_url))
+                    .collect::<Vec<_>>().join(", ")
+            )
+        } else {
+            format!(
+            "\n\n## Selected sources\nThe user selected these platforms: {}. Only collect new evidence from these platforms. \
+             Use navigate_site and its returned skill for non-Xiaohongshu platforms, including X. \
+             Do not use shell or other tools to bypass this selection. If the request needs an unselected \
+             platform, explain that the user can change the source selection. Existing conversation evidence \
+             may still be discussed; do not claim it was fetched again. For research across multiple selected \
+             platforms, report missing coverage and access failures rather than silently omitting a source.",
+            sites.iter().filter_map(|id| find_native_site_adapter(id))
+                .map(|site| format!("{} ({})", site.id, site.home_url))
+                .collect::<Vec<_>>().join(", ")
+            )
+        };
         let config = AgentRunConfig {
             extra_instructions: format!(
-                "{}{}{}{}",
-                agent_instructions(&preamble),
+                "{}{}{}{}{}{}",
+                instructions,
                 TAURI_SITE_ROUTING_RULES,
                 TAURI_CITATION_RULES,
-                TAURI_ARTIFACT_RULES
+                TAURI_ARTIFACT_RULES,
+                source_instructions,
+                instagram_login_note
             ),
-            enabled_sites: vec![site.id.to_string()],
+            enabled_sites: available_sites,
             seed_messages,
             run_dir,
             session_id: Some(session_id),
@@ -3138,6 +3443,9 @@ fn pump_agent_task_events(
                         "error".into(),
                         json!(error.as_deref().map(redacted_short_error)),
                     );
+                    if let Some(error) = error.as_deref() {
+                        props.insert("error_type".into(), json!(tool_failure_error_type(error)));
+                    }
                     if is_site_tool_result(name) {
                         props.insert("site".into(), json!(APP_SITE_ID));
                     }
@@ -3263,6 +3571,74 @@ pub async fn auth_session() -> Result<socai_core::cloud::AuthSession, String> {
     socai_core::cloud::auth_session().map_err(|err| format!("{err:#}"))
 }
 
+#[derive(Default)]
+pub struct GoogleAuthState {
+    cancel: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+#[tauri::command]
+pub async fn auth_google_login(
+    app: AppHandle,
+    state: State<'_, GoogleAuthState>,
+    telemetry: State<'_, DesktopTelemetry>,
+    link: bool,
+) -> Result<socai_core::cloud::AuthSession, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    {
+        let mut active = state
+            .cancel
+            .lock()
+            .map_err(|_| "Google login unavailable")?;
+        if active.is_some() {
+            return Err("Google login already in progress".into());
+        }
+        *active = Some(sender);
+    }
+    let result = tokio::select! {
+        result = socai_core::cloud::sign_in_with_google(link, |url| {
+            open_external(url.to_owned())
+                .map_err(|_| anyhow::anyhow!("failed to open Google login browser"))?;
+            let _ = app.emit("auth-google-browser-opened", ());
+            Ok(())
+        }) => result.map_err(|err| format!("{err:#}")),
+        _ = receiver => Err("Google login cancelled".into()),
+    };
+    if let Ok(mut active) = state.cancel.lock() {
+        *active = None;
+    }
+    // Do not capture OAuth codes, tokens, email addresses or provider responses.
+    telemetry.capture(
+        "socai_auth_login",
+        json!({
+            "method": "google", "link": link,
+            "outcome": if result.is_ok() { "completed" } else { "failed" },
+        }),
+    );
+    if result.is_ok() {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.set_focus();
+        }
+    }
+    result
+}
+
+#[tauri::command]
+pub fn auth_google_cancel(state: State<'_, GoogleAuthState>) -> Result<(), String> {
+    // Leave a closed sender in place until the original command releases the
+    // slot, so a cancellation cannot overlap a newly started login.
+    let mut active = state
+        .cancel
+        .lock()
+        .map_err(|_| "Google login unavailable")?;
+    if let Some(sender) = active.as_mut() {
+        let (closed, receiver) = tokio::sync::oneshot::channel();
+        drop(receiver);
+        let sender = std::mem::replace(sender, closed);
+        let _ = sender.send(());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn auth_sms_send(
     telemetry: State<'_, DesktopTelemetry>,
@@ -3385,6 +3761,26 @@ pub async fn billing_create_alipay_order(
 }
 
 #[tauri::command]
+pub async fn billing_create_stripe_order(
+    telemetry: State<'_, DesktopTelemetry>,
+    plan_id: String,
+    request_id: String,
+) -> Result<socai_core::cloud::PaymentOrder, String> {
+    let result = socai_core::cloud::create_stripe_order(&plan_id, &request_id)
+        .await
+        .map_err(|err| format!("{err:#}"));
+    capture_subscription_checkout(&telemetry, "stripe", &plan_id, &result);
+    result
+}
+
+#[tauri::command]
+pub async fn billing_cancel_stripe_subscription() -> Result<(), String> {
+    socai_core::cloud::cancel_stripe_subscription()
+        .await
+        .map_err(|err| format!("{err:#}"))
+}
+
+#[tauri::command]
 pub async fn billing_order_status(
     telemetry: State<'_, DesktopTelemetry>,
     order_id: String,
@@ -3484,7 +3880,8 @@ fn default_runs_root_display() -> String {
 }
 
 /// Default managed chrome user-data-dir when `chrome.profile_dir` is unset.
-/// Delegates to the core resolver (`SOCAI_HOME/chrome-profile`, then
+/// Delegates to the core resolver (`SOCAI_CHROME_PROFILE_DIR`, then
+/// `SOCAI_HOME/chrome-profile`, then
 /// `~/.socai/chrome-profile`) so the placeholder matches what chrome would
 /// actually launch with — including `~` expansion of a tilde-prefixed
 /// `SOCAI_HOME`, which a local reimplementation tends to drift on.

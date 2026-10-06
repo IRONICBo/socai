@@ -19,6 +19,8 @@ const SEARCH_TRANSITION_TIMEOUT_S: f64 = 12.0;
 /// Upper bound the login gate polls the sidebar for a definitive login read
 /// before falling back to "logged in" (only hit if no sidebar ever renders).
 const LOGIN_GATE_TIMEOUT_S: f64 = 6.0;
+/// Hard stop when a favorites album is collected without `--num-notes`.
+const ALBUM_NOTE_CAP: usize = 100;
 /// How many times to re-open a search note when the cover click lands on the
 /// wrong one. XHS search is a virtualized masonry grid: the pixel coordinates
 /// `clickCard` measures can go stale before the CDP click lands (lazy content
@@ -742,7 +744,7 @@ impl<'a> XhsPageRuntime<'a> {
 
         let _ = self
             .page
-            .evaluate_json("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true}))")
+            .evaluate_action("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true}))")
             .await;
         let state = self.wait_for_note_closed(per_attempt).await?;
         if !note_is_open(&state) {
@@ -777,7 +779,7 @@ impl<'a> XhsPageRuntime<'a> {
         {
             let _ = self
                 .page
-                .evaluate_json("history.back(); return {ok: true};")
+                .evaluate_action("history.back(); return {ok: true};")
                 .await;
             let state = self.wait_for_note_closed(per_attempt.max(1.5)).await?;
             if !note_is_open(&state) {
@@ -1215,7 +1217,7 @@ impl<'a> XhsPageRuntime<'a> {
             trigger
         } else {
             self.page
-                .evaluate_json(
+                .evaluate_action(
                     "window.scrollTo({ left: 0, top: 0, behavior: 'instant' }); return { ok: true, y: scrollY };",
                 )
                 .await?;
@@ -1299,6 +1301,7 @@ impl<'a> XhsPageRuntime<'a> {
             avatar_url: string_field(&info, "avatar_url"),
             bio: string_field(&info, "bio"),
             ip_location: string_field(&info, "ip_location"),
+            gender: string_field(&info, "gender"),
             verified: info
                 .get("verified")
                 .and_then(Value::as_bool)
@@ -1577,6 +1580,475 @@ impl<'a> XhsPageRuntime<'a> {
     /// location, follower/following/like counts) from the current profile page.
     pub async fn profile_info(&self) -> Result<Value> {
         self.expect_object("profileInfo", None).await
+    }
+
+    /// Open one favorites album the way a person does: left sidebar 我, the
+    /// 收藏 tab, the 专辑 subtab, then the named album card. Returns the
+    /// album's note cards. `limit` caps how many notes to keep; `None`
+    /// collects until the album feed stops loading, up to [`ALBUM_NOTE_CAP`].
+    pub async fn collect_favorite_album(
+        &self,
+        album_name: &str,
+        limit: Option<usize>,
+    ) -> Result<Value> {
+        let name = album_name.trim();
+        if name.is_empty() {
+            anyhow::bail!("album name is required");
+        }
+        if let Some(failure) = self.prepare_favorite_board().await? {
+            return Ok(failure);
+        }
+
+        let Some(album) = self.find_favorite_album(name).await? else {
+            let albums = self.collect_favorite_album_cards().await?;
+            return Ok(json!({
+                "ok": false,
+                "reason": "album_not_found",
+                "album": name,
+                "albums": album_summaries(&albums),
+                "url": self.current_url().await?,
+            }));
+        };
+
+        let board_id = album
+            .get("board_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        self.page
+            .click(number(&album, "x"), number(&album, "y"))
+            .await?;
+        if board_id.is_empty()
+            || !self
+                .wait_for_url(8.0, |url| is_board_root(url, &board_id))
+                .await?
+        {
+            let mut result = json!({
+                "ok": false,
+                "reason": "album_not_open",
+                "album": name,
+                "board_id": board_id,
+                "url": self.current_url().await?,
+            });
+            self.attach_page_failure_diagnostic(&mut result).await;
+            return Ok(result);
+        }
+
+        let cap = limit.unwrap_or(ALBUM_NOTE_CAP).clamp(1, ALBUM_NOTE_CAP);
+        let collected = self.collect_open_album_notes(cap).await?;
+        let notes = collected
+            .get("notes")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let has_more = collected
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let incomplete = has_more && (limit.is_none() || notes.len() < cap);
+        let mut result = json!({
+            "album": {
+                "name": collected.get("name").and_then(Value::as_str).unwrap_or(name),
+                "board_id": board_id,
+                "url": collected.get("url").and_then(Value::as_str).unwrap_or_default(),
+                "declared_count": collected.get("declared_count").and_then(Value::as_str).unwrap_or_default(),
+                "collected": notes.len(),
+            },
+            "notes": notes,
+            "has_more": has_more,
+        });
+        if incomplete {
+            result["ok"] = json!(false);
+            result["reason"] = json!("album_incomplete");
+        }
+        Ok(result)
+    }
+
+    /// Open 我 → 收藏 → 专辑 and return every album card currently reachable.
+    pub async fn list_favorite_albums(&self) -> Result<Value> {
+        if let Some(failure) = self.prepare_favorite_board().await? {
+            return Ok(failure);
+        }
+        let albums = self.collect_favorite_album_cards().await?;
+        Ok(json!({
+            "albums": album_summaries(&albums),
+        }))
+    }
+
+    async fn prepare_favorite_board(&self) -> Result<Option<Value>> {
+        match self.login_gate(true).await {
+            Ok(LoginGate::Required) => {
+                return Ok(Some(json!({
+                    "ok": false,
+                    "reason": "login_required",
+                    "url": self.current_url().await?,
+                })));
+            }
+            Ok(LoginGate::LoggedIn) => {}
+            Err(err) => {
+                let mut result = json!({
+                    "ok": false,
+                    "reason": "page_access_failed",
+                    "error": format!("{err:#}"),
+                });
+                self.attach_page_failure_diagnostic(&mut result).await;
+                return Ok(Some(result));
+            }
+        }
+
+        let me = self.click_script_target("sidebarMe", None).await?;
+        if !script_ok(&me) {
+            return Ok(Some(album_click_failure("me_not_found", &me)));
+        }
+        let profile_id = me
+            .get("profile_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if profile_id.is_empty()
+            || !self
+                .wait_for_url(8.0, |url| {
+                    url.contains(&format!("/user/profile/{profile_id}"))
+                })
+                .await?
+        {
+            let mut result = json!({
+                "ok": false,
+                "reason": "profile_not_open",
+                "url": self.current_url().await?,
+            });
+            self.attach_page_failure_diagnostic(&mut result).await;
+            return Ok(Some(result));
+        }
+        self.open_favorite_board_tab().await
+    }
+
+    async fn open_favorite_board_tab(&self) -> Result<Option<Value>> {
+        if !url_contains_query(&self.current_url().await?, "tab", "fav")
+            && !self
+                .click_stable_tab("收藏", |url| url_contains_query(url, "tab", "fav"))
+                .await?
+        {
+            return Ok(Some(json!({
+                "ok": false,
+                "reason": "favorites_tab_not_open",
+                "url": self.current_url().await?,
+            })));
+        }
+        if !url_contains_query(&self.current_url().await?, "subTab", "board")
+            && !self.click_stable_album_subtab().await?
+        {
+            return Ok(Some(json!({
+                "ok": false,
+                "reason": "album_tab_not_open",
+                "url": self.current_url().await?,
+            })));
+        }
+        Ok(None)
+    }
+
+    async fn click_stable_tab(&self, label: &str, pred: impl Fn(&str) -> bool) -> Result<bool> {
+        let arg = json!({ "label": label });
+        for _ in 0..5 {
+            let Some(point) = self.stable_point("profileTab", Some(&arg), 6.0).await? else {
+                sleep_ms(400).await;
+                continue;
+            };
+            self.page
+                .click(number(&point, "x"), number(&point, "y"))
+                .await?;
+            if self.wait_for_url(3.0, &pred).await? {
+                return Ok(true);
+            }
+        }
+        Ok(pred(&self.current_url().await?))
+    }
+
+    /// Wait until the 专辑 subtab's center stops moving, then click that point.
+    /// The favorites subtab row slides in after 收藏 is selected; clicking during
+    /// that motion lands on 文件 instead.
+    async fn click_stable_album_subtab(&self) -> Result<bool> {
+        for _ in 0..5 {
+            let Some(row) = self.stable_subtabs(6.0).await? else {
+                sleep_ms(400).await;
+                continue;
+            };
+            let Some(tab) = row.iter().find(|tab| subtab_label(tab) == "专辑") else {
+                sleep_ms(400).await;
+                continue;
+            };
+            let fresh = self.expect_object("profileSubtabs", None).await?;
+            let still = fresh
+                .get("tabs")
+                .and_then(Value::as_array)
+                .and_then(|tabs| {
+                    tabs.iter()
+                        .find(|item| subtab_label(item) == "专辑" && points_match(item, tab))
+                });
+            let Some(target) = still else {
+                continue;
+            };
+            self.page
+                .click(number(target, "x"), number(target, "y"))
+                .await?;
+            if self
+                .wait_for_url(3.0, |url| url_contains_query(url, "subTab", "board"))
+                .await?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(url_contains_query(
+            &self.current_url().await?,
+            "subTab",
+            "board",
+        ))
+    }
+
+    async fn find_favorite_album(&self, name: &str) -> Result<Option<Value>> {
+        let wanted = compact_name(name);
+        for _ in 0..5 {
+            let albums = self.stable_album_cards(6.0).await?;
+            let Some(album) = albums
+                .iter()
+                .find(|album| {
+                    compact_name(album.get("name").and_then(Value::as_str).unwrap_or("")) == wanted
+                })
+                .cloned()
+            else {
+                self.page.scroll(800).await?;
+                sleep_ms(700).await;
+                continue;
+            };
+            if album.get("in_view").and_then(Value::as_bool) != Some(true) {
+                self.page.scroll(800).await?;
+                sleep_ms(700).await;
+                continue;
+            }
+            let fresh = self
+                .expect_object("albumCard", Some(&json!({ "name": name })))
+                .await?;
+            if fresh.get("error").and_then(Value::as_str) == Some("album_ambiguous") {
+                return Ok(None);
+            }
+            if script_ok(&fresh) && points_match(&fresh, &album) {
+                return Ok(Some(fresh));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn collect_favorite_album_cards(&self) -> Result<Vec<Value>> {
+        let mut all = Vec::new();
+        let mut stalls = 0usize;
+        for _ in 0..6 {
+            let batch = self.stable_album_cards(4.0).await?;
+            let before = all.len();
+            for album in batch {
+                let id = album
+                    .get("board_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if id.is_empty()
+                    || all.iter().any(|item: &Value| {
+                        item.get("board_id").and_then(Value::as_str) == Some(id.as_str())
+                    })
+                {
+                    continue;
+                }
+                all.push(album);
+            }
+            if all.len() == before {
+                stalls += 1;
+                if stalls >= 2 {
+                    break;
+                }
+            } else {
+                stalls = 0;
+            }
+            self.page.scroll(800).await?;
+            sleep_ms(700).await;
+        }
+        Ok(all)
+    }
+
+    async fn stable_point(
+        &self,
+        tool: &str,
+        arg: Option<&Value>,
+        seconds: f64,
+    ) -> Result<Option<Value>> {
+        let deadline = Instant::now() + Duration::from_secs_f64(seconds);
+        let mut previous: Option<(i64, i64)> = None;
+        loop {
+            let value = self.expect_object(tool, arg).await?;
+            if script_ok(&value) {
+                let point = (
+                    number(&value, "x").round() as i64,
+                    number(&value, "y").round() as i64,
+                );
+                if previous == Some(point) {
+                    return Ok(Some(value));
+                }
+                previous = Some(point);
+            } else {
+                previous = None;
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            sleep_ms(400).await;
+        }
+    }
+
+    async fn stable_subtabs(&self, seconds: f64) -> Result<Option<Vec<Value>>> {
+        let deadline = Instant::now() + Duration::from_secs_f64(seconds);
+        let mut previous = String::new();
+        loop {
+            let value = self.expect_object("profileSubtabs", None).await?;
+            let tabs = value
+                .get("tabs")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let signature = subtab_signature(&tabs);
+            let ready = tabs.iter().any(|tab| subtab_label(tab) == "专辑");
+            if ready && !signature.is_empty() && signature == previous {
+                return Ok(Some(tabs));
+            }
+            previous = if ready { signature } else { String::new() };
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            sleep_ms(400).await;
+        }
+    }
+
+    async fn stable_album_cards(&self, seconds: f64) -> Result<Vec<Value>> {
+        let deadline = Instant::now() + Duration::from_secs_f64(seconds);
+        let mut previous = String::new();
+        let mut latest;
+        loop {
+            latest = self.expect_array("favoriteAlbums", None).await?;
+            let signature = album_card_signature(&latest);
+            let has_view = latest
+                .iter()
+                .any(|album| album.get("in_view").and_then(Value::as_bool) == Some(true));
+            if has_view && !signature.is_empty() && signature == previous {
+                return Ok(latest);
+            }
+            previous = if has_view { signature } else { String::new() };
+            if Instant::now() >= deadline {
+                return Ok(latest);
+            }
+            sleep_ms(400).await;
+        }
+    }
+
+    async fn click_script_target(&self, tool: &str, arg: Option<&Value>) -> Result<Value> {
+        let target = self.expect_object(tool, arg).await?;
+        if !script_ok(&target) {
+            return Ok(target);
+        }
+        sleep_ms(150).await;
+        let fresh = self.expect_object(tool, arg).await?;
+        let click_at = if script_ok(&fresh) { fresh } else { target };
+        self.page
+            .click(number(&click_at, "x"), number(&click_at, "y"))
+            .await?;
+        Ok(click_at)
+    }
+
+    async fn wait_for_url(&self, seconds: f64, pred: impl Fn(&str) -> bool) -> Result<bool> {
+        let deadline = Instant::now() + Duration::from_secs_f64(seconds.max(0.5));
+        loop {
+            let url = self.current_url().await?;
+            if pred(&url) {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            sleep_ms(300).await;
+        }
+    }
+
+    async fn collect_open_album_notes(&self, limit: usize) -> Result<Value> {
+        const MAX_STALLS: usize = 3;
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(8);
+        let mut latest = self.expect_object("albumNotes", None).await?;
+        loop {
+            let count = latest
+                .get("notes")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            let has_more = latest
+                .get("has_more")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let named = latest
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| !name.is_empty());
+            let ready_empty =
+                count == 0 && !has_more && named && started.elapsed().as_millis() > 1500;
+            if count > 0 || ready_empty || Instant::now() >= deadline {
+                break;
+            }
+            sleep_ms(300).await;
+            latest = self.expect_object("albumNotes", None).await?;
+        }
+
+        let mut stalls = 0usize;
+        loop {
+            let raw = latest
+                .get("notes")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let notes = parse_cards(&raw);
+            let kept = notes.into_iter().take(limit).collect::<Vec<_>>();
+            let has_more = latest
+                .get("has_more")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let capped = kept.len() >= limit && raw.len() > kept.len();
+            if kept.len() >= limit || !has_more {
+                latest["notes"] = serde_json::to_value(&kept)?;
+                latest["has_more"] = json!(has_more || capped);
+                return Ok(latest);
+            }
+            let before = raw.len();
+            self.page.scroll(900).await?;
+            sleep_ms(900).await;
+            latest = self.expect_object("albumNotes", None).await?;
+            let after = latest
+                .get("notes")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            if after <= before {
+                stalls += 1;
+                if stalls >= MAX_STALLS {
+                    let stalled = latest
+                        .get("notes")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let kept = parse_cards(&stalled)
+                        .into_iter()
+                        .take(limit)
+                        .collect::<Vec<_>>();
+                    latest["notes"] = serde_json::to_value(&kept)?;
+                    return Ok(latest);
+                }
+            } else {
+                stalls = 0;
+            }
+        }
     }
 
     /// Extract the currently open note. Caller is responsible for having
@@ -2271,6 +2743,97 @@ fn number(value: &Value, key: &str) -> f64 {
 
 fn script_ok(value: &Value) -> bool {
     value.get("ok").and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn subtab_label(tab: &Value) -> &str {
+    tab.get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .split(['・', '·'])
+        .next()
+        .unwrap_or("")
+}
+
+fn points_match(left: &Value, right: &Value) -> bool {
+    (number(left, "x") - number(right, "x")).abs() <= 2.0
+        && (number(left, "y") - number(right, "y")).abs() <= 2.0
+}
+
+fn compact_name(value: &str) -> String {
+    value.split_whitespace().collect()
+}
+
+fn subtab_signature(tabs: &[Value]) -> String {
+    tabs.iter()
+        .map(|tab| {
+            format!(
+                "{}@{},{}",
+                tab.get("text").and_then(Value::as_str).unwrap_or(""),
+                number(tab, "x").round() as i64,
+                number(tab, "y").round() as i64,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn album_card_signature(albums: &[Value]) -> String {
+    albums
+        .iter()
+        .filter(|album| album.get("in_view").and_then(Value::as_bool) == Some(true))
+        .map(|album| {
+            format!(
+                "{}@{},{}",
+                album.get("board_id").and_then(Value::as_str).unwrap_or(""),
+                number(album, "x").round() as i64,
+                number(album, "y").round() as i64,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn album_click_failure(reason: &str, target: &Value) -> Value {
+    json!({
+        "ok": false,
+        "reason": reason,
+        "error": target.get("error").and_then(Value::as_str).unwrap_or(""),
+    })
+}
+
+fn url_contains_query(url: &str, key: &str, value: &str) -> bool {
+    let Some((_, query)) = url.split_once('?') else {
+        return false;
+    };
+    let query = query.split('#').next().unwrap_or("");
+    let wanted = format!("{key}={value}");
+    query.split('&').any(|pair| pair == wanted)
+}
+
+fn is_board_root(url: &str, board_id: &str) -> bool {
+    if board_id.is_empty() {
+        return false;
+    }
+    let marker = format!("/board/{board_id}");
+    let Some(index) = url.find(&marker) else {
+        return false;
+    };
+    let rest = &url[index + marker.len()..];
+    rest.is_empty() || rest.starts_with('?') || rest.starts_with('#')
+}
+
+fn album_summaries(albums: &[Value]) -> Vec<Value> {
+    albums
+        .iter()
+        .filter_map(|album| {
+            let obj = album.as_object()?;
+            Some(json!({
+                "name": string_field(obj, "name"),
+                "board_id": string_field(obj, "board_id"),
+                "note_count": string_field(obj, "note_count"),
+            }))
+        })
+        .collect()
 }
 
 fn string_field(obj: &Map<String, Value>, key: &str) -> String {

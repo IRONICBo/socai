@@ -18,9 +18,9 @@ use crate::sites::registry::{
 use crate::sites::runner::{get_f64, get_i64, json_result, run_tool_command, ToolCommand};
 use crate::sites::tiktok::TikTokPageRuntime;
 
-/// Bundled default note retained for API compatibility. Runtime site-skill
-/// overrides are loaded from `$SOCAI_HOME/site-skills/tiktok`.
-pub const TIKTOK_KNOWLEDGE: &str = include_str!("knowledge.md");
+/// Legacy public symbol retained for API compatibility. TikTok behavior is
+/// described by its manifest, command schemas, and implementation.
+pub const TIKTOK_KNOWLEDGE: &str = "";
 
 const MAX_VIDEO_DOWNLOAD_BYTES: usize = 128 * 1024 * 1024;
 const MAX_POSTER_DOWNLOAD_BYTES: usize = 20 * 1024 * 1024;

@@ -874,7 +874,7 @@ impl Tool for CommentTool {
     }
 
     fn description(&self) -> &str {
-        "Comment on an explicitly selected LinkedIn post with real CDP pointer and keyboard events. Refuses login gates, ambiguous editors, existing drafts or exact comments, route changes, and submit retries."
+        "Comment only when the user explicitly requests the exact LinkedIn post and exact text. Preserve both without inventing additional writes. Uses real CDP pointer and keyboard events and refuses login gates, ambiguous editors, existing drafts or exact comments, route changes, and submit retries. Treat commit_unknown as unknown and never retry it automatically."
     }
 
     fn input_schema(&self) -> Value {

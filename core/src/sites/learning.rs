@@ -51,6 +51,9 @@ pub struct SiteSkillManifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserToolDefinition {
+    /// DOM action (scroll/input/click), paced globally rather than as a read probe.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub action: bool,
     pub description: String,
     pub path: String,
     /// Bundle expression that exposes the callable table, for example
@@ -202,15 +205,56 @@ pub fn site_agent_instructions(site_id: &str, extra: &str) -> String {
 /// Generic browser-use-style tools. They make manifest-only packages usable
 /// by an agent without adding a Rust adapter or a CLI command table.
 pub fn site_learning_tools(page: Arc<PageSession>) -> Vec<SharedTool> {
+    build_site_learning_tools(page, None)
+}
+
+/// Desktop source selection restricts navigation and execution independently
+/// of model instructions. Other hosts retain unrestricted site discovery.
+pub fn scoped_site_learning_tools(page: Arc<PageSession>, sites: &[String]) -> Vec<SharedTool> {
+    build_site_learning_tools(page, Some(Arc::new(sites.iter().cloned().collect())))
+}
+
+fn build_site_learning_tools(
+    page: Arc<PageSession>,
+    allowed_sites: Option<Arc<BTreeSet<String>>>,
+) -> Vec<SharedTool> {
     vec![
-        Arc::new(NavigateSiteTool { page: page.clone() }),
-        Arc::new(ReadSiteSkillsTool { page: page.clone() }),
-        Arc::new(RunSiteBrowserTool { page }),
+        Arc::new(NavigateSiteTool {
+            page: page.clone(),
+            allowed_sites: allowed_sites.clone(),
+        }),
+        Arc::new(ReadSiteSkillsTool {
+            page: page.clone(),
+            allowed_sites: allowed_sites.clone(),
+        }),
+        Arc::new(RunSiteBrowserTool {
+            page,
+            allowed_sites,
+        }),
     ]
+}
+
+fn check_selected_site(allowed: &Option<Arc<BTreeSet<String>>>, site: &str) -> Result<()> {
+    if allowed.as_ref().is_some_and(|sites| !sites.contains(site)) {
+        anyhow::bail!("platform {site} is not selected for this task; ask the user to change the source selection");
+    }
+    Ok(())
+}
+
+fn check_selected_context(allowed: &Option<Arc<BTreeSet<String>>>, context: &Value) -> Result<()> {
+    if let Some(skills) = context["skills"].as_array() {
+        for skill in skills {
+            if let Some(site) = skill["id"].as_str() {
+                check_selected_site(allowed, site)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 struct NavigateSiteTool {
     page: Arc<PageSession>,
+    allowed_sites: Option<Arc<BTreeSet<String>>>,
 }
 
 #[async_trait]
@@ -247,11 +291,16 @@ impl Tool for NavigateSiteTool {
             .filter(|value| !value.is_empty())
             .context("navigate_site requires a non-empty `url`")?;
         validate_navigation_url(url)?;
-        if site_skills_for_url(url)?.is_empty() {
+        let skills = site_skills_for_url(url)?;
+        for skill in &skills {
+            check_selected_site(&self.allowed_sites, &skill.id)?;
+        }
+        if skills.is_empty() {
             anyhow::bail!("no installed site skill matches navigation URL: {url}");
         }
         self.page.navigate_with_timeout(url, 60.0).await?;
         let result = current_site_skill_contexts(&self.page).await?;
+        check_selected_context(&self.allowed_sites, &result)?;
         if result["skills"].as_array().is_none_or(Vec::is_empty) {
             anyhow::bail!(
                 "navigation left the declared site-skill domains: {}",
@@ -264,6 +313,7 @@ impl Tool for NavigateSiteTool {
 
 struct ReadSiteSkillsTool {
     page: Arc<PageSession>,
+    allowed_sites: Option<Arc<BTreeSet<String>>>,
 }
 
 #[async_trait]
@@ -288,12 +338,14 @@ impl Tool for ReadSiteSkillsTool {
 
     async fn call(&self, _input: Value, _ctx: &ToolContext) -> Result<ToolResult> {
         let result = current_site_skill_contexts(&self.page).await?;
+        check_selected_context(&self.allowed_sites, &result)?;
         Ok(ToolResult::text(serde_json::to_string_pretty(&result)?))
     }
 }
 
 struct RunSiteBrowserTool {
     page: Arc<PageSession>,
+    allowed_sites: Option<Arc<BTreeSet<String>>>,
 }
 
 #[async_trait]
@@ -327,6 +379,7 @@ impl Tool for RunSiteBrowserTool {
 
     async fn call(&self, input: Value, ctx: &ToolContext) -> Result<ToolResult> {
         let site_id = required_tool_string(&input, "site_id")?;
+        check_selected_site(&self.allowed_sites, site_id)?;
         let tool_name = required_tool_string(&input, "tool_name")?;
         let args = input.get("args");
         if args.is_some_and(|value| !value.is_object()) {
@@ -334,14 +387,18 @@ impl Tool for RunSiteBrowserTool {
         }
         let mut result =
             run_site_browser_tool_collecting(&self.page, site_id, tool_name, args).await?;
-        crate::sites::post_archive::save_site_media(
-            &self.page,
-            ctx,
-            site_id,
-            tool_name,
-            &mut result,
-        )
-        .await;
+        let background_videos = ctx.background_media_generation.is_some()
+            && matches!(site_id, "instagram" | "tiktok" | "dy");
+        if !background_videos {
+            crate::sites::post_archive::save_site_media(
+                &self.page,
+                ctx,
+                site_id,
+                tool_name,
+                &mut result,
+            )
+            .await;
+        }
         let page_url = self
             .page
             .page_info()
@@ -355,6 +412,15 @@ impl Tool for RunSiteBrowserTool {
             &result,
             page_url.as_deref(),
         );
+        if background_videos {
+            crate::sites::post_archive::schedule_background_preview_videos(
+                self.page.clone(),
+                ctx,
+                site_id,
+                tool_name,
+                &result,
+            );
+        }
         Ok(ToolResult::text(serde_json::to_string_pretty(&result)?))
     }
 }
@@ -433,7 +499,9 @@ fn pagination_scroll_tool(site_id: &str, tool_name: &str) -> Option<&'static str
     match (site_id, tool_name) {
         ("linkedin" | "instagram" | "dy" | "tiktok" | "x", "comments") => Some("scrollComments"),
         ("linkedin" | "instagram" | "x", "searchResults") => Some("scrollResults"),
+        ("x", "searchPeople" | "searchLists" | "searchMedia") => Some("scrollResults"),
         ("instagram" | "x", "profilePosts") => Some("scrollPosts"),
+        ("x", "feedPosts" | "notificationItems" | "followBackCandidates") => Some("scrollResults"),
         ("dy" | "tiktok", "videoCards") => Some("scrollFeed"),
         _ => None,
     }
@@ -539,7 +607,11 @@ pub async fn run_site_browser_tool(
     validate_tool_arguments(tool_name, tool, args)?;
     let source = skill.read_resource(&tool.path)?;
     let expression = browser_tool_expression(site_id, tool_name, tool, &source, args)?;
-    let result = page.evaluate_json(&expression).await?;
+    let result = if tool.action {
+        page.evaluate_action(&expression).await?
+    } else {
+        page.evaluate_json(&expression).await?
+    };
     validate_value_against_schema(
         &result,
         &tool.returns,

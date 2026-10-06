@@ -10,6 +10,7 @@ use std::collections::HashSet;
 
 use serde_json::json;
 use socai_core::runtime::{RuntimeBrowserEvent, SocaiRuntime};
+use socai_core::telemetry::{browser_disconnect_details, browser_source_category};
 use tasks::AgentTaskRegistry;
 use tauri::{Emitter, Manager};
 use telemetry::{duration_ms, DesktopTelemetry};
@@ -120,8 +121,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(runtime)
         .manage(AgentTaskRegistry::default())
+        .manage(commands::GoogleAuthState::default())
         .manage(connectors::feishu::FeishuState::default())
         .manage(telemetry)
         .setup(|app| {
@@ -159,6 +162,13 @@ pub fn run() {
                 }
 
                 let mut rx = runtime.subscribe_browser_events();
+                // Managed Chrome is owned by socai, so no Chrome Allow step or
+                // explicit Connect click is needed at app startup.
+                if socai_core::cdp::ChromeConnectOptions::from_config()
+                    .is_ok_and(|options| options.profile == socai_core::cdp::ChromeProfile::Managed)
+                {
+                    runtime.connect_browser_once();
+                }
                 let mut latest_disconnect_reason: Option<String> = None;
                 let mut recoverable_disconnect = false;
                 while let Ok(event) = rx.recv().await {
@@ -193,7 +203,7 @@ pub fn run() {
                                         json!({
                                             "outcome": "completed",
                                             "browser_profile": profile,
-                                            "browser_source": source,
+                                            "browser_source": browser_source_category(source),
                                             "remote_timeout_seconds": remote_timeout_seconds,
                                             "remote_remaining_seconds": remote_remaining_seconds,
                                         }),
@@ -205,6 +215,8 @@ pub fn run() {
                                     }
                                     if reason != "not_yet_connected" {
                                         latest_disconnect_reason = Some(reason.clone());
+                                        let (error_type, error) =
+                                            browser_disconnect_details(reason);
                                         telemetry.capture(
                                             "socai_browser_connect",
                                             json!({
@@ -213,7 +225,8 @@ pub fn run() {
                                                 } else {
                                                     "failed"
                                                 },
-                                                "error": crate::telemetry::short_error(reason),
+                                                "error_type": error_type,
+                                                "error": error,
                                             }),
                                         );
                                     }
@@ -344,6 +357,8 @@ pub fn run() {
             commands::agent_task_notes,
             commands::agent_task_artifacts,
             commands::agent_task_artifact_preview,
+            commands::agent_task_artifact_reveal,
+            commands::agent_task_artifact_save_as,
             commands::agent_task_artifact_download,
             commands::agent_task_artifact_download_exists,
             commands::agent_task_artifact_open,
@@ -354,6 +369,8 @@ pub fn run() {
             commands::config_unset,
             commands::pro_activate,
             commands::auth_session,
+            commands::auth_google_login,
+            commands::auth_google_cancel,
             commands::auth_sms_send,
             commands::auth_sms_verify,
             commands::auth_logout,
@@ -361,6 +378,8 @@ pub fn run() {
             commands::billing_plan,
             commands::billing_create_wechat_order,
             commands::billing_create_alipay_order,
+            commands::billing_create_stripe_order,
+            commands::billing_cancel_stripe_subscription,
             commands::billing_order_status,
             commands::billing_mock_recharge,
             voice_input::voice_input_status,

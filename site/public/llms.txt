@@ -1,6 +1,6 @@
 # socai documentation
 
-> socai is a local agent that researches Xiaohongshu, Douyin, TikTok, Instagram, and LinkedIn through a signed-in Chrome session and returns source-linked evidence.
+> socai is a local agent and CLI that researches Xiaohongshu, X, Douyin, TikTok, Instagram, and LinkedIn through a signed-in Chrome session and returns structured, source-linked evidence. Coding agents can install its portable social-research Skill with `socai integrate install`.
 
 ## Start here
 
@@ -12,6 +12,7 @@
 ## Use socai
 
 - [Agent workflows](https://socai.io/docs/agent-workflows/)
+- [Install for Codex, Claude Code, and Agent Skills hosts](https://socai.io/docs/agent-workflows/#install-agent-discovery)
 - [CLI reference](https://socai.io/docs/cli/)
 - [Supported platforms](https://socai.io/docs/platforms/)
 - [Evidence and artifacts](https://socai.io/docs/evidence/)
@@ -24,6 +25,10 @@
 
 ## Blog
 
+- [How to get X (Twitter) data for your AI agent for free (2026/10)](https://socai.io/blog/free-x-data-for-ai-agents/)
+- [如何免费让 AI agent 获取 X（Twitter）数据 (2026/10)](https://socai.io/blog/zh/free-x-data-for-ai-agents/)
+- [What local means for a social research agent](https://socai.io/blog/jev-social-privacy-boundary/)
+- [本地浏览器 Agent 并不等于离线：Jev Social 的数据流](https://socai.io/blog/zh/jev-social-privacy-boundary/)
 - [How to benchmark a social browser agent](https://socai.io/blog/benchmark-social-browser-agent/)
 - [怎么给社交媒体 Agent 做基准测试](https://socai.io/blog/zh/benchmark-social-browser-agent/)
 - [How to use Jev for social media](https://socai.io/blog/jev-social-media-automation/)
