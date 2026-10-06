@@ -183,6 +183,15 @@ then a Vercel/GitHub account owner must connect the GitHub login/integration in 
 
 ## Troubleshooting
 
+### Website changes skipped after a multi-commit push
+
+The ignored build step in `site/vercel.json` must compare `HEAD` against
+`VERCEL_GIT_PREVIOUS_SHA` (the last successful deployment for this project and
+branch), not `HEAD^`. The final commit in a push can change only Rust code while
+earlier commits change the website. If the previous deployment SHA is missing
+or unavailable in the shallow clone, build rather than skip. Exit 0 skips a
+build; exit 1 proceeds.
+
 ### `Root Directory "site" does not exist`
 
 This usually happens when running local CLI deploy from `site/` while the remote project also has root directory `site`. Use the emergency/manual CLI deployment workaround above, or prefer Git deployments.
