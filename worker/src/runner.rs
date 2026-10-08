@@ -41,10 +41,33 @@ const RECOVERABLE_BROWSER_ERROR_MARKERS: [&str; 7] = [
 struct RecoverableBrowserSessionLoss;
 
 fn bounded_event_text(value: String) -> String {
-    if value.len() <= MAX_EVENT_VALUE_BYTES {
+    if serde_json::to_vec(&value).is_ok_and(|encoded| encoded.len() <= MAX_EVENT_VALUE_BYTES) {
         value
     } else {
-        truncate(&value, MAX_EVENT_TEXT_CHARS)
+        let trimmed = value.trim();
+        let mut lower = 0usize;
+        let mut upper = trimmed
+            .chars()
+            .take(MAX_EVENT_TEXT_CHARS.saturating_add(1))
+            .count()
+            .min(MAX_EVENT_TEXT_CHARS);
+        let mut bounded = "... [truncated]".to_string();
+        while lower <= upper {
+            let middle = lower + (upper - lower) / 2;
+            let mut candidate = trimmed.chars().take(middle).collect::<String>();
+            candidate.push_str("... [truncated]");
+            if serde_json::to_vec(&candidate)
+                .is_ok_and(|encoded| encoded.len() <= MAX_EVENT_VALUE_BYTES)
+            {
+                bounded = candidate;
+                lower = middle.saturating_add(1);
+            } else if middle == 0 {
+                break;
+            } else {
+                upper = middle - 1;
+            }
+        }
+        bounded
     }
 }
 
@@ -642,9 +665,9 @@ fn map_agent_event(sequencer: &mut EventSequencer, event: AgentEvent) -> Option<
             task,
             model,
         } => WorkerEventPayload::Started {
-            agent_run_id: run_id,
-            task,
-            model,
+            agent_run_id: bounded_event_identifier(run_id, 160),
+            task: bounded_event_text(task),
+            model: bounded_event_identifier(model, 160),
         },
         AgentEvent::Step { step } => WorkerEventPayload::Step { step },
         AgentEvent::Reasoning { step, text } => WorkerEventPayload::Reasoning {

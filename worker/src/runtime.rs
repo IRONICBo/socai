@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::runner::{emit_event, execute_run, prepare_run, record_run, PreparedRun, RunSpec};
 use crate::WorkerBuildInfo;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use socai_core::runtime::SocaiRuntime;
 use socai_worker_protocol::{
     EventSequencer, ProtocolError, SessionBinding, WorkerCommand, WorkerOutput,
@@ -39,7 +39,8 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
         .with_context(|| format!("failed to create {}", session_dir.display()))?;
 
     let (output_tx, output_rx) = mpsc::unbounded_channel();
-    let writer = tokio::spawn(write_outputs(output_rx));
+    let mut writer = tokio::spawn(write_outputs(output_rx));
+    let mut writer_failure = None;
     let worker_instance_id = Uuid::new_v4().to_string();
     let _ = output_tx.send(WorkerOutput::Ready {
         protocol_version: CONTROL_PROTOCOL_VERSION,
@@ -59,6 +60,15 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
 
     loop {
         tokio::select! {
+            result = &mut writer => {
+                writer_failure = Some(match result {
+                    Ok(Ok(())) => anyhow!("worker output task stopped before the command loop"),
+                    Ok(Err(error)) => error.context("worker output task failed"),
+                    Err(error) => anyhow!("worker output task could not be joined: {error}"),
+                });
+                let _ = cancel_active(&mut active, &output_tx, "worker output failed").await;
+                break;
+            }
             completed = finished_rx.recv(), if active.is_some() => {
                 if let Some(run_id) = completed {
                     if active.as_ref().is_some_and(|run| run.run_id == run_id) {
@@ -226,6 +236,9 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
 
     runtime.disconnect_browser().await;
     drop(output_tx);
+    if let Some(error) = writer_failure {
+        return Err(error);
+    }
     writer.await.context("worker output task failed")??;
     info!(%worker_instance_id, "session worker stopped");
     Ok(())
@@ -341,7 +354,12 @@ fn send_protocol_error(
         ProtocolError::VersionMismatch { .. } => "protocol_version_mismatch",
         ProtocolError::InvalidField { .. } => "invalid_command",
     };
-    send_error(output, request_id, code, &error.to_string());
+    send_error(
+        output,
+        request_id.map(|value| value.chars().take(160).collect()),
+        code,
+        &error.to_string(),
+    );
 }
 
 fn send_error(
