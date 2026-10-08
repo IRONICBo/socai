@@ -13,6 +13,17 @@ pub mod trace;
 
 pub use trace::{redact_secrets, redact_telemetry_error};
 
+/// Reduce a browser endpoint source to its stable category before telemetry.
+///
+/// Runtime source strings may suffix `active_port` or `managed_profile` with a
+/// local filesystem path. The category is enough for operational grouping and
+/// prevents profile directories and OS usernames from leaving the device.
+pub fn browser_source_category(source: &str) -> &str {
+    source
+        .split_once(':')
+        .map_or(source, |(category, _)| category)
+}
+
 /// Convert a browser disconnect reason into stable, content-free telemetry.
 ///
 /// Runtime errors may contain local paths, profile names, or remote details,
@@ -645,12 +656,30 @@ fn terminal_app() -> String {
 #[cfg(unix)]
 fn parent_process_name() -> String {
     let ppid = unsafe { libc::getppid() };
-    crate::util::machine::command_output("ps", &["-p", &ppid.to_string(), "-o", "comm="])
+    let command =
+        crate::util::machine::command_output("ps", &["-p", &ppid.to_string(), "-o", "comm="]);
+    parent_process_category(&command)
 }
 
 #[cfg(not(unix))]
 fn parent_process_name() -> String {
     String::new()
+}
+
+fn parent_process_category(command: &str) -> String {
+    let normalized = command.trim().replace('\\', "/");
+    let name = normalized
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or("");
+    if name.is_empty() {
+        return String::new();
+    }
+    if normalized.contains("/target/debug/") || normalized.starts_with("target/debug/") {
+        format!("{name}-debug")
+    } else {
+        name.to_string()
+    }
 }
 
 fn env_value_is(name: &str, values: &[&str]) -> bool {
@@ -761,6 +790,19 @@ mod tests {
         assert_eq!(TelemetrySource::Desktop.as_str(), "desktop");
         assert!(TelemetrySource::CliDaemon.collects_terminal_context());
         assert!(!TelemetrySource::Desktop.collects_terminal_context());
+        assert_eq!(
+            parent_process_category("/Users/private/.socai/bin/socai"),
+            "socai"
+        );
+        assert_eq!(
+            parent_process_category("./target/debug/socai"),
+            "socai-debug"
+        );
+        assert_eq!(
+            parent_process_category(r"C:\private\repo\target\debug\socai.exe"),
+            "socai.exe-debug"
+        );
+        assert_eq!(parent_process_category("/sbin/launchd"), "launchd");
     }
 
     #[test]

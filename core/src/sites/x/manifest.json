@@ -88,7 +88,7 @@
       "returns": { "type": "object", "description": "Search scroll and result-count state." }
     },
     "profileDetail": {
-      "description": "Extract the active X profile identity, selected timeline tab, biography, and visible counts.",
+      "description": "Extract the active X profile identity, selected timeline tab, biography, visible counts, and whether the header shows Following.",
       "path": "page_scripts.js",
       "binding": "window.SocaiXPageScripts",
       "callable": "profileDetail",
@@ -424,6 +424,80 @@
       "callable": "hoverCardPresence",
       "args": {},
       "returns": { "type": "object", "description": "Hover card open or closed state." }
+    },
+    "navLinkTarget": {
+      "description": "Inspect a left-nav link: notifications, profile, or home. Never clicks.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "navLinkTarget",
+      "args": {
+        "name": { "type": "string", "required": true, "description": "notifications, profile, or home." }
+      },
+      "returns": { "type": "object", "description": "Fail-closed sidebar link geometry. Profile also returns the signed-in username." }
+    },
+    "notificationsState": {
+      "description": "Verify the X notifications timeline and its selected tab. tab is all or mentions. Login, challenge, rate-limit, and a missing tab are not empty results.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "notificationsState",
+      "args": {
+        "tab": { "type": "string", "required": false, "description": "Expected tab label, all or mentions." }
+      },
+      "returns": { "type": "object", "description": "Selected notifications tab, actor, and visible item count." }
+    },
+    "notificationsTabTarget": {
+      "description": "Return owned pointer geometry for the All or Mentions tab on the notifications page. Never clicks.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "notificationsTabTarget",
+      "args": {
+        "tab": { "type": "string", "required": true, "description": "all or mentions." }
+      },
+      "returns": { "type": "object", "description": "Fail-closed notifications tab geometry." }
+    },
+    "notificationItems": {
+      "description": "Collect visible notification rows: replies, mentions, likes, and grouped follows.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "notificationItems",
+      "args": {
+        "limit": { "type": "integer", "required": false, "description": "Maximum rows to return." }
+      },
+      "returns": { "type": "array", "description": "Visible notification rows with kind, author, text, and follow accounts." }
+    },
+    "followersState": {
+      "description": "Verify the signed-in account's Followers page. An empty or logged-out page is not a successful empty list.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "followersState",
+      "args": {},
+      "returns": { "type": "object", "description": "Followers page username and visible account count." }
+    },
+    "followersLinkTarget": {
+      "description": "Inspect the signed-in profile's Followers count link. Never clicks. On X that count opens Verified Followers.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "followersLinkTarget",
+      "args": {},
+      "returns": { "type": "object", "description": "Fail-closed Followers count geometry." }
+    },
+    "followersTabTarget": {
+      "description": "Inspect the Followers tab, not Verified Followers. Never clicks.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "followersTabTarget",
+      "args": {},
+      "returns": { "type": "object", "description": "Fail-closed Followers tab geometry." }
+    },
+    "followBackCandidates": {
+      "description": "Collect visible Followers rows whose button still says Follow back.",
+      "path": "page_scripts.js",
+      "binding": "window.SocaiXPageScripts",
+      "callable": "followBackCandidates",
+      "args": {
+        "limit": { "type": "integer", "required": false, "description": "Maximum accounts to return." }
+      },
+      "returns": { "type": "array", "description": "Accounts that follow you and are not followed back yet." }
     }
   }
 }

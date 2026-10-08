@@ -26,6 +26,7 @@ use crate::sites::skill_cli::{
 
 const SITE_ID: &str = "x";
 const HOME_URL: &str = "https://x.com/home";
+const NOTIFICATIONS_URL: &str = "https://x.com/notifications";
 const HOST_ROOT: &str = "x.com";
 const RESERVED_PROFILE_NAMES: &[&str] = &[
     "compose",
@@ -56,6 +57,8 @@ pub fn x_agent_instructions(extra: &str) -> String {
 fn x_tools(page: Arc<PageSession>) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(HomeTool { page: page.clone() }),
+        Arc::new(NotificationsTool { page: page.clone() }),
+        Arc::new(FollowersTool { page: page.clone() }),
         Arc::new(SearchTool { page: page.clone() }),
         Arc::new(ProfileTool { page: page.clone() }),
         Arc::new(GetPostsTool { page: page.clone() }),
@@ -171,6 +174,64 @@ pub static X_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
             ],
             slow: SlowWhen::Always,
             run: run_home,
+        },
+        SiteCommand {
+            name: "notifications",
+            tool_name: "notifications",
+            about: "Read the X notifications timeline. Clicks the sidebar Notifications link and scrolls. Opens the notifications URL only if that link is missing or the click does not land.",
+            args: &[
+                CommandArg {
+                    key: "tab",
+                    long: Some("tab"),
+                    value_name: "TAB",
+                    help: "Notifications tab: all or mentions. Defaults to all.",
+                    required: false,
+                    kind: ArgKind::Str,
+                },
+                CommandArg {
+                    key: "num",
+                    long: Some("num"),
+                    value_name: "N",
+                    help: "Number of notification rows to collect by scrolling. Defaults to 20.",
+                    required: false,
+                    kind: ArgKind::Int,
+                },
+                CommandArg {
+                    key: "wait_seconds",
+                    long: Some("wait-seconds"),
+                    value_name: "SECONDS",
+                    help: "Maximum wait for the notifications page to hydrate. Defaults to 30.",
+                    required: false,
+                    kind: ArgKind::Int,
+                },
+            ],
+            slow: SlowWhen::Always,
+            run: run_notifications,
+        },
+        SiteCommand {
+            name: "followers",
+            tool_name: "followers",
+            about: "Read people who follow the signed-in account and still show Follow back. Clicks Profile, then Followers. A profile URL is only used if those clicks do not land.",
+            args: &[
+                CommandArg {
+                    key: "num",
+                    long: Some("num"),
+                    value_name: "N",
+                    help: "Number of Follow back accounts to collect by scrolling. Defaults to 20.",
+                    required: false,
+                    kind: ArgKind::Int,
+                },
+                CommandArg {
+                    key: "wait_seconds",
+                    long: Some("wait-seconds"),
+                    value_name: "SECONDS",
+                    help: "Maximum wait for the followers page to hydrate. Defaults to 30.",
+                    required: false,
+                    kind: ArgKind::Int,
+                },
+            ],
+            slow: SlowWhen::Always,
+            run: run_followers,
         },
         SiteCommand {
             name: "profile",
@@ -437,6 +498,38 @@ fn run_home(
     progress: Option<ToolProgressSender>,
 ) -> BoxFuture<Value> {
     run_named(page, args, debug_snapshot, progress, "home", "home")
+}
+
+fn run_notifications(
+    page: Arc<PageSession>,
+    args: Value,
+    debug_snapshot: bool,
+    progress: Option<ToolProgressSender>,
+) -> BoxFuture<Value> {
+    run_named(
+        page,
+        args,
+        debug_snapshot,
+        progress,
+        "notifications",
+        "notifications",
+    )
+}
+
+fn run_followers(
+    page: Arc<PageSession>,
+    args: Value,
+    debug_snapshot: bool,
+    progress: Option<ToolProgressSender>,
+) -> BoxFuture<Value> {
+    run_named(
+        page,
+        args,
+        debug_snapshot,
+        progress,
+        "followers",
+        "followers",
+    )
 }
 
 fn run_search(
@@ -901,7 +994,7 @@ impl Tool for ProfileTool {
     }
 
     fn description(&self) -> &str {
-        "Read an X profile and one timeline tab: posts, replies, reposts, media, highlights, articles, or likes. For post result tabs, set `deep` to open that many posts with trusted clicks in the current timeline, read details/replies, and restore the profile URL and scroll position. Deep-read click or restoration failures fail closed and never fall back to direct post navigation."
+        "Read an X profile and one timeline tab: posts, replies, reposts, media, highlights, articles, or likes. Posts is the default. For the signed-in account's posts tab, clicks the profile sidebar first and opens the profile URL only if that click does not land. For post result tabs, set `deep` to open that many posts with trusted clicks in the current timeline, read details/replies, and restore the profile URL and scroll position. Deep-read click or restoration failures fail closed and never fall back to direct post navigation."
     }
 
     fn input_schema(&self) -> Value {
@@ -933,9 +1026,22 @@ impl Tool for ProfileTool {
             get_i64(&input, "num_comments", DEFAULT_COMMENT_COUNT).clamp(0, MAX_TOOL_ITEMS);
         let wait_seconds =
             get_f64(&input, "wait_seconds", DEFAULT_WAIT_SECONDS).clamp(1.0, MAX_TOOL_WAIT_SECONDS);
-        navigate_https(&self.page, &url).await?;
-        let state =
-            wait_for_browser_tool(&self.page, SITE_ID, "profileDetail", None, wait_seconds).await?;
+        let mut state = json!({ "ok": false });
+        let mut opened_by_click = false;
+        if tab == "posts" && click_own_profile(&self.page, &parsed.username).await? {
+            state = wait_for_browser_tool(&self.page, SITE_ID, "profileDetail", None, wait_seconds)
+                .await?;
+            let observed_user = state.get("username").and_then(Value::as_str).unwrap_or("");
+            let observed_tab = state.get("tab").and_then(Value::as_str).unwrap_or("");
+            opened_by_click = state.get("ok").and_then(Value::as_bool) == Some(true)
+                && observed_user.eq_ignore_ascii_case(&parsed.username)
+                && observed_tab == tab;
+        }
+        if !opened_by_click {
+            navigate_https(&self.page, &url).await?;
+            state = wait_for_browser_tool(&self.page, SITE_ID, "profileDetail", None, wait_seconds)
+                .await?;
+        }
         if let Some(reason) = gate_reason(&state) {
             return Ok(json_result(&failure_payload(
                 reason,
@@ -1858,6 +1964,436 @@ impl Tool for PostTool {
             "receipt": persisted_receipt,
             "reconcile": reconciled,
         })))
+    }
+}
+
+struct NotificationsTool {
+    page: Arc<PageSession>,
+}
+
+#[async_trait]
+impl Tool for NotificationsTool {
+    fn name(&self) -> &str {
+        "notifications"
+    }
+
+    fn description(&self) -> &str {
+        "Read the X notifications timeline. Clicks the sidebar Notifications link and scrolls. Opens the notifications URL only if that link is missing or the click does not land. `tab` is all or mentions. This tool is read-only."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "tab": { "type": "string", "enum": ["all", "mentions"], "default": "all" },
+                "num": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 },
+                "wait_seconds": { "type": "number", "default": 30, "minimum": 1, "maximum": 330 }
+            }
+        })
+    }
+
+    async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let tab = x_notifications_tab(input.get("tab").and_then(Value::as_str).unwrap_or("all"))?;
+        let num = get_i64(&input, "num", 20).clamp(1, MAX_TOOL_ITEMS);
+        let wait_seconds =
+            get_f64(&input, "wait_seconds", DEFAULT_WAIT_SECONDS).clamp(1.0, MAX_TOOL_WAIT_SECONDS);
+        let state = open_notifications(&self.page, tab, wait_seconds).await?;
+        if let Some(reason) = gate_reason(&state) {
+            return Ok(json_result(&failure_payload(
+                reason,
+                json!({ "tab": tab, "state": state, "count": 0, "results": [] }),
+            )));
+        }
+        if state.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Ok(json_result(&failure_payload(
+                state
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("notifications_unavailable"),
+                json!({ "tab": tab, "state": state, "count": 0, "results": [] }),
+            )));
+        }
+        let results = invoke_browser_tool(
+            &self.page,
+            ctx,
+            SITE_ID,
+            "notificationItems",
+            Some(&json!({ "limit": num })),
+            true,
+        )
+        .await?;
+        let final_state = crate::sites::learning::run_site_browser_tool(
+            &self.page,
+            SITE_ID,
+            "notificationsState",
+            Some(&json!({ "tab": tab })),
+        )
+        .await?;
+        if final_state.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Ok(json_result(&failure_payload(
+                final_state
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("page_unavailable_after_scroll"),
+                json!({
+                    "tab": tab,
+                    "state": final_state,
+                    "count": results.as_array().map(Vec::len).unwrap_or(0),
+                    "results": results,
+                    "partial": true,
+                }),
+            )));
+        }
+        Ok(json_result(&json!({
+            "ok": true,
+            "tab": final_state.get("tab").cloned().unwrap_or(json!(tab)),
+            "tabs": final_state.get("tabs").cloned().unwrap_or(json!([])),
+            "actor": final_state.get("actor").cloned().unwrap_or(json!("")),
+            "url": current_url(&self.page).await.unwrap_or_default(),
+            "count": results.as_array().map(Vec::len).unwrap_or(0),
+            "results": results,
+            "state": final_state,
+        })))
+    }
+}
+
+struct FollowersTool {
+    page: Arc<PageSession>,
+}
+
+#[async_trait]
+impl Tool for FollowersTool {
+    fn name(&self) -> &str {
+        "followers"
+    }
+
+    fn description(&self) -> &str {
+        "Read people who follow the signed-in account and still show Follow back. Clicks Profile, then the Followers link, and scrolls. Opens the followers URL only if those clicks do not land. This tool is read-only."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "num": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 },
+                "wait_seconds": { "type": "number", "default": 30, "minimum": 1, "maximum": 330 }
+            }
+        })
+    }
+
+    async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let num = get_i64(&input, "num", 20).clamp(1, MAX_TOOL_ITEMS);
+        let wait_seconds =
+            get_f64(&input, "wait_seconds", DEFAULT_WAIT_SECONDS).clamp(1.0, MAX_TOOL_WAIT_SECONDS);
+        let state = open_followers(&self.page, wait_seconds).await?;
+        if let Some(reason) = gate_reason(&state) {
+            return Ok(json_result(&failure_payload(
+                reason,
+                json!({ "state": state, "count": 0, "results": [] }),
+            )));
+        }
+        if state.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Ok(json_result(&failure_payload(
+                state
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("followers_unavailable"),
+                json!({ "state": state, "count": 0, "results": [] }),
+            )));
+        }
+        let results = invoke_browser_tool(
+            &self.page,
+            ctx,
+            SITE_ID,
+            "followBackCandidates",
+            Some(&json!({ "limit": num })),
+            true,
+        )
+        .await?;
+        let final_state = crate::sites::learning::run_site_browser_tool(
+            &self.page,
+            SITE_ID,
+            "followersState",
+            None,
+        )
+        .await?;
+        if final_state.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Ok(json_result(&failure_payload(
+                final_state
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("page_unavailable_after_scroll"),
+                json!({
+                    "state": final_state,
+                    "count": results.as_array().map(Vec::len).unwrap_or(0),
+                    "results": results,
+                    "partial": true,
+                }),
+            )));
+        }
+        Ok(json_result(&json!({
+            "ok": true,
+            "username": final_state.get("username").cloned().unwrap_or(json!("")),
+            "actor": final_state.get("actor").cloned().unwrap_or(json!("")),
+            "url": current_url(&self.page).await.unwrap_or_default(),
+            "count": results.as_array().map(Vec::len).unwrap_or(0),
+            "results": results,
+            "state": final_state,
+        })))
+    }
+}
+
+async fn click_named_nav(page: &PageSession, name: &str) -> anyhow::Result<(bool, String)> {
+    let target = crate::sites::learning::run_site_browser_tool(
+        page,
+        SITE_ID,
+        "navLinkTarget",
+        Some(&json!({ "name": name })),
+    )
+    .await?;
+    let username = target
+        .get("username")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let Some((x, y)) = point_of(&target) else {
+        return Ok((false, username));
+    };
+    page.click(x, y).await?;
+    Ok((true, username))
+}
+
+async fn click_own_profile(page: &PageSession, username: &str) -> anyhow::Result<bool> {
+    let url = current_url(page).await.unwrap_or_default();
+    let (on_x, _) = on_x_home(&url);
+    if !on_x {
+        return Ok(false);
+    }
+    let target = crate::sites::learning::run_site_browser_tool(
+        page,
+        SITE_ID,
+        "navLinkTarget",
+        Some(&json!({ "name": "profile" })),
+    )
+    .await?;
+    let actor = target.get("username").and_then(Value::as_str).unwrap_or("");
+    if !actor.eq_ignore_ascii_case(username) {
+        return Ok(false);
+    }
+    let Some((x, y)) = point_of(&target) else {
+        return Ok(false);
+    };
+    page.click(x, y).await?;
+    Ok(true)
+}
+
+async fn open_notifications(
+    page: &PageSession,
+    tab: &str,
+    wait_seconds: f64,
+) -> anyhow::Result<Value> {
+    let url = current_url(page).await.unwrap_or_default();
+    let (on_x, _) = on_x_home(&url);
+    let mut used_url = false;
+    if on_x {
+        let (clicked, _) = click_named_nav(page, "notifications").await?;
+        if !clicked {
+            navigate_https(page, NOTIFICATIONS_URL).await?;
+            used_url = true;
+        }
+    } else {
+        navigate_https(page, NOTIFICATIONS_URL).await?;
+        used_url = true;
+    }
+    let mut state = wait_for_browser_tool(
+        page,
+        SITE_ID,
+        "notificationsState",
+        Some(&json!({ "tab": "" })),
+        wait_seconds,
+    )
+    .await?;
+    if state.get("ok").and_then(Value::as_bool) != Some(true) && !used_url {
+        navigate_https(page, NOTIFICATIONS_URL).await?;
+        state = wait_for_browser_tool(
+            page,
+            SITE_ID,
+            "notificationsState",
+            Some(&json!({ "tab": "" })),
+            wait_seconds,
+        )
+        .await?;
+    }
+    if state.get("ok").and_then(Value::as_bool) != Some(true) || gate_reason(&state).is_some() {
+        return Ok(state);
+    }
+    let selected = state.get("tab").and_then(Value::as_str).unwrap_or("");
+    if normalize_label(selected) == normalize_label(tab) {
+        return Ok(state);
+    }
+    let target = crate::sites::learning::run_site_browser_tool(
+        page,
+        SITE_ID,
+        "notificationsTabTarget",
+        Some(&json!({ "tab": tab })),
+    )
+    .await?;
+    if target.get("selected").and_then(Value::as_bool) == Some(true) {
+        return wait_notifications(page, tab, wait_seconds).await;
+    }
+    let Some((x, y)) = point_of(&target) else {
+        return Ok(target);
+    };
+    page.click(x, y).await?;
+    wait_notifications(page, tab, wait_seconds).await
+}
+
+async fn wait_notifications(
+    page: &PageSession,
+    tab: &str,
+    wait_seconds: f64,
+) -> anyhow::Result<Value> {
+    let deadline = Instant::now() + Duration::from_secs_f64(wait_seconds);
+    let args = json!({ "tab": tab });
+    let mut latest = json!({ "ok": false, "status": "waiting" });
+    while Instant::now() < deadline {
+        latest = crate::sites::learning::run_site_browser_tool(
+            page,
+            SITE_ID,
+            "notificationsState",
+            Some(&args),
+        )
+        .await?;
+        if latest.get("ok").and_then(Value::as_bool) == Some(true) || gate_reason(&latest).is_some()
+        {
+            return Ok(latest);
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    Ok(latest)
+}
+
+async fn poll_owned_target(
+    page: &PageSession,
+    tool_name: &str,
+    seconds: f64,
+) -> anyhow::Result<Value> {
+    let deadline = Instant::now() + Duration::from_secs_f64(seconds.clamp(1.0, 12.0));
+    let mut latest = json!({ "ok": false, "status": "waiting" });
+    while Instant::now() < deadline {
+        latest =
+            crate::sites::learning::run_site_browser_tool(page, SITE_ID, tool_name, None).await?;
+        if point_of(&latest).is_some() || gate_reason(&latest).is_some() {
+            return Ok(latest);
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    Ok(latest)
+}
+
+async fn open_followers_tab(
+    page: &PageSession,
+    wait_seconds: f64,
+) -> anyhow::Result<Option<Value>> {
+    let target = poll_owned_target(page, "followersTabTarget", 8.0).await?;
+    if target.get("selected").and_then(Value::as_bool) == Some(true) {
+        let state =
+            wait_for_browser_tool(page, SITE_ID, "followersState", None, wait_seconds).await?;
+        return Ok(Some(state));
+    }
+    let Some((x, y)) = point_of(&target) else {
+        return Ok(None);
+    };
+    page.click(x, y).await?;
+    let state = wait_for_browser_tool(page, SITE_ID, "followersState", None, wait_seconds).await?;
+    if state.get("ok").and_then(Value::as_bool) == Some(true) || gate_reason(&state).is_some() {
+        return Ok(Some(state));
+    }
+    Ok(None)
+}
+
+async fn open_followers(page: &PageSession, wait_seconds: f64) -> anyhow::Result<Value> {
+    let mut url = current_url(page).await.unwrap_or_default();
+    let (on_x, _) = on_x_home(&url);
+    if !on_x {
+        navigate_https(page, HOME_URL).await?;
+        url = current_url(page).await.unwrap_or_default();
+    } else if followers_path(&url) {
+        return wait_for_browser_tool(page, SITE_ID, "followersState", None, wait_seconds).await;
+    }
+    if !followers_path(&url) && !url.contains("/verified_followers") {
+        let _ = click_named_nav(page, "profile").await?;
+    }
+    let mut username = String::new();
+    let count = poll_owned_target(page, "followersLinkTarget", 8.0).await?;
+    if let Some(value) = count.get("username").and_then(Value::as_str) {
+        username = value.to_string();
+    }
+    if let Some((x, y)) = point_of(&count) {
+        page.click(x, y).await?;
+        if let Some(state) = open_followers_tab(page, wait_seconds).await? {
+            return Ok(state);
+        }
+    } else if url.contains("/verified_followers") {
+        if let Some(state) = open_followers_tab(page, wait_seconds).await? {
+            return Ok(state);
+        }
+    }
+    if username.is_empty() {
+        let target = crate::sites::learning::run_site_browser_tool(
+            page,
+            SITE_ID,
+            "navLinkTarget",
+            Some(&json!({ "name": "profile" })),
+        )
+        .await?;
+        username = target
+            .get("username")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+    }
+    if !username
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        || username.is_empty()
+    {
+        return Ok(json!({ "ok": false, "status": "actor_not_found" }));
+    }
+    navigate_https(page, &format!("https://x.com/{username}/followers")).await?;
+    wait_for_browser_tool(page, SITE_ID, "followersState", None, wait_seconds).await
+}
+
+fn followers_path(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let host = parsed.host_str().unwrap_or("");
+    if !(host == "x.com" || host.ends_with(".x.com")) {
+        return false;
+    }
+    let parts: Vec<&str> = parsed
+        .path()
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    parts.len() == 2 && parts[1].eq_ignore_ascii_case("followers")
+}
+
+fn normalize_label(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '_' && *ch != '-')
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn x_notifications_tab(raw: &str) -> anyhow::Result<&'static str> {
+    match normalize_label(raw).as_str() {
+        "" | "all" => Ok("all"),
+        "mentions" => Ok("mentions"),
+        _ => anyhow::bail!("tab must be all or mentions"),
     }
 }
 

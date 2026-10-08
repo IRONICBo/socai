@@ -184,6 +184,22 @@ Return only the author and post-card summaries:
 socai xhs author <author_id> --num-notes 20 --preview
 ```
 
+#### Read a favorites album
+
+List the albums first:
+
+```bash
+socai xhs albums --pretty
+```
+
+Then open one by the name shown there:
+
+```bash
+socai xhs album "专辑名" --pretty
+```
+
+This opens the signed-in account from the left sidebar (我 → 收藏 → 专辑) and returns the album's note cards, including the `xsec_token` values `get-notes` needs. Add `--num-notes` to cap the list. It does not open each note.
+
 #### Read selected posts again
 
 Use the post IDs and `xsec_token` values returned by `search` or `author`:

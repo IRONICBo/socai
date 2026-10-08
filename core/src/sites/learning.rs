@@ -501,7 +501,7 @@ fn pagination_scroll_tool(site_id: &str, tool_name: &str) -> Option<&'static str
         ("linkedin" | "instagram" | "x", "searchResults") => Some("scrollResults"),
         ("x", "searchPeople" | "searchLists" | "searchMedia") => Some("scrollResults"),
         ("instagram" | "x", "profilePosts") => Some("scrollPosts"),
-        ("x", "feedPosts") => Some("scrollResults"),
+        ("x", "feedPosts" | "notificationItems" | "followBackCandidates") => Some("scrollResults"),
         ("dy" | "tiktok", "videoCards") => Some("scrollFeed"),
         _ => None,
     }

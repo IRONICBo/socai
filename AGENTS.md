@@ -68,9 +68,14 @@ pnpm exec tauri build --bundles app   # → target/release/bundle/macos/socai.ap
 
 Rules:
 
-- **Design system is monochrome.** Use tokens from `app/src/styles.css`
-  (`--ink-0..9`, `--canvas`, `--fg`, `--line`, etc.). **No accent colors.**
-  Status is filled vs hollow, never hue.
+- **Monochrome applies only to the desktop app's primary UI** — navigation,
+  layout surfaces, typography, and core controls. Use tokens from
+  `app/src/styles.css` (`--ink-0..9`, `--canvas`, `--fg`, `--line`, etc.) for
+  those elements. This rule does not apply to the website or other surfaces.
+  Brand/platform icons, media, data visualizations, and supporting content may
+  use color when it makes them easier to recognize and understand. Prioritize
+  user comprehension over visual uniformity; never use color alone to convey
+  status (also use text, shape, or filled/hollow treatment).
 - **Hairlines, not shadows.** `--line` (#e5e5e5) carries all structural
   separation. `--shadow-pop` is reserved for popovers only.
 - **Use the type-scale classes** — `.t-display`, `.t-h1`, `.t-h2`, `.t-h3`,

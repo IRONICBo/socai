@@ -1,0 +1,18 @@
+---
+import WorkflowShowcase from './WorkflowShowcase.astro';
+import { xPrompt, xConversations, xFindings } from '../data/x-showcase';
+import { xConversationsZh, xFindingsZh } from '../data/showcase-locales';
+const { language = 'en' } = Astro.props;
+const zh=language==='zh'; const t=(en:string,cn:string)=>zh?cn:en;
+const conversations=zh?xConversationsZh:xConversations; const findings=zh?xFindingsZh:xFindings;
+const steps=[{label:t('Search posts','搜索帖子'),address:'x.com · '+t('Search','搜索')},{label:t('Read threads','阅读讨论'),address:'x.com · '+t('Replies','回复')},{label:t('Compare needs','归纳需求'),address:'x.com · '+t('Conversations','讨论')},{label:t('Results','结果'),address:'socai result'}];
+---
+<WorkflowShowcase id={zh?'x-showcase-zh':'x-showcase'} language={language} platform="X" icon="/platforms/x.png" title={t('Customer discovery','客户需求发现')} prompt={t(xPrompt,'我在做一款面向小型代理商的客户报告软件。帮我在 X 上找吐槽做报告的人，看看回复里怎么说，归纳反复出现的问题。应该先访谈谁，具体问什么？')} steps={steps}>
+ <div class="cs-screen cs-process-screen" data-cs-screen="0" hidden><div class="cs-search-field">⌕ "client reporting" OR "monthly report" agency</div><div class="xs-feed">{conversations.slice(0,3).map(c=><article class="xs-post"><header><strong>{c.name}</strong><span>@{c.handle} · {c.age}</span></header><p>{c.post}</p><footer>♡ {c.likes} <span>↩ {c.replies}</span></footer></article>)}</div></div>
+ <div class="cs-screen cs-process-screen" data-cs-screen="1" hidden><article class="xs-post"><header><strong>{conversations[0].name}</strong></header><p>{conversations[0].post}</p></article><div class="xs-thread"><p><strong>@rileyaccounts</strong>{t('Have you tried sending a live dashboard instead?','试过直接给客户看实时看板吗？')}</p><p><strong>@{conversations[0].handle}</strong>{conversations[0].context}</p></div></div>
+ <div class="cs-screen cs-process-screen" data-cs-screen="2" hidden><div class="tt-breakdown">{findings.map(f=><div><strong>{f.title}</strong><p>{f.detail}</p></div>)}</div></div>
+ <div class="cs-screen cs-board" data-cs-screen="3"><header class="cs-result-header"><strong>{t('6 conversations, 3 recurring problems','6 条讨论，3 类反复出现的问题')}</strong><button class="cs-export" type="button" disabled>{t('Download CSV','下载 CSV')} ↓</button></header>
+  <div class="cs-cards xs-findings">{findings.map(f=><article class="cs-card"><h3>{f.title}</h3><p>{f.detail}</p><p><b>{t('Build:','产品机会：')}</b> {f.opportunity}</p><span class="xs-refs">[{f.sources.join('][')}]</span></article>)}</div>
+  <div class="cs-table-wrap xs-main-table"><table><thead><tr>{[t('Who','访谈对象'),t('Problem / workaround','问题 / 现有做法'),t('Ask','访谈问题'),t('Priority','优先级')].map(s=><th>{s}</th>)}</tr></thead><tbody>{conversations.map(c=><tr><td><strong>{c.name}</strong><span>{c.role}</span></td><td><strong>{c.pain}</strong><span>{c.workaround}</span><details class="cs-evidence"><summary>{t('Read thread','查看讨论')}</summary><p>“{c.post}”</p><p>{c.context}</p><span>@{c.handle}</span></details></td><td>{c.question}</td><td><span class:list={['xs-priority',{'xs-priority--first':['Talk first','优先访谈'].includes(c.priority)}]}>{c.priority}</span></td></tr>)}</tbody></table></div>
+ </div>
+</WorkflowShowcase>

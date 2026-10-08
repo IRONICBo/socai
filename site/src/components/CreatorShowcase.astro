@@ -1,0 +1,29 @@
+---
+import { creators, creatorPrompt } from '../data/creator-showcase';
+import { creatorsZh } from '../data/showcase-locales';
+import maya from '../assets/creator-showcase/maya.webp';
+import evan from '../assets/creator-showcase/evan.webp';
+import nina from '../assets/creator-showcase/nina.webp';
+import WorkflowShowcase from './WorkflowShowcase.astro';
+const { language = 'en' } = Astro.props;
+const zh = language === 'zh';
+const t = (en:string,cn:string)=>zh?cn:en;
+const data = zh ? creatorsZh : creators;
+const photos = [maya,evan,nina];
+const steps = [
+ { label:t('Search','搜索'),address:t('instagram.com · Search','instagram.com · 搜索') },
+ { label:t('Review profiles','查看主页'),address:'instagram.com / maya.moves' },
+ { label:t('Read comments','阅读评论'),address:t('instagram.com · Comments','instagram.com · 评论') },
+ { label:t('Results','结果'),address:'socai result' }
+];
+---
+<WorkflowShowcase id={zh?'instagram-showcase-zh':'instagram-showcase'} language={language} platform="Instagram" icon="/platforms/instagram.png" title={t('Creator discovery','达人发现')} prompt={t(creatorPrompt,'我们要推出一款轻量通勤背包。帮我找 10 位北美 Instagram 达人，粉丝 1–10 万，平时拍通勤、日常穿搭或周末出游。看看近期内容和评论，排除广告太多的，整理数据、代表帖子和合作理由，选出最推荐的 3 位。')} steps={steps}>
+ <div class="cs-screen cs-process-screen" data-cs-screen="0" hidden><div class="cs-search-field">⌕ {t('commuter essentials · everyday carry','通勤必备 · 日常随身物品')}</div><div class="cs-search-results">{data.slice(0,3).map((c,i)=><div class="cs-search-row"><img src={photos[i].src} width="32" height="32" alt=""/><div><strong>{c.name}</strong><span>{c.location}</span></div><b>{c.followers}</b></div>)}</div></div>
+ <div class="cs-screen cs-process-screen" data-cs-screen="1" hidden><div class="cs-profile-head"><img src={maya.src} width="40" height="40" alt=""/><strong>maya.moves</strong></div><div class="cs-profile-stats"><span><b>38.4k</b> {t('followers','粉丝')}</span><span><b>9</b> {t('posts / 30 days','篇 / 30 天')}</span><span>{data[0].location}</span></div><div class="cs-mini-posts">{data[0].posts?.map(p=><div><strong>{p.title}</strong><p>{p.views} {t('views','播放')} · {p.likes} {t('likes','赞')}</p></div>)}</div></div>
+ <div class="cs-screen cs-process-screen" data-cs-screen="2" hidden><div class="cs-browser-comments">{data.slice(0,3).map(c=><div><span class="cs-reader-avatar">{c.initials}</span><p>“{c.quotes?.[0]}”<small>@{c.handle}</small></p></div>)}</div></div>
+ <div class="cs-screen cs-board" data-cs-screen="3">
+  <header class="cs-result-header"><strong>{t('10 creators','10 位达人')}</strong><button class="cs-export" type="button" disabled>{t('Download CSV','下载 CSV')} ↓</button></header>
+  <div class="cs-table-wrap cs-main-table"><table><thead><tr>{[t('Creator','达人'),t('Location','地区'),t('Followers','粉丝'),t('Median views','播放中位数'),t('Paid / 12 posts','广告 / 12 篇'),t('Why they fit','推荐理由')].map(s=><th>{s}</th>)}</tr></thead><tbody>{data.map((c,i)=><tr><td><strong>{c.name}{i<3&&<b class="cs-pick">★</b>}</strong><span>@{c.handle}</span></td><td>{c.location}</td><td>{c.followers}</td><td>{c.views}</td><td>{c.sponsored}</td><td>{c.verdict}</td></tr>)}</tbody></table></div>
+  <div class="cs-cards cs-compact-picks">{data.slice(0,3).map((c,i)=><article class="cs-card"><header class="cs-identity"><img src={photos[i].src} width="30" height="30" alt=""/><h3>{c.name}</h3></header><p class="cs-pick-concept">{c.concept}</p><details class="cs-post-details"><summary>{t('Posts & partnership notes','代表帖子与合作建议')} +</summary>{c.posts?.map(p=><div class="cs-post"><strong>{p.title}</strong><p>{p.views} {t('views','播放')} · {p.likes} {t('likes','赞')} · {p.comments} {t('comments','评论')}</p></div>)}<p class="cs-detail-copy">“{c.quotes?.[0]}”</p><p class="cs-detail-copy">{c.caution}</p></details></article>)}</div>
+ </div>
+</WorkflowShowcase>

@@ -175,11 +175,14 @@ Current metadata keys:
 | `notes_count` | number | Count of note result entries when present. |
 | `notes_skipped_count` | number | Count of notes marked skipped when present. |
 | `has_run_dir` | boolean | Whether the command returned a run directory. |
+| `login_detected` | boolean | Whether a login-wait tool verified a signed-in session from the live page. |
+| `login_wait_timed_out` | boolean | Whether a login-wait tool reached its bounded timeout without verifying login. |
+| `remote_browser` | boolean | Whether a login-wait result refers to a hosted remote browser session. |
 | `failure_reason` | string | Semantic failure reason when a tool returns `ok=false`. |
 | `page_error` | string | Error or reason associated with the unexpected page/control diagnostic, for example `not_profile_page` or `search_input_not_found`. |
 | `page_url` | string | Origin of an unexpected page URL; path, query, fragment, account, and post locators are omitted. |
 | `page_path_depth` | number | Number of non-empty URL path segments, retained without their values. |
-| `page_ocr_text` | string | Secret-redacted OCR from the center 70% when XHS has an unexpected page state or a required page control is missing, capped at 200 Unicode characters. |
+| `page_ocr_text_len` | integer | Character count of OCR captured for an unexpected page state; recognized page text itself is never uploaded. |
 | `page_ocr_region` | string | OCR crop identifier; currently `center_70_percent`. |
 | `page_ocr_truncated` | boolean | Whether the recognized page text exceeded 200 characters. |
 | `page_ocr_error` | string | Best-effort screenshot/OCR failure detail when no page text could be produced. |
