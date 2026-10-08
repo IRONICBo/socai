@@ -13,6 +13,7 @@ use serde_json::Value;
 pub const CONTROL_PROTOCOL_VERSION: u32 = 2;
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+pub const MAX_EVENT_SEQUENCE: u64 = 999_999;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionBinding {
@@ -73,6 +74,8 @@ pub enum WorkerCommand {
         max_steps: Option<u32>,
         #[serde(default)]
         max_tokens: Option<u32>,
+        #[serde(default)]
+        sequence_offset: u64,
     },
     #[serde(rename = "run.cancel")]
     RunCancel {
@@ -114,6 +117,7 @@ impl WorkerCommand {
                 enabled_sites,
                 max_steps,
                 max_tokens,
+                sequence_offset,
                 ..
             } => {
                 binding.validate()?;
@@ -140,6 +144,12 @@ impl WorkerCommand {
                     return Err(ProtocolError::InvalidField {
                         field: "max_tokens",
                         message: "must be between 256 and 128000".into(),
+                    });
+                }
+                if *sequence_offset >= MAX_EVENT_SEQUENCE {
+                    return Err(ProtocolError::InvalidField {
+                        field: "sequence_offset",
+                        message: format!("must be less than {MAX_EVENT_SEQUENCE}"),
                     });
                 }
                 (*protocol_version, request_id)
@@ -363,6 +373,9 @@ impl EventSequencer {
         if self.terminated {
             return None;
         }
+        if self.next_sequence >= MAX_EVENT_SEQUENCE {
+            return self.failed("worker event sequence limit reached");
+        }
         Some(self.next(payload))
     }
 
@@ -375,6 +388,9 @@ impl EventSequencer {
     ) -> Option<WorkerEvent> {
         if self.terminated || records.is_empty() {
             return None;
+        }
+        if self.next_sequence >= MAX_EVENT_SEQUENCE {
+            return self.failed("worker event sequence limit reached");
         }
         Some(self.next(WorkerEventPayload::Evidence {
             step,
@@ -551,6 +567,18 @@ mod tests {
         assert!(sequencer.is_terminal());
         assert!(failed.is_none());
         assert!(cancelled.is_none());
+
+        let mut exhausted =
+            EventSequencer::from_next_sequence(binding(), "run-near-limit", MAX_EVENT_SEQUENCE);
+        let terminal = exhausted
+            .event(WorkerEventPayload::Step { step: 1 })
+            .expect("sequence limit terminal");
+        assert_eq!(terminal.sequence, MAX_EVENT_SEQUENCE);
+        assert_eq!(terminal.kind(), "failed");
+        assert!(exhausted.is_terminal());
+        assert!(exhausted
+            .event(WorkerEventPayload::Step { step: 2 })
+            .is_none());
     }
 
     #[test]
@@ -625,6 +653,23 @@ mod tests {
             run_id: "run-1".into(),
         }
         .validate()?;
+        let resumed: WorkerCommand = serde_json::from_value(json!({
+            "type":"run.start",
+            "protocol_version":CONTROL_PROTOCOL_VERSION,
+            "request_id":"request-4",
+            "binding":binding(),
+            "run_id":"run-1",
+            "prompt":"continue research",
+            "sequence_offset":17
+        }))
+        .expect("deserialize resumed run");
+        let WorkerCommand::RunStart {
+            sequence_offset, ..
+        } = resumed
+        else {
+            panic!("expected run.start");
+        };
+        assert_eq!(sequence_offset, 17);
         Ok(())
     }
 

@@ -40,6 +40,17 @@ const RECOVERABLE_BROWSER_ERROR_MARKERS: [&str; 7] = [
 #[error("browser session was lost during tool execution")]
 struct RecoverableBrowserSessionLoss;
 
+#[derive(Debug, thiserror::Error)]
+#[error("worker event sequence limit reached")]
+struct EventSequenceExhausted;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForwardDisposition {
+    Continue,
+    RecoverableBrowserLoss,
+    SequenceExhausted,
+}
+
 fn bounded_event_text(value: String) -> String {
     if serde_json::to_vec(&value).is_ok_and(|encoded| encoded.len() <= MAX_EVENT_VALUE_BYTES) {
         value
@@ -550,14 +561,20 @@ async fn execute_run_inner(
         tokio::select! {
             result = &mut agent => {
                 while let Ok(event) = events_rx.try_recv() {
-                    if forward_agent_event(
+                    match forward_agent_event(
                         &sequencer,
                         output,
                         event,
                         &prepared.run_dir,
                         &mut evidence,
                     ).await {
-                        return Err(RecoverableBrowserSessionLoss.into());
+                        ForwardDisposition::Continue => {}
+                        ForwardDisposition::RecoverableBrowserLoss => {
+                            return Err(RecoverableBrowserSessionLoss.into());
+                        }
+                        ForwardDisposition::SequenceExhausted => {
+                            return Err(EventSequenceExhausted.into());
+                        }
                     }
                 }
                 break result?;
@@ -565,14 +582,20 @@ async fn execute_run_inner(
             event = events_rx.recv() => {
                 match event {
                     Ok(event) => {
-                        if forward_agent_event(
+                        match forward_agent_event(
                             &sequencer,
                             output,
                             event,
                             &prepared.run_dir,
                             &mut evidence,
                         ).await {
-                            return Err(RecoverableBrowserSessionLoss.into());
+                            ForwardDisposition::Continue => {}
+                            ForwardDisposition::RecoverableBrowserLoss => {
+                                return Err(RecoverableBrowserSessionLoss.into());
+                            }
+                            ForwardDisposition::SequenceExhausted => {
+                                return Err(EventSequenceExhausted.into());
+                            }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -586,7 +609,7 @@ async fn execute_run_inner(
         }
     };
 
-    flush_evidence_events(
+    if flush_evidence_events(
         &sequencer,
         output,
         &prepared.run_dir,
@@ -595,7 +618,10 @@ async fn execute_run_inner(
         None,
         None,
     )
-    .await;
+    .await
+    {
+        return Err(EventSequenceExhausted.into());
+    }
 
     if let Some(error) = outcome.error.as_deref() {
         record_run(prepared, &spec.prompt, &outcome.final_text, "failed");
@@ -622,7 +648,7 @@ async fn forward_agent_event(
     event: AgentEvent,
     run_dir: &Path,
     evidence_tracker: &mut EvidenceTracker,
-) -> bool {
+) -> ForwardDisposition {
     let browser_session_lost = is_recoverable_browser_session_loss(&event);
     let replay_existing_evidence = matches!(&event, AgentEvent::Started { .. });
     let evidence_source = match &event {
@@ -633,18 +659,25 @@ async fn forward_agent_event(
         )),
         _ => None,
     };
-    let event = {
+    let (event, sequence_exhausted) = {
         let mut sequencer = sequencer.lock().await;
-        map_agent_event(&mut sequencer, event)
+        let event = map_agent_event(&mut sequencer, event);
+        (event, sequencer.is_terminal())
     };
     if let Some(event) = event {
         emit_event(output, event);
     }
+    if sequence_exhausted {
+        return ForwardDisposition::SequenceExhausted;
+    }
     if replay_existing_evidence {
-        flush_evidence_events(sequencer, output, run_dir, evidence_tracker, 1, None, None).await;
+        if flush_evidence_events(sequencer, output, run_dir, evidence_tracker, 1, None, None).await
+        {
+            return ForwardDisposition::SequenceExhausted;
+        }
     }
     if let Some((step, source_call_id, source_tool)) = evidence_source {
-        flush_evidence_events(
+        if flush_evidence_events(
             sequencer,
             output,
             run_dir,
@@ -653,9 +686,16 @@ async fn forward_agent_event(
             source_call_id,
             source_tool,
         )
-        .await;
+        .await
+        {
+            return ForwardDisposition::SequenceExhausted;
+        }
     }
-    browser_session_lost
+    if browser_session_lost {
+        ForwardDisposition::RecoverableBrowserLoss
+    } else {
+        ForwardDisposition::Continue
+    }
 }
 
 fn map_agent_event(sequencer: &mut EventSequencer, event: AgentEvent) -> Option<WorkerEvent> {
@@ -747,7 +787,7 @@ async fn flush_evidence_events(
     step: u32,
     source_call_id: Option<String>,
     source_tool: Option<String>,
-) {
+) -> bool {
     loop {
         let records = evidence_tracker.take_changes(run_dir);
         if records.is_empty() {
@@ -760,8 +800,13 @@ async fn flush_evidence_events(
             records,
         );
         let Some(event) = event else { break };
+        let sequence_exhausted = event.kind() == "failed";
         emit_event(output, event);
+        if sequence_exhausted {
+            return true;
+        }
     }
+    false
 }
 
 pub fn record_run(prepared: &PreparedRun, prompt: &str, assistant: &str, status: &str) {
@@ -971,8 +1016,10 @@ mod tests {
     #[test]
     fn recoverable_browser_loss_is_not_written_to_conversation_history() {
         let recoverable = anyhow::Error::new(RecoverableBrowserSessionLoss);
+        let exhausted = anyhow::Error::new(EventSequenceExhausted);
         let ordinary = anyhow::anyhow!("provider failed");
         assert!(!should_record_worker_failure(&recoverable));
+        assert!(should_record_worker_failure(&exhausted));
         assert!(should_record_worker_failure(&ordinary));
     }
 

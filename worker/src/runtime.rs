@@ -24,6 +24,14 @@ struct ActiveRun {
     task: JoinHandle<()>,
 }
 
+fn event_sequencer(
+    binding: SessionBinding,
+    run_id: String,
+    sequence_offset: u64,
+) -> EventSequencer {
+    EventSequencer::from_next_sequence(binding, run_id, sequence_offset.saturating_add(1))
+}
+
 pub async fn run_stdio() -> Result<()> {
     run_stdio_with_build_info(WorkerBuildInfo::default()).await
 }
@@ -136,6 +144,7 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                         enabled_sites,
                         max_steps,
                         max_tokens,
+                        sequence_offset,
                         ..
                     } => {
                         if bound.as_ref() != Some(&binding) {
@@ -164,7 +173,11 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                                 continue;
                             }
                         };
-                        let sequencer = Arc::new(Mutex::new(EventSequencer::new(binding, run_id.clone())));
+                        let sequencer = Arc::new(Mutex::new(event_sequencer(
+                            binding,
+                            run_id.clone(),
+                            sequence_offset,
+                        )));
                         let run_runtime = runtime.clone();
                         let run_output = output_tx.clone();
                         let run_sequencer = sequencer.clone();
@@ -435,5 +448,20 @@ mod tests {
         reap_terminal_run(&mut active).await;
 
         assert!(active.is_none());
+
+        let mut resumed = event_sequencer(
+            SessionBinding {
+                user_id: "user-1".into(),
+                session_id: "session-1".into(),
+                kernel_id: "kernel-2".into(),
+                assignment_epoch: 2,
+            },
+            "run-1".into(),
+            17,
+        );
+        let event = resumed
+            .event(socai_worker_protocol::WorkerEventPayload::Step { step: 2 })
+            .expect("resumed event");
+        assert_eq!(event.sequence, 18);
     }
 }

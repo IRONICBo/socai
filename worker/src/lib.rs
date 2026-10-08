@@ -19,6 +19,7 @@ pub const WORKER_CAPABILITIES: &[&str] = &[
     "kernel_cdp_binding.v1",
     "multi_site_namespaces.v1",
     "persistent_conversation.v1",
+    "run_sequence_resume.v1",
 ];
 
 #[derive(Debug, Clone)]
