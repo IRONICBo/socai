@@ -41,9 +41,9 @@ const SocaiXhsPageScripts = (() => {
     return String(value || '').replace(/\r\n/g, '\n').slice(0, limit);
   }
 
-  function ownedClickPoint(el) {
+  function ownedClickPoint(el, preferredPoint = null) {
     if (!inViewport(el)) return null;
-    const point = elementCenter(el);
+    const point = preferredPoint || elementCenter(el);
     const hit = document.elementFromPoint(point.x, point.y);
     if (!hit || (hit !== el && !el.contains(hit))) return null;
     return point;
@@ -1659,7 +1659,12 @@ const SocaiXhsPageScripts = (() => {
     if (disabled) {
       return { ok: false, status: 'follow_control_disabled', ...base, disabled: true, hit_owned: false };
     }
-    const point = ownedClickPoint(control);
+    const pointer = arg
+      && Number.isFinite(arg.pointer_x)
+      && Number.isFinite(arg.pointer_y)
+      ? { x: arg.pointer_x, y: arg.pointer_y }
+      : null;
+    const point = ownedClickPoint(control, pointer);
     if (!point) {
       return { ok: false, status: 'follow_control_obscured', ...base, disabled: false, hit_owned: false };
     }

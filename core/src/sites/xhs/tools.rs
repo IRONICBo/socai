@@ -4746,13 +4746,10 @@ impl Tool for FollowTool {
         )?;
         let action_id = receipt.action_id().to_string();
 
-        // The receipt transitions above fsync to disk. Re-locate and re-own the
-        // follow control only after that potentially slow work. Pacing and the
-        // debug snapshot must also finish before the final validation: a
-        // coordinate captured before either delay could become an "已关注"
-        // toggle (and a second click would unfollow) or a different element
-        // after layout movement. The guard keeps the platform action lane
-        // exclusive and dispatches without another wait or snapshot.
+        // The receipt transitions above fsync to disk. Complete pacing and the
+        // debug snapshot, locate the current control, move the pointer, and
+        // then validate the live DOM again. The final read verifies that hover
+        // did not replace, move, or toggle the control before the press.
         let prepared_click = match self.page.prepare_pointer_click().await {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -4779,42 +4776,15 @@ impl Tool for FollowTool {
                 })));
             }
         };
-        let dispatch_validation: anyhow::Result<(f64, f64, Value)> = async {
-            let page_state = xhs.run_script("pageState", None).await?;
-            let login_state = xhs.run_script("loginState", None).await?;
-            let detail = xhs.run_script("note", None).await?;
-            let follow = xhs.run_script("followState", Some(&action_args)).await?;
-            if let Some(reason) = xhs_write_gate_reason(&page_state) {
-                anyhow::bail!("{reason}");
-            }
-            if login_state.get("login").and_then(Value::as_str) != Some("in") {
-                anyhow::bail!("login_required_before_dispatch");
-            }
-            if page_state.get("state").and_then(Value::as_str) != Some("note_detail")
-                || detail.get("note_id").and_then(Value::as_str) != Some(expected_note_id.as_str())
-                || detail.get("author_id").and_then(Value::as_str) != Some(author_id.as_str())
-                || follow
-                    .get("actor")
-                    .and_then(|value| value.get("id"))
-                    .and_then(Value::as_str)
-                    != Some(actor.id.as_str())
-            {
-                anyhow::bail!("actor_or_target_changed_before_dispatch");
-            }
-            let (x, y) = verified_xhs_follow_target(&follow, &expected_note_id, &author_id)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "{}",
-                        follow
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .unwrap_or("follow_control_unavailable_before_dispatch")
-                    )
-                })?;
-            Ok((x, y, follow))
-        }
+        let locate_validation = validate_xhs_follow_dispatch(
+            &xhs,
+            &action_args,
+            &expected_note_id,
+            &author_id,
+            &actor.id,
+        )
         .await;
-        let (follow_x, follow_y, dispatch_follow) = match dispatch_validation {
+        let (follow_x, follow_y, _located_follow) = match locate_validation {
             Ok(validated) => validated,
             Err(error) => {
                 drop(prepared_click);
@@ -4841,8 +4811,96 @@ impl Tool for FollowTool {
                 })));
             }
         };
-        let dispatch_error = prepared_click
-            .click(follow_x, follow_y)
+        let armed_click = match prepared_click.move_to(follow_x, follow_y).await {
+            Ok(armed) => armed,
+            Err(error) => {
+                let (persisted_receipt, receipt_error) =
+                    match store.finish_commit(&action_id, false) {
+                        Ok(receipt) => (Some(receipt), None),
+                        Err(receipt_error) => (None, Some(format!("{receipt_error:#}"))),
+                    };
+                return Ok(json_result(&json!({
+                    "ok": false,
+                    "status": "commit_unknown",
+                    "reason": "pointer_move_failed_after_reservation",
+                    "action_id": action_id,
+                    "note_id": expected_note_id,
+                    "author_id": author_id,
+                    "author_url": author_url,
+                    "interaction": "none",
+                    "platform_api_called": false,
+                    "submit_click_count": 0,
+                    "dispatch_skipped": true,
+                    "pointer_error": format!("{error:#}"),
+                    "receipt_error": receipt_error,
+                    "receipt": persisted_receipt,
+                })));
+            }
+        };
+        let mut final_action_args = action_args.clone();
+        if let Some(args) = final_action_args.as_object_mut() {
+            args.insert("pointer_x".into(), json!(follow_x));
+            args.insert("pointer_y".into(), json!(follow_y));
+        }
+        let final_validation = validate_xhs_follow_dispatch(
+            &xhs,
+            &final_action_args,
+            &expected_note_id,
+            &author_id,
+            &actor.id,
+        )
+        .await;
+        let (dispatch_x, dispatch_y, dispatch_follow) = match final_validation {
+            Ok(validated) => validated,
+            Err(error) => {
+                drop(armed_click);
+                let (persisted_receipt, receipt_error) =
+                    match store.finish_commit(&action_id, false) {
+                        Ok(receipt) => (Some(receipt), None),
+                        Err(receipt_error) => (None, Some(format!("{receipt_error:#}"))),
+                    };
+                return Ok(json_result(&json!({
+                    "ok": false,
+                    "status": "commit_unknown",
+                    "reason": "post_move_revalidation_failed_after_reservation",
+                    "action_id": action_id,
+                    "note_id": expected_note_id,
+                    "author_id": author_id,
+                    "author_url": author_url,
+                    "interaction": "none",
+                    "platform_api_called": false,
+                    "submit_click_count": 0,
+                    "dispatch_skipped": true,
+                    "validation_error": format!("{error:#}"),
+                    "receipt_error": receipt_error,
+                    "receipt": persisted_receipt,
+                })));
+            }
+        };
+        if !armed_click.matches_point(dispatch_x, dispatch_y) {
+            drop(armed_click);
+            let (persisted_receipt, receipt_error) = match store.finish_commit(&action_id, false) {
+                Ok(receipt) => (Some(receipt), None),
+                Err(receipt_error) => (None, Some(format!("{receipt_error:#}"))),
+            };
+            return Ok(json_result(&json!({
+                "ok": false,
+                "status": "commit_unknown",
+                "reason": "follow_control_moved_before_dispatch",
+                "action_id": action_id,
+                "note_id": expected_note_id,
+                "author_id": author_id,
+                "author_url": author_url,
+                "interaction": "none",
+                "platform_api_called": false,
+                "submit_click_count": 0,
+                "dispatch_skipped": true,
+                "receipt_error": receipt_error,
+                "receipt": persisted_receipt,
+            })));
+        }
+        let dispatch_error = armed_click
+            .click()
             .await
             .err()
             .map(|error| format!("{error:#}"));
@@ -4965,6 +5023,47 @@ fn verified_xhs_follow_target(
         return None;
     }
     Some((target.get("x")?.as_f64()?, target.get("y")?.as_f64()?))
+}
+
+async fn validate_xhs_follow_dispatch(
+    xhs: &XhsPageRuntime<'_>,
+    action_args: &Value,
+    expected_note_id: &str,
+    author_id: &str,
+    actor_id: &str,
+) -> anyhow::Result<(f64, f64, Value)> {
+    let page_state = xhs.run_script("pageState", None).await?;
+    let login_state = xhs.run_script("loginState", None).await?;
+    let detail = xhs.run_script("note", None).await?;
+    let follow = xhs.run_script("followState", Some(action_args)).await?;
+    if let Some(reason) = xhs_write_gate_reason(&page_state) {
+        anyhow::bail!("{reason}");
+    }
+    if login_state.get("login").and_then(Value::as_str) != Some("in") {
+        anyhow::bail!("login_required_before_dispatch");
+    }
+    if page_state.get("state").and_then(Value::as_str) != Some("note_detail")
+        || detail.get("note_id").and_then(Value::as_str) != Some(expected_note_id)
+        || detail.get("author_id").and_then(Value::as_str) != Some(author_id)
+        || follow
+            .get("actor")
+            .and_then(|value| value.get("id"))
+            .and_then(Value::as_str)
+            != Some(actor_id)
+    {
+        anyhow::bail!("actor_or_target_changed_before_dispatch");
+    }
+    let (x, y) =
+        verified_xhs_follow_target(&follow, expected_note_id, author_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}",
+                follow
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("follow_control_unavailable_before_dispatch")
+            )
+        })?;
+    Ok((x, y, follow))
 }
 
 fn xhs_write_gate_reason(state: &Value) -> Option<&'static str> {

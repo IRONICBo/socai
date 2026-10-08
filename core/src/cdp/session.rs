@@ -45,16 +45,38 @@ pub(crate) struct PreparedPointerClick<'a> {
     action: Option<BrowserAction>,
 }
 
-impl PreparedPointerClick<'_> {
-    pub(crate) async fn click(mut self, x: f64, y: f64) -> anyhow::Result<()> {
+pub(crate) struct ArmedPointerClick<'a> {
+    page: &'a PageSession,
+    action: Option<BrowserAction>,
+    x: f64,
+    y: f64,
+}
+
+impl<'a> PreparedPointerClick<'a> {
+    pub(crate) async fn move_to(mut self, x: f64, y: f64) -> anyhow::Result<ArmedPointerClick<'a>> {
         self.page
             .dispatch_mouse("mouseMoved", x, y, "none", 0)
             .await?;
+        Ok(ArmedPointerClick {
+            page: self.page,
+            action: self.action.take(),
+            x,
+            y,
+        })
+    }
+}
+
+impl ArmedPointerClick<'_> {
+    pub(crate) fn matches_point(&self, x: f64, y: f64) -> bool {
+        self.x == x && self.y == y
+    }
+
+    pub(crate) async fn click(mut self) -> anyhow::Result<()> {
         self.page
-            .dispatch_mouse("mousePressed", x, y, "left", 1)
+            .dispatch_mouse("mousePressed", self.x, self.y, "left", 1)
             .await?;
         self.page
-            .dispatch_mouse("mouseReleased", x, y, "left", 1)
+            .dispatch_mouse("mouseReleased", self.x, self.y, "left", 1)
             .await?;
         if let Some(action) = self.action.take() {
             action.finish().await;
@@ -794,12 +816,17 @@ return (async () => {
     }
 
     pub async fn click(&self, x: f64, y: f64) -> anyhow::Result<()> {
-        self.prepare_pointer_click().await?.click(x, y).await
+        self.prepare_pointer_click()
+            .await?
+            .move_to(x, y)
+            .await?
+            .click()
+            .await
     }
 
-    /// Complete pacing and snapshot work before a site performs its final
-    /// write-target validation. The returned guard keeps the platform action
-    /// lane exclusive and its `click` method dispatches immediately.
+    /// Complete pacing and snapshot work before a site locates a write target.
+    /// The caller can then move the pointer, revalidate the live DOM after any
+    /// hover effects, and dispatch without another wait or snapshot.
     pub(crate) async fn prepare_pointer_click(&self) -> anyhow::Result<PreparedPointerClick<'_>> {
         let action = self.begin_action().await?;
         self.snapshot_before().await;

@@ -98,7 +98,13 @@ function loadFixture({ label = '关注', hitOwned = true, expectedAuthor = 'targ
     body: new FakeNode(),
     querySelector: (selector) => selector === overlaySelector ? root : null,
     querySelectorAll: (selector) => selector === actorSelector ? [actor] : [],
-    elementFromPoint: () => hitOwned ? follow : root,
+    elementFromPoint: (x, y) => {
+      if (!hitOwned) return root;
+      const rect = follow.getBoundingClientRect();
+      return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+        ? follow
+        : root;
+    },
   };
   const window = {
     getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
@@ -168,8 +174,24 @@ test('follow state fails closed for author mismatch or an obscured control', () 
 });
 
 test('follow state drops stale click geometry when the toggle changes before dispatch', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.browserTools.followState.args.pointer_x.type, 'number');
+  assert.equal(manifest.browserTools.followState.args.pointer_y.type, 'number');
+
   const { scripts, args, follow } = loadFixture();
-  assert.equal(scripts.followState(args).status, 'follow_ready');
+  const prepared = scripts.followState(args);
+  assert.equal(prepared.status, 'follow_ready');
+
+  follow.rect.left += 80;
+  const moved = scripts.followState({
+    ...args,
+    pointer_x: prepared.x,
+    pointer_y: prepared.y,
+  });
+  assert.equal(moved.status, 'follow_control_obscured');
+  assert.equal(moved.hit_owned, false);
+
+  follow.rect.left -= 80;
 
   follow.innerText = '已关注';
   follow.textContent = '已关注';

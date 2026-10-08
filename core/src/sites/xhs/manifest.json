@@ -212,7 +212,9 @@
       "callable": "followState",
       "args": {
         "note_id": { "type": "string", "required": true, "description": "Expected active Xiaohongshu note id." },
-        "author_id": { "type": "string", "required": true, "description": "Expected rendered note author id." }
+        "author_id": { "type": "string", "required": true, "description": "Expected rendered note author id." },
+        "pointer_x": { "type": "number", "required": false, "description": "Previously armed pointer x-coordinate to revalidate after hover." },
+        "pointer_y": { "type": "number", "required": false, "description": "Previously armed pointer y-coordinate to revalidate after hover." }
       },
       "returns": { "type": "object", "description": "Fail-closed follow state and optional click geometry bound to one note author." }
     },
