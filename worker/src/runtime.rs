@@ -1,3 +1,4 @@
+use std::io::BufRead as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,7 +10,7 @@ use socai_worker_protocol::{
     EventSequencer, ProtocolError, SessionBinding, WorkerCommand, WorkerOutput,
     CONTROL_PROTOCOL_VERSION, MAX_FRAME_BYTES,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
@@ -55,8 +56,7 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
     let mut bound: Option<SessionBinding> = None;
     let mut active: Option<ActiveRun> = None;
     let (finished_tx, mut finished_rx) = mpsc::unbounded_channel::<String>();
-    let stdin = tokio::io::stdin();
-    let mut lines = BufReader::new(stdin).lines();
+    let mut lines = stdin_lines()?;
 
     loop {
         tokio::select! {
@@ -77,11 +77,12 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                     }
                 }
             }
-            line = lines.next_line() => {
-                let Some(line) = line.context("failed to read worker command")? else {
+            line = lines.recv() => {
+                let Some(line) = line else {
                     let _ = cancel_active(&mut active, &output_tx, "worker input closed").await;
                     break;
                 };
+                let line = line.context("failed to read worker command")?;
                 if line.len() > MAX_FRAME_BYTES {
                     send_error(&output_tx, None, "frame_too_large", "command exceeds 1 MiB");
                     continue;
@@ -323,6 +324,23 @@ async fn write_outputs(mut receiver: mpsc::UnboundedReceiver<WorkerOutput>) -> R
         stdout.flush().await?;
     }
     Ok(())
+}
+
+fn stdin_lines() -> Result<mpsc::UnboundedReceiver<std::io::Result<String>>> {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    std::thread::Builder::new()
+        .name("socai-worker-stdin".into())
+        .spawn(move || {
+            let stdin = std::io::stdin();
+            for line in stdin.lock().lines() {
+                let failed = line.is_err();
+                if sender.send(line).is_err() || failed {
+                    break;
+                }
+            }
+        })
+        .context("failed to start worker input thread")?;
+    Ok(receiver)
 }
 
 fn session_dir() -> Result<PathBuf> {
