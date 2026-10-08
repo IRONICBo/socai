@@ -7,15 +7,13 @@ use anyhow::{Context, Result};
 use socai_core::runtime::SocaiRuntime;
 use socai_worker_protocol::{
     EventSequencer, ProtocolError, SessionBinding, WorkerCommand, WorkerOutput,
-    CONTROL_PROTOCOL_VERSION,
+    CONTROL_PROTOCOL_VERSION, MAX_FRAME_BYTES,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 use uuid::Uuid;
-
-const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 
 struct ActiveRun {
     run_id: String,
@@ -74,7 +72,7 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                     let _ = cancel_active(&mut active, &output_tx, "worker input closed").await;
                     break;
                 };
-                if line.len() > MAX_COMMAND_BYTES {
+                if line.len() > MAX_FRAME_BYTES {
                     send_error(&output_tx, None, "frame_too_large", "command exceeds 1 MiB");
                     continue;
                 }
@@ -300,6 +298,13 @@ async fn write_outputs(mut receiver: mpsc::UnboundedReceiver<WorkerOutput>) -> R
     let mut stdout = tokio::io::stdout();
     while let Some(frame) = receiver.recv().await {
         let mut encoded = serde_json::to_vec(&frame)?;
+        if encoded.len() > MAX_FRAME_BYTES {
+            anyhow::bail!(
+                "worker output frame is {} bytes, limit is {} bytes",
+                encoded.len(),
+                MAX_FRAME_BYTES
+            );
+        }
         encoded.push(b'\n');
         stdout.write_all(&encoded).await?;
         stdout.flush().await?;

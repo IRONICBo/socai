@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use socai_core::agent::compaction::truncate;
+use socai_core::agent::compaction::{compact_json_value, truncate};
 use socai_core::agent::note_store::load_notes;
 use socai_core::agent::{AgentEvent, Conversation, SharedTool, Tool, ToolContext, ToolResult};
 use socai_core::runtime::{
@@ -23,6 +23,8 @@ const EVENT_CHANNEL_CAPACITY: usize = 4096;
 const MAX_EVIDENCE_RECORDS_PER_RESULT: usize = 50;
 const MAX_EVIDENCE_BYTES_PER_RESULT: usize = 384 * 1024;
 const MAX_EVIDENCE_RECORD_BYTES: usize = 128 * 1024;
+const MAX_EVENT_VALUE_BYTES: usize = 256 * 1024;
+const MAX_EVENT_TEXT_CHARS: usize = 60_000;
 const WORKER_PREAMBLE: &str = "You are running inside the socai Session Worker. Answer ordinary questions directly. For research requests, use the enabled browser or site tools to inspect real pages, gather source-linked evidence, and produce a concise report. Track explicit minimum source counts and satisfy them before finalizing when the sources are publicly reachable. When a site tool reports login_required or challenge_required, immediately call the matching platform login wait tool and keep the run active; the connected browser view lets the user complete either login or a verification challenge. Do not merely ask the user to act in a final answer. After the wait tool reports the page is ready, retry the original tool and continue. For LinkedIn post searches, use the supported content result type.";
 const RECOVERABLE_BROWSER_ERROR_MARKERS: [&str; 7] = [
     "cdp session is closed",
@@ -37,6 +39,36 @@ const RECOVERABLE_BROWSER_ERROR_MARKERS: [&str; 7] = [
 #[derive(Debug, thiserror::Error)]
 #[error("browser session was lost during tool execution")]
 struct RecoverableBrowserSessionLoss;
+
+fn bounded_event_text(value: String) -> String {
+    if value.len() <= MAX_EVENT_VALUE_BYTES {
+        value
+    } else {
+        truncate(&value, MAX_EVENT_TEXT_CHARS)
+    }
+}
+
+fn bounded_event_identifier(value: String, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        value
+    } else {
+        value.chars().take(max_chars).collect()
+    }
+}
+
+fn bounded_event_value(value: Value) -> Value {
+    if serde_json::to_vec(&value).is_ok_and(|encoded| encoded.len() <= MAX_EVENT_VALUE_BYTES) {
+        return value;
+    }
+    let compact = compact_json_value(&value);
+    if serde_json::to_vec(&compact).is_ok_and(|encoded| encoded.len() <= MAX_EVENT_VALUE_BYTES) {
+        return compact;
+    }
+    serde_json::json!({
+        "truncated": true,
+        "message": "Worker event payload exceeded 256 KiB; full data remains in the run artifact."
+    })
+}
 
 #[derive(Default)]
 struct EvidenceTracker {
@@ -400,7 +432,11 @@ pub async fn execute_run(
                 "failed",
             );
         }
-        if let Some(event) = sequencer.lock().await.failed(format!("{error:#}")) {
+        if let Some(event) = sequencer
+            .lock()
+            .await
+            .failed(truncate(&format!("{error:#}"), 4_096))
+        {
             emit_event(&output, event);
         }
     }
@@ -540,7 +576,7 @@ async fn execute_run_inner(
 
     if let Some(error) = outcome.error.as_deref() {
         record_run(prepared, &spec.prompt, &outcome.final_text, "failed");
-        if let Some(event) = sequencer.lock().await.failed(error) {
+        if let Some(event) = sequencer.lock().await.failed(truncate(error, 4_096)) {
             emit_event(output, event);
         }
         return Ok(());
@@ -549,8 +585,8 @@ async fn execute_run_inner(
     record_run(prepared, &spec.prompt, &outcome.final_text, "completed");
     if let Some(event) = sequencer.lock().await.done(
         outcome.steps,
-        outcome.final_text,
-        serde_json::to_value(outcome.usage)?,
+        bounded_event_text(outcome.final_text),
+        bounded_event_value(serde_json::to_value(outcome.usage)?),
     ) {
         emit_event(output, event);
     }
@@ -567,9 +603,11 @@ async fn forward_agent_event(
     let browser_session_lost = is_recoverable_browser_session_loss(&event);
     let replay_existing_evidence = matches!(&event, AgentEvent::Started { .. });
     let evidence_source = match &event {
-        AgentEvent::ToolResult { id, step, name, .. } => {
-            Some((*step, Some(id.clone()), Some(name.clone())))
-        }
+        AgentEvent::ToolResult { id, step, name, .. } => Some((
+            *step,
+            Some(bounded_event_identifier(id.clone(), 256)),
+            Some(bounded_event_identifier(name.clone(), 160)),
+        )),
         _ => None,
     };
     let event = {
@@ -609,10 +647,14 @@ fn map_agent_event(sequencer: &mut EventSequencer, event: AgentEvent) -> Option<
             model,
         },
         AgentEvent::Step { step } => WorkerEventPayload::Step { step },
-        AgentEvent::Reasoning { step, text } => WorkerEventPayload::Reasoning { step, text },
-        AgentEvent::AssistantText { step, text } => {
-            WorkerEventPayload::AssistantText { step, text }
-        }
+        AgentEvent::Reasoning { step, text } => WorkerEventPayload::Reasoning {
+            step,
+            text: bounded_event_text(text),
+        },
+        AgentEvent::AssistantText { step, text } => WorkerEventPayload::AssistantText {
+            step,
+            text: bounded_event_text(text),
+        },
         AgentEvent::ToolCall {
             id,
             step,
@@ -621,11 +663,11 @@ fn map_agent_event(sequencer: &mut EventSequencer, event: AgentEvent) -> Option<
             input,
             repeat_count,
         } => WorkerEventPayload::ToolCall {
-            call_id: id,
+            call_id: bounded_event_identifier(id, 256),
             step,
             sequence_in_step: sequence,
-            name,
-            input,
+            name: bounded_event_identifier(name, 160),
+            input: bounded_event_value(input),
             repeat_count,
         },
         AgentEvent::ToolProgress {
@@ -635,11 +677,11 @@ fn map_agent_event(sequencer: &mut EventSequencer, event: AgentEvent) -> Option<
             name,
             progress,
         } => WorkerEventPayload::ToolProgress {
-            call_id: id,
+            call_id: bounded_event_identifier(id, 256),
             step,
             sequence_in_step: sequence,
-            name,
-            progress: serde_json::to_value(progress).unwrap_or_default(),
+            name: bounded_event_identifier(name, 160),
+            progress: bounded_event_value(serde_json::to_value(progress).unwrap_or_default()),
         },
         AgentEvent::ToolResult {
             id,
@@ -652,17 +694,20 @@ fn map_agent_event(sequencer: &mut EventSequencer, event: AgentEvent) -> Option<
             duration_ms,
             error,
         } => WorkerEventPayload::ToolResult {
-            call_id: id,
+            call_id: bounded_event_identifier(id, 256),
             step,
             sequence_in_step: sequence,
-            name,
-            input,
-            content,
-            summary,
+            name: bounded_event_identifier(name, 160),
+            input: bounded_event_value(input),
+            content: bounded_event_value(content),
+            summary: truncate(&summary, 4_096),
             duration_ms,
-            error,
+            error: error.map(|value| truncate(&value, 4_096)),
         },
-        AgentEvent::ApiError { step, message } => WorkerEventPayload::ApiError { step, message },
+        AgentEvent::ApiError { step, message } => WorkerEventPayload::ApiError {
+            step,
+            message: truncate(&message, 4_096),
+        },
         // Core emits Done before returning AgentOutcome. The Worker emits one
         // terminal event after it can attach normalized usage.
         AgentEvent::Done { .. } => return None,

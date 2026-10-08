@@ -12,6 +12,7 @@ use serde_json::Value;
 
 pub const CONTROL_PROTOCOL_VERSION: u32 = 2;
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionBinding {

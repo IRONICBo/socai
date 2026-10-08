@@ -12,6 +12,7 @@ pub const SOCAI_CORE_VERSION: &str = "0.6.5";
 pub const SOCAI_CORE_REVISION: &str = "workspace";
 pub const WORKER_CAPABILITIES: &[&str] = &[
     "agent_events.v1",
+    "bounded_frames.v1",
     "browser_session_recovery.v1",
     "evidence_records.v1",
     "interactive_login_resume.v1",
