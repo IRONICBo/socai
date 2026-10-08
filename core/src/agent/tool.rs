@@ -279,9 +279,23 @@ impl std::fmt::Debug for ToolContext {
 
 impl ToolContext {
     pub fn new(run_id: impl Into<String>, run_dir: impl AsRef<Path>) -> Self {
+        let run_dir = run_dir.as_ref().to_path_buf();
+        let archived_notes = crate::agent::note_store::load_notes(&run_dir)
+            .into_iter()
+            .filter_map(|record| {
+                let note_id = record
+                    .get("note_id")
+                    .or_else(|| record.get("id"))
+                    .or_else(|| record.get("url"))
+                    .and_then(Value::as_str)?
+                    .trim()
+                    .to_string();
+                (!note_id.is_empty()).then_some((note_id, record))
+            })
+            .collect();
         Self {
             run_id: run_id.into(),
-            run_dir: run_dir.as_ref().to_path_buf(),
+            run_dir,
             step: 0,
             active_tool_name: String::new(),
             background_media_generation: None,
@@ -294,7 +308,7 @@ impl ToolContext {
             run_artifact_counter: Arc::new(Mutex::new(0)),
             processed_notes: Arc::new(Mutex::new(BTreeMap::new())),
             search_note_ids: Arc::new(Mutex::new(Vec::new())),
-            notes_seen: Arc::new(Mutex::new(Vec::new())),
+            notes_seen: Arc::new(Mutex::new(archived_notes)),
             loaded_skills: Arc::new(Mutex::new(BTreeMap::new())),
             recovery_evidence: Arc::new(Mutex::new(RecoveryEvidenceState::default())),
         }

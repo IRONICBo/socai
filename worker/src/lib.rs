@@ -1,0 +1,43 @@
+//! Isolated, session-affine Agent worker built on the public `socai-core` loop.
+
+#![forbid(unsafe_code)]
+
+pub mod runner;
+mod runtime;
+
+pub use runtime::{run_stdio, run_stdio_with_build_info};
+
+pub const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const SOCAI_CORE_VERSION: &str = "0.6.5";
+pub const SOCAI_CORE_REVISION: &str = "workspace";
+pub const WORKER_CAPABILITIES: &[&str] = &[
+    "agent_events.v1",
+    "browser_session_recovery.v1",
+    "evidence_records.v1",
+    "interactive_login_resume.v1",
+    "kernel_cdp_binding.v1",
+    "multi_site_namespaces.v1",
+    "persistent_conversation.v1",
+];
+
+#[derive(Debug, Clone)]
+pub struct WorkerBuildInfo {
+    pub worker_version: String,
+    pub socai_core_version: String,
+    pub socai_core_revision: String,
+    pub capabilities: Vec<String>,
+}
+
+impl Default for WorkerBuildInfo {
+    fn default() -> Self {
+        Self {
+            worker_version: WORKER_VERSION.into(),
+            socai_core_version: SOCAI_CORE_VERSION.into(),
+            socai_core_revision: SOCAI_CORE_REVISION.into(),
+            capabilities: WORKER_CAPABILITIES
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
+        }
+    }
+}

@@ -5,6 +5,8 @@ members = [
     "asr",
     "core",
     "cli",
+    "worker-protocol",
+    "worker",
 ]
 
 [workspace.package]
@@ -39,6 +41,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 socai-core = { path = "core" }
+socai-worker-protocol = { path = "worker-protocol" }
 
 [workspace.lints.clippy]
 unwrap_used = "warn"
