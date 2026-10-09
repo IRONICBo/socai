@@ -149,7 +149,14 @@
     ]);
     const explicitGate = /log in to (?:continue|watch|view)|sign in to (?:continue|watch|view)|登录后(?:查看|继续|浏览)/i.test(bodyText);
     const visibleGate = !!dialog && /log in|sign up|phone|email|登录|注册/i.test(text(dialog));
-    return !hasContent && (explicitGate || visibleGate);
+    return visibleGate || (!hasContent && explicitGate);
+  }
+
+  function authenticated() {
+    return !!firstVisible([
+      '[data-e2e="profile-icon"]',
+      '[data-e2e="nav-profile"]',
+    ]);
   }
 
   function hasUsefulBody() {
@@ -160,6 +167,7 @@
     const bodyText = text(document.body);
     const hasVideo = !!document.querySelector('video, [data-e2e="browse-video"]');
     const hasCards = cardNodes().length > 0;
+    const loginRequired = loginBlocked(hasVideo || hasCards);
     return {
       ok: true,
       site: 'tiktok',
@@ -168,7 +176,8 @@
       ready_state: document.readyState,
       body_text_len: bodyText.length,
       blank_or_throttled: document.readyState === 'loading' || !hasUsefulBody(),
-      login_required: loginBlocked(hasVideo || hasCards),
+      authenticated: authenticated() && !loginRequired,
+      login_required: loginRequired,
       challenge_required: challengeRequired(),
       has_video: hasVideo,
       card_count: hasCards ? cardNodes().length : 0,

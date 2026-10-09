@@ -12,6 +12,7 @@ use crate::cdp::PageSession;
 use crate::sites::actions::{
     ActionActor, ActionPreview, ActionStore, ActionTarget, SocialActionKind, SocialActionStatus,
 };
+use crate::sites::login_wait::{interactive_remote_login_enabled, login_resume_receiver};
 use crate::sites::registry::{
     required_string, ArgKind, BoxFuture, CommandArg, NativeSiteAdapter, SiteCommand, SlowWhen,
 };
@@ -66,8 +67,13 @@ fn x_tools(page: Arc<PageSession>) -> Vec<Arc<dyn Tool>> {
         Arc::new(LikeTool { page: page.clone() }),
         Arc::new(FollowTool { page: page.clone() }),
         Arc::new(HoverTool { page: page.clone() }),
-        Arc::new(PageStateTool { page }),
+        Arc::new(PageStateTool { page: page.clone() }),
+        x_wait_for_login_tool(page),
     ]
+}
+
+pub fn x_wait_for_login_tool(page: Arc<PageSession>) -> Arc<dyn Tool> {
+    Arc::new(WaitForXLoginTool { page })
 }
 
 pub static X_NATIVE_ADAPTER: NativeSiteAdapter = NativeSiteAdapter {
@@ -1224,6 +1230,13 @@ impl Tool for GetPostsTool {
 struct PageStateTool {
     page: Arc<PageSession>,
 }
+
+struct WaitForXLoginTool {
+    page: Arc<PageSession>,
+}
+
+const WAIT_FOR_X_LOGIN_DEFAULT_SECS: i64 = 180;
+const WAIT_FOR_X_LOGIN_MAX_SECS: i64 = 600;
 
 struct ReplyTool {
     page: Arc<PageSession>,
@@ -3701,6 +3714,90 @@ impl Tool for PageStateTool {
         let _ = wait_for_browser_tool(&self.page, SITE_ID, "pageState", None, wait_seconds).await?;
         let state = invoke_browser_tool(&self.page, ctx, SITE_ID, "pageState", None, false).await?;
         Ok(json_result(&state))
+    }
+}
+
+#[async_trait]
+impl Tool for WaitForXLoginTool {
+    fn name(&self) -> &str {
+        "wait_for_x_login"
+    }
+
+    fn description(&self) -> &str {
+        "After an X tool reports login_required, keep the current X tab open and wait for the \
+         user to sign in. Returns logged_in true only after the live page exposes the signed-in \
+         account control; then retry the original read-only tool."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Seconds to wait before returning (default 180, max 600)."
+                }
+            }
+        })
+    }
+
+    async fn call(&self, input: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        if self.page.is_remote_browser() && !interactive_remote_login_enabled() {
+            return Ok(json_result(&json!({
+                "logged_in": false,
+                "remote_browser": true,
+                "message": "Hosted X login is unavailable in this browser session.",
+            })));
+        }
+        ensure_site_page(&self.page, HOST_ROOT, HOME_URL).await?;
+        let timeout = get_i64(&input, "timeout_seconds", WAIT_FOR_X_LOGIN_DEFAULT_SECS)
+            .clamp(10, WAIT_FOR_X_LOGIN_MAX_SECS);
+        let deadline = Instant::now() + Duration::from_secs(timeout as u64);
+        let mut human_ready = login_resume_receiver(&ctx.run_id);
+        loop {
+            let state = match crate::sites::learning::run_site_browser_tool(
+                &self.page,
+                SITE_ID,
+                "pageState",
+                None,
+            )
+            .await
+            {
+                Ok(state) => state,
+                Err(error) => {
+                    if self.page.transport_closed().await {
+                        return Err(error);
+                    }
+                    Value::Null
+                }
+            };
+            if state.get("authenticated").and_then(Value::as_bool) == Some(true)
+                && state.get("login_required").and_then(Value::as_bool) != Some(true)
+            {
+                return Ok(json_result(&json!({
+                    "logged_in": true,
+                    "message": "X login detected. Re-run the original tool and continue.",
+                })));
+            }
+            if Instant::now() >= deadline {
+                return Ok(json_result(&json!({
+                    "logged_in": false,
+                    "timed_out": true,
+                    "message": format!(
+                        "X login was not detected within {timeout}s. Ask the user to sign in in \
+                         the connected browser, then call wait_for_x_login again."
+                    ),
+                })));
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                changed = human_ready.changed() => {
+                    if changed.is_err() {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
+        }
     }
 }
 

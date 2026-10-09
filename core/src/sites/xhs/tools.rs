@@ -8,7 +8,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::agent::compaction::truncate;
@@ -29,6 +29,7 @@ use serde_json::{json, Map, Value};
 use crate::sites::actions::{
     ActionActor, ActionPreview, ActionStore, ActionTarget, SocialActionKind, SocialActionStatus,
 };
+use crate::sites::login_wait::{interactive_remote_login_enabled, login_resume_receiver};
 use crate::sites::registry::{
     required_string, ArgKind, BoxFuture, CommandArg, NativeSiteAdapter, SiteCommand, SlowWhen,
 };
@@ -1208,12 +1209,6 @@ const REMOTE_LOGIN_NOTE: &str = "the hosted browser's shared login is unavailabl
 const INTERACTIVE_REMOTE_LOGIN_NOTE: &str = "the user can control this cloud browser's \
      live view. Call wait_for_login and keep the current browser session open while the \
      user signs in; continue the original tool when login is detected.";
-
-fn interactive_remote_login_enabled() -> bool {
-    std::env::var("SOCAI_REMOTE_LOGIN_MODE")
-        .ok()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("interactive"))
-}
 
 /// Mark a `reason: login_required` result as coming from a remote hosted
 /// browser so the agent reports a socai-side outage instead of starting the
@@ -4489,49 +4484,6 @@ pub struct WaitForLoginTool {
     page: Arc<PageSession>,
 }
 
-/// One human-ready generation per active run. Hosted frontends use this to
-/// wake a login waiter immediately after the user releases browser control;
-/// local/native flows continue to rely on normal polling.
-static LOGIN_RESUME_SIGNALS: OnceLock<
-    Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<u64>>>,
-> = OnceLock::new();
-
-fn login_resume_signals(
-) -> &'static Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<u64>>> {
-    LOGIN_RESUME_SIGNALS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-}
-
-fn login_resume_receiver(run_id: &str) -> tokio::sync::watch::Receiver<u64> {
-    let mut signals = login_resume_signals()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    signals
-        .entry(run_id.to_owned())
-        .or_insert_with(|| tokio::sync::watch::channel(0).0)
-        .subscribe()
-}
-
-/// Notify an active `wait_for_login` call that the user says the browser is
-/// ready. The waiter still verifies the live page before it resumes.
-pub fn signal_login_resume(run_id: &str) {
-    let mut signals = login_resume_signals()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let sender = signals
-        .entry(run_id.to_owned())
-        .or_insert_with(|| tokio::sync::watch::channel(0).0);
-    let next = sender.borrow().saturating_add(1);
-    sender.send_replace(next);
-}
-
-/// Release the small per-run signal cell when a host reaches a terminal state.
-pub fn clear_login_resume(run_id: &str) {
-    login_resume_signals()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(run_id);
-}
-
 /// How long `wait_for_login` polls before giving up so the agent can re-prompt.
 const WAIT_FOR_LOGIN_DEFAULT_SECS: i64 = 180;
 const WAIT_FOR_LOGIN_MAX_SECS: i64 = 600;
@@ -4589,7 +4541,6 @@ impl Tool for WaitForLoginTool {
         let mut human_ready = login_resume_receiver(&ctx.run_id);
         loop {
             if xhs.is_logged_in().await.unwrap_or(false) {
-                clear_login_resume(&ctx.run_id);
                 return Ok(json_result(&json!({
                     "logged_in": true,
                     "message": "Login detected. Re-run the original tool to continue.",
@@ -4599,10 +4550,9 @@ impl Tool for WaitForLoginTool {
             // a visible logged-out wall. The full gate tolerates sidebar class
             // changes after a successful QR redirect that make the strict
             // one-shot selector inconclusive.
-            if *human_ready.borrow_and_update() > 0
+            if human_ready.was_signaled()
                 && xhs.login_gate(false).await.unwrap_or(LoginGate::Required) == LoginGate::LoggedIn
             {
-                clear_login_resume(&ctx.run_id);
                 return Ok(json_result(&json!({
                     "logged_in": true,
                     "human_confirmed": true,

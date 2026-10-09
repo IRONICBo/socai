@@ -333,6 +333,7 @@
     const login = loginRequired();
     const challenge = challengeRequired();
     const limited = rateLimited();
+    const authenticated = !!currentUsername();
     const count = tweetArticles().length;
     const primary = document.querySelector('[data-testid="primaryColumn"]');
     const hydrated = document.readyState !== 'loading' && (count > 0 || !!primary || login || challenge || limited);
@@ -345,6 +346,7 @@
       url: location.href,
       page_type: pageType(),
       ready_state: document.readyState,
+      authenticated,
       login_required: login,
       challenge_required: challenge,
       rate_limited: limited,
