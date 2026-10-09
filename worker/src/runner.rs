@@ -15,7 +15,8 @@ use socai_core::runtime::{
 };
 use socai_core::sites::find_site;
 use socai_worker_protocol::{
-    EventSequencer, SessionBinding, WorkerEvent, WorkerEventPayload, WorkerOutput,
+    EventSequencer, HostToolDefinition, HostToolEndpoint, SessionBinding, WorkerEvent,
+    WorkerEventPayload, WorkerOutput,
 };
 use tokio::sync::{broadcast, mpsc, Mutex};
 
@@ -402,6 +403,110 @@ impl Tool for NamespacedTool {
     }
 }
 
+struct HostTool {
+    definition: HostToolDefinition,
+    endpoint: HostToolEndpoint,
+    binding: SessionBinding,
+    run_id: String,
+    client: reqwest::Client,
+}
+
+impl HostTool {
+    fn shared(
+        definition: HostToolDefinition,
+        endpoint: HostToolEndpoint,
+        binding: SessionBinding,
+        run_id: String,
+    ) -> SharedTool {
+        Arc::new(Self {
+            definition,
+            endpoint,
+            binding,
+            run_id,
+            client: reqwest::Client::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for HostTool {
+    fn name(&self) -> &str {
+        &self.definition.name
+    }
+
+    fn description(&self) -> &str {
+        &self.definition.description
+    }
+
+    fn input_schema(&self) -> Value {
+        self.definition.input_schema.clone()
+    }
+
+    fn always_available(&self) -> bool {
+        true
+    }
+
+    async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let response = match self
+            .client
+            .post(&self.endpoint.url)
+            .bearer_auth(&self.endpoint.bearer_token)
+            .json(&serde_json::json!({
+                "binding": self.binding,
+                "run_id": self.run_id,
+                "tool": self.definition.name,
+                "input": input,
+            }))
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await
+        {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(ToolResult::failure(
+                    "The host application tool is temporarily unavailable. Retry once.",
+                ));
+            }
+        };
+        let status = response.status();
+        let bytes = match response.bytes().await {
+            Ok(value) if value.len() <= MAX_EVENT_VALUE_BYTES => value,
+            Ok(_) => {
+                return Ok(ToolResult::failure(
+                    "The host application tool returned too much data.",
+                ));
+            }
+            Err(_) => {
+                return Ok(ToolResult::failure(
+                    "The host application tool returned an unreadable response.",
+                ));
+            }
+        };
+        let payload: Value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(ToolResult::failure(
+                    "The host application tool returned an invalid response.",
+                ));
+            }
+        };
+        let ok = status.is_success() && payload.get("ok").and_then(Value::as_bool) == Some(true);
+        if !ok {
+            let message = payload
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("The host application rejected this tool call.");
+            return Ok(ToolResult::failure(truncate(message, 4_096)));
+        }
+        let content = payload.get("result").cloned().unwrap_or(Value::Null);
+        let text = match content {
+            Value::String(value) => value,
+            value => serde_json::to_string(&value)?,
+        };
+        Ok(ToolResult::text(text))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RunSpec {
     pub binding: SessionBinding,
@@ -412,6 +517,8 @@ pub struct RunSpec {
     pub enabled_sites: Vec<String>,
     pub max_steps: Option<u32>,
     pub max_tokens: Option<u32>,
+    pub host_tools: Vec<HostToolDefinition>,
+    pub host_tool_endpoint: Option<HostToolEndpoint>,
 }
 
 pub struct PreparedRun {
@@ -495,6 +602,20 @@ async fn execute_run_inner(
     let mut instruction_blocks = Vec::new();
     let mut namespace_blocks = Vec::new();
     let multi_site = spec.enabled_sites.len() > 1;
+    if let Some(endpoint) = spec.host_tool_endpoint.as_ref() {
+        tools.extend(spec.host_tools.iter().cloned().map(|definition| {
+            HostTool::shared(
+                definition,
+                endpoint.clone(),
+                spec.binding.clone(),
+                spec.run_id.clone(),
+            )
+        }));
+        instruction_blocks.push(
+            "Trusted host application tools are enabled for this run. Use them when the user asks to manage application state such as scheduled tasks. Never claim that a host action succeeded unless its tool returns success."
+                .into(),
+        );
+    }
     for site_id in &spec.enabled_sites {
         let site = find_site(site_id)
             .ok_or_else(|| anyhow::anyhow!("unknown enabled site {site_id:?}"))?;
@@ -832,6 +953,8 @@ mod tests {
 
     use serde_json::json;
     use socai_core::agent::{ToolProgressEvent, ToolProgressPhase, ToolProgressStatus};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     use super::*;
 
@@ -864,7 +987,75 @@ mod tests {
             enabled_sites: vec!["web".into()],
             max_steps: None,
             max_tokens: None,
+            host_tools: Vec::new(),
+            host_tool_endpoint: None,
         }
+    }
+
+    #[tokio::test]
+    async fn host_tool_calls_the_bound_loopback_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback endpoint");
+        let address = listener.local_addr().expect("read loopback address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept host tool call");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|value| value == b"\r\n\r\n")
+                    && request
+                        .windows(16)
+                        .any(|value| value == b"scheduled report")
+                {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).expect("utf8 request");
+            assert!(request.contains("authorization: Bearer test-token-that-is-long-enough-123"));
+            assert!(request.contains("create_scheduled_task"));
+            let body = r#"{"ok":true,"result":{"status":"scheduled"}}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write response");
+        });
+        let tool = HostTool::shared(
+            HostToolDefinition {
+                name: "create_scheduled_task".into(),
+                description: "Create a scheduled task.".into(),
+                input_schema: json!({"type":"object"}),
+            },
+            HostToolEndpoint {
+                url: format!("http://{address}/internal/worker-tools"),
+                bearer_token: "test-token-that-is-long-enough-123".into(),
+            },
+            run_spec("run-host-tool").binding,
+            "run-host-tool".into(),
+        );
+        let context = ToolContext::new(
+            "run-host-tool",
+            std::env::temp_dir().join(format!("socai-host-tool-{}", uuid::Uuid::new_v4())),
+        );
+        let result = tool
+            .call(json!({"prompt":"scheduled report"}), &context)
+            .await
+            .expect("call host tool");
+        assert!(!result.failed());
+        assert_eq!(result.flat_text(), r#"{"status":"scheduled"}"#);
+        server.await.expect("join loopback server");
     }
 
     #[test]

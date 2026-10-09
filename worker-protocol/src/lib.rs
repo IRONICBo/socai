@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,85 @@ pub struct SessionBinding {
     pub session_id: String,
     pub kernel_id: String,
     pub assignment_epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HostToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+impl HostToolDefinition {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        if self.name.is_empty()
+            || self.name.len() > 64
+            || !self
+                .name
+                .bytes()
+                .all(|value| value.is_ascii_lowercase() || value.is_ascii_digit() || value == b'_')
+        {
+            return Err(ProtocolError::InvalidField {
+                field: "host_tools",
+                message:
+                    "tool names must use 1 to 64 lowercase ASCII letters, digits, or underscores"
+                        .into(),
+            });
+        }
+        if self.description.trim().is_empty() || self.description.len() > 4_096 {
+            return Err(ProtocolError::InvalidField {
+                field: "host_tools",
+                message: "tool descriptions must contain between 1 and 4096 bytes".into(),
+            });
+        }
+        if !self.input_schema.is_object()
+            || serde_json::to_vec(&self.input_schema).is_ok_and(|value| value.len() > 32 * 1024)
+        {
+            return Err(ProtocolError::InvalidField {
+                field: "host_tools",
+                message: "tool input schemas must be JSON objects no larger than 32 KiB".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostToolEndpoint {
+    pub url: String,
+    pub bearer_token: String,
+}
+
+impl std::fmt::Debug for HostToolEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HostToolEndpoint")
+            .field("url", &self.url)
+            .field("bearer_token", &"[redacted]")
+            .finish()
+    }
+}
+
+impl HostToolEndpoint {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        if !(self.url.starts_with("http://127.0.0.1:")
+            || self.url.starts_with("http://[::1]:")
+            || self.url.starts_with("http://localhost:"))
+            || self.url.len() > 2_048
+        {
+            return Err(ProtocolError::InvalidField {
+                field: "host_tool_endpoint",
+                message: "must be an HTTP loopback URL no larger than 2048 bytes".into(),
+            });
+        }
+        if !(32..=512).contains(&self.bearer_token.len()) {
+            return Err(ProtocolError::InvalidField {
+                field: "host_tool_endpoint",
+                message: "bearer token must contain between 32 and 512 bytes".into(),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl SessionBinding {
@@ -76,6 +156,10 @@ pub enum WorkerCommand {
         max_tokens: Option<u32>,
         #[serde(default)]
         sequence_offset: u64,
+        #[serde(default)]
+        host_tools: Vec<HostToolDefinition>,
+        #[serde(default)]
+        host_tool_endpoint: Option<HostToolEndpoint>,
     },
     #[serde(rename = "run.cancel")]
     RunCancel {
@@ -118,6 +202,8 @@ impl WorkerCommand {
                 max_steps,
                 max_tokens,
                 sequence_offset,
+                host_tools,
+                host_tool_endpoint,
                 ..
             } => {
                 binding.validate()?;
@@ -151,6 +237,33 @@ impl WorkerCommand {
                         field: "sequence_offset",
                         message: format!("must be less than {MAX_EVENT_SEQUENCE}"),
                     });
+                }
+                if host_tools.len() > 16 {
+                    return Err(ProtocolError::InvalidField {
+                        field: "host_tools",
+                        message: "supports at most 16 host tools".into(),
+                    });
+                }
+                let mut names = BTreeSet::new();
+                for tool in host_tools {
+                    tool.validate()?;
+                    if !names.insert(tool.name.as_str()) {
+                        return Err(ProtocolError::InvalidField {
+                            field: "host_tools",
+                            message: "tool names must be unique".into(),
+                        });
+                    }
+                }
+                match (host_tools.is_empty(), host_tool_endpoint) {
+                    (true, None) => {}
+                    (false, Some(endpoint)) => endpoint.validate()?,
+                    _ => {
+                        return Err(ProtocolError::InvalidField {
+                            field: "host_tool_endpoint",
+                            message: "endpoint and tool definitions must be provided together"
+                                .into(),
+                        });
+                    }
                 }
                 (*protocol_version, request_id)
             }
@@ -670,6 +783,58 @@ mod tests {
             panic!("expected run.start");
         };
         assert_eq!(sequence_offset, 17);
+        Ok(())
+    }
+
+    #[test]
+    fn validates_loopback_host_tools_without_exposing_the_token() -> Result<(), ProtocolError> {
+        let command: WorkerCommand = serde_json::from_value(json!({
+            "type":"run.start",
+            "protocol_version":CONTROL_PROTOCOL_VERSION,
+            "request_id":"request-host-tools",
+            "binding":binding(),
+            "run_id":"run-host-tools",
+            "prompt":"schedule this for tomorrow",
+            "host_tools":[{
+                "name":"create_scheduled_task",
+                "description":"Create a scheduled application task.",
+                "input_schema":{"type":"object","properties":{"prompt":{"type":"string"}}}
+            }],
+            "host_tool_endpoint":{
+                "url":"http://127.0.0.1:8017/internal/worker-tools",
+                "bearer_token":"secret-token-that-is-long-enough-123"
+            }
+        }))
+        .expect("deserialize host tools");
+        command.validate()?;
+        let debug = format!("{command:?}");
+        assert!(!debug.contains("secret-token-that-is-long-enough-123"));
+
+        let invalid: WorkerCommand = serde_json::from_value(json!({
+            "type":"run.start",
+            "protocol_version":CONTROL_PROTOCOL_VERSION,
+            "request_id":"request-host-tools",
+            "binding":binding(),
+            "run_id":"run-host-tools",
+            "prompt":"schedule this for tomorrow",
+            "host_tools":[{
+                "name":"create_scheduled_task",
+                "description":"Create a scheduled application task.",
+                "input_schema":{"type":"object"}
+            }],
+            "host_tool_endpoint":{
+                "url":"https://example.com/internal/worker-tools",
+                "bearer_token":"secret-token-that-is-long-enough-123"
+            }
+        }))
+        .expect("deserialize invalid endpoint");
+        assert!(matches!(
+            invalid.validate(),
+            Err(ProtocolError::InvalidField {
+                field: "host_tool_endpoint",
+                ..
+            })
+        ));
         Ok(())
     }
 

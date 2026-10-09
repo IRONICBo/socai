@@ -145,6 +145,8 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                         max_steps,
                         max_tokens,
                         sequence_offset,
+                        host_tools,
+                        host_tool_endpoint,
                         ..
                     } => {
                         if bound.as_ref() != Some(&binding) {
@@ -165,6 +167,8 @@ pub async fn run_stdio_with_build_info(build: WorkerBuildInfo) -> Result<()> {
                             enabled_sites,
                             max_steps,
                             max_tokens,
+                            host_tools,
+                            host_tool_endpoint,
                         };
                         let prepared = match prepare_run(&session_dir, &spec) {
                             Ok(value) => value,

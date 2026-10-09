@@ -10,6 +10,7 @@ description = "Reusable isolated session worker backed by socai-core"
 anyhow.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
 sha2 = "0.10"
 socai-core.workspace = true
 socai-worker-protocol.workspace = true
