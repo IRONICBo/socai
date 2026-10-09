@@ -8,6 +8,6 @@ pub use self::entities::{
 };
 pub use self::page::{DouyinPageRuntime, DOUYIN_HOME_URL};
 pub use self::tools::{
-    dy_agent_instructions, dy_agent_tools, dy_tools, dy_tools_with_llm_provider, DY_KNOWLEDGE,
-    DY_NATIVE_ADAPTER,
+    douyin_wait_for_login_tool, dy_agent_instructions, dy_agent_tools, dy_tools,
+    dy_tools_with_llm_provider, DY_KNOWLEDGE, DY_NATIVE_ADAPTER,
 };

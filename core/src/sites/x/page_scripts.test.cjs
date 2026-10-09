@@ -136,6 +136,7 @@ test('page state reports the observed X login flow as login_required', () => {
   const state = scripts.pageState();
 
   assert.equal(state.ok, false);
+  assert.equal(state.authenticated, false);
   assert.equal(state.login_required, true);
   assert.equal(state.status, 'login_required');
 });
@@ -207,12 +208,14 @@ test('restoration metadata stays out of the legacy page-state shape', () => {
     href: 'https://x.com/search?q=AI%20agents&src=typed_query&f=live',
     pathname: '/search',
     articles: [article],
+    accountUsername: 'signed_in_user',
   });
   const legacy = scripts.pageState();
   const restoration = scripts.sourceSurfaceState();
 
   assert.equal(Object.hasOwn(legacy, 'search_query'), false);
   assert.equal(Object.hasOwn(legacy, 'scroll_y'), false);
+  assert.equal(legacy.authenticated, true);
   assert.equal(restoration.search_query, 'AI agents');
   assert.equal(restoration.scroll_y, 0);
   assert.deepEqual(Array.from(restoration.post_ids), ['555']);

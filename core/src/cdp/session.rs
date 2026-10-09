@@ -261,6 +261,21 @@ impl PageSession {
             .await
     }
 
+    async fn execute_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> anyhow::Result<Value> {
+        let (client, session_id) = {
+            let connection = self.connection.read().await;
+            (connection.client.clone(), connection.session_id.clone())
+        };
+        client
+            .execute_for_session_with_timeout(session_id.as_deref(), method, params, timeout)
+            .await
+    }
+
     /// Let an attached recorder capture the page *before* an operation runs.
     async fn snapshot_before(&self) {
         if let Some(recorder) = self.recorder() {
@@ -307,12 +322,9 @@ impl PageSession {
         let action = BrowserAction::begin(url).await?;
         self.snapshot_before().await;
         let timeout = seconds(timeout_seconds);
-        let resp = tokio::time::timeout(
-            timeout,
-            self.execute("Page.navigate", json!({ "url": url })),
-        )
-        .await
-        .map_err(|_| anyhow!("Page.navigate timed out after {timeout_seconds}s"))??;
+        let resp = self
+            .execute_with_timeout("Page.navigate", json!({ "url": url }), timeout)
+            .await?;
         // `Page.navigate` reports navigation failures (DNS, net::ERR_*, blocked)
         // in an `errorText` field rather than as a CDP error — chromiumoxide's
         // `goto` surfaced these, so check it to preserve that behavior.

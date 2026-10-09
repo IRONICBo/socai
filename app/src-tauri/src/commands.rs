@@ -3269,6 +3269,24 @@ async fn run_agent_task_on_session_page(
                     socai_core::sites::instagram::instagram_login_agent_note(&login);
             }
         }
+        if available_sites.iter().any(|id| id == "tiktok") {
+            tools.push(socai_core::sites::tiktok::tiktok_wait_for_login_tool(
+                page.clone(),
+            ));
+        }
+        if available_sites.iter().any(|id| id == "dy") {
+            tools.push(socai_core::sites::dy::douyin_wait_for_login_tool(
+                page.clone(),
+            ));
+        }
+        if available_sites.iter().any(|id| id == "linkedin") {
+            tools.push(
+                socai_core::sites::linkedin::linkedin_wait_for_login_tool(page.clone()),
+            );
+        }
+        if available_sites.iter().any(|id| id == "x") {
+            tools.push(socai_core::sites::x::x_wait_for_login_tool(page.clone()));
+        }
         tools.extend(scoped_site_learning_tools(page.clone(), &available_sites));
         let browser_tools = tools.iter().map(|tool| tool.name().to_string()).collect();
         let last_page_url = page

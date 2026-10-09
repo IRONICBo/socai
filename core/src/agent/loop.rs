@@ -107,6 +107,10 @@ pub enum AgentEvent {
 
 #[derive(Debug, Clone)]
 pub struct AgentOptions {
+    /// Optional caller-owned run identifier. Entrypoints with a durable run
+    /// record use this to keep interactive signals and Core tool contexts on
+    /// the same identity; local entrypoints keep the generated default.
+    pub run_id: Option<String>,
     pub max_steps: u32,
     pub max_tokens: u32,
     pub extra_instructions: String,
@@ -136,6 +140,7 @@ pub struct AgentOptions {
 impl Default for AgentOptions {
     fn default() -> Self {
         Self {
+            run_id: None,
             max_steps: 30,
             max_tokens: 16000,
             extra_instructions: String::new(),
@@ -183,6 +188,12 @@ pub async fn run_agent(
     run_agent_with_events(task, backend, tools, options, tx).await
 }
 
+fn resolve_run_id(run_id: Option<String>) -> String {
+    run_id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(new_run_id)
+}
+
 pub async fn run_agent_with_events(
     task: &str,
     backend: Arc<dyn Backend>,
@@ -190,7 +201,7 @@ pub async fn run_agent_with_events(
     options: AgentOptions,
     events: broadcast::Sender<AgentEvent>,
 ) -> anyhow::Result<AgentOutcome> {
-    let run_id = new_run_id();
+    let run_id = resolve_run_id(options.run_id);
     let run_dir = options.run_dir.unwrap_or_else(|| make_run_dir(task));
     ensure_dir(&run_dir)?;
     let run_state = Arc::new(RunState::new(task));
@@ -1733,6 +1744,15 @@ mod tests {
             thinking_blocks: Vec::new(),
             reasoning_items: Vec::new(),
         }
+    }
+
+    #[test]
+    fn caller_owned_run_id_is_preserved_for_interactive_signals() {
+        assert_eq!(
+            resolve_run_id(Some("orchestrator-run-1".into())),
+            "orchestrator-run-1"
+        );
+        assert!(!resolve_run_id(Some("  ".into())).trim().is_empty());
     }
 
     #[test]
