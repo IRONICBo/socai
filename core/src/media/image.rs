@@ -24,6 +24,12 @@ const VISION_GRID_BATCH: usize = 4;
 /// by OpenAI, Claude and Qwen-VL). Images are letterboxed (aspect preserved,
 /// white padding) into their square cell.
 const VISION_GRID_CELL: u32 = 512;
+/// Bound source images before the vision-grid decoder allocates their full RGB
+/// buffers. Social posts can contain extremely long screenshots whose encoded
+/// files are small but whose decoded surfaces are hundreds of MiB.
+const VISION_MAX_IMAGE_PIXELS: u64 = 16 * 1024 * 1024;
+const VISION_MAX_IMAGE_DIMENSION: u32 = 16_384;
+const VISION_MAX_DECODE_ALLOC_BYTES: u64 = 96 * 1024 * 1024;
 
 impl MediaProcessor {
     pub fn ocr_image(&self, payload: &[u8]) -> Result<String> {
@@ -505,7 +511,7 @@ fn compose_grid(payloads: &[&[u8]], cell: u32) -> Option<Vec<u8>> {
     let mut canvas = RgbImage::from_pixel(cols * cell, rows * cell, Rgb([255, 255, 255]));
     let mut any = false;
     for (i, payload) in payloads.iter().enumerate() {
-        let Ok(decoded) = image::load_from_memory(payload) else {
+        let Some(decoded) = decode_grid_source(payload) else {
             continue; // leave a blank cell on decode failure
         };
         any = true;
@@ -528,6 +534,34 @@ fn compose_grid(payloads: &[&[u8]], cell: u32) -> Option<Vec<u8>> {
         .write_to(&mut std::io::Cursor::new(&mut buf), ImageFormat::Jpeg)
         .ok()?;
     Some(buf)
+}
+
+fn decode_grid_source(payload: &[u8]) -> Option<image::DynamicImage> {
+    let dimensions_reader = image::ImageReader::new(std::io::Cursor::new(payload))
+        .with_guessed_format()
+        .ok()?;
+    let (width, height) = dimensions_reader.into_dimensions().ok()?;
+    if !grid_source_dimensions_allowed(width, height) {
+        return None;
+    }
+
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(VISION_MAX_IMAGE_DIMENSION);
+    limits.max_image_height = Some(VISION_MAX_IMAGE_DIMENSION);
+    limits.max_alloc = Some(VISION_MAX_DECODE_ALLOC_BYTES);
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(payload))
+        .with_guessed_format()
+        .ok()?;
+    reader.limits(limits);
+    reader.decode().ok()
+}
+
+fn grid_source_dimensions_allowed(width: u32, height: u32) -> bool {
+    width <= VISION_MAX_IMAGE_DIMENSION
+        && height <= VISION_MAX_IMAGE_DIMENSION
+        && u64::from(width)
+            .checked_mul(u64::from(height))
+            .is_some_and(|pixels| pixels <= VISION_MAX_IMAGE_PIXELS)
 }
 
 /// Parse `N` per-cell descriptions from a grid vision reply. Lines beginning
@@ -615,5 +649,16 @@ mod tests {
         // 2 images → 1 row, 2 cols → 1024x512.
         assert_eq!(decoded.width(), 1024);
         assert_eq!(decoded.height(), 512);
+    }
+
+    #[test]
+    fn vision_grid_rejects_pathological_source_dimensions() {
+        assert!(grid_source_dimensions_allowed(1080, 1440));
+        assert!(grid_source_dimensions_allowed(4096, 4096));
+        assert!(!grid_source_dimensions_allowed(4097, 4096));
+        assert!(!grid_source_dimensions_allowed(
+            1024,
+            VISION_MAX_IMAGE_DIMENSION + 1
+        ));
     }
 }
