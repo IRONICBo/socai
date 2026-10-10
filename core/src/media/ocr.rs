@@ -19,6 +19,8 @@
 //! the media pipeline already treats per-image errors as "no text".
 
 #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+use std::io::Cursor;
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 use std::path::{Path, PathBuf};
 #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 use std::sync::{Mutex, OnceLock};
@@ -28,6 +30,8 @@ use std::time::Instant;
 
 #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 use anyhow::{anyhow, Context, Result};
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+use oar_ocr::core::config::OrtSessionConfig;
 #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 use oar_ocr::oarocr::{OAROCRBuilder, OAROCR};
 use serde_json::{json, Value};
@@ -58,6 +62,13 @@ static ENGINE: OnceLock<std::result::Result<Mutex<OAROCR>, String>> = OnceLock::
 /// a small batch that still amortizes its fixed inference cost.
 const OCR_IMAGE_BATCH_SIZE: usize = 1;
 const OCR_REGION_BATCH_SIZE: usize = 16;
+/// Reject pathological social-media images before decoding. Long screenshots
+/// can advertise hundreds of megapixels while remaining small on the wire;
+/// converting one to RGB would otherwise ask Rust for several hundred MiB and
+/// abort a memory-limited worker before `image` can return an error.
+const OCR_MAX_IMAGE_PIXELS: u64 = 16 * 1024 * 1024;
+const OCR_MAX_IMAGE_DIMENSION: u32 = 16_384;
+const OCR_MAX_DECODE_ALLOC_BYTES: u64 = 96 * 1024 * 1024;
 
 /// Run OCR on encoded image byte blobs, tagged with a caller index. The
 /// process-global engine lock is acquired before decoding, then each image is
@@ -106,8 +117,8 @@ pub fn ocr_images_bytes(items: Vec<(usize, Vec<u8>)>) -> OcrBatch {
     let mut out = Vec::with_capacity(items.len());
     let mut predict = Duration::ZERO;
     for (idx, bytes) in items {
-        let image = match image::load_from_memory(&bytes) {
-            Ok(image) => image.to_rgb8(),
+        let image = match decode_ocr_image(&bytes) {
+            Ok(image) => image,
             Err(err) => {
                 out.push((idx, Err(format!("image decode failed: {err}"))));
                 continue;
@@ -141,6 +152,43 @@ pub fn ocr_images_bytes(items: Vec<(usize, Vec<u8>)>) -> OcrBatch {
         results: out,
         predict,
     }
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+fn decode_ocr_image(bytes: &[u8]) -> Result<image::RgbImage> {
+    let dimensions_reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .context("guess image format")?;
+    let (width, height) = dimensions_reader
+        .into_dimensions()
+        .context("read image dimensions")?;
+    ensure_ocr_dimensions(width, height)?;
+
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(OCR_MAX_IMAGE_DIMENSION);
+    limits.max_image_height = Some(OCR_MAX_IMAGE_DIMENSION);
+    limits.max_alloc = Some(OCR_MAX_DECODE_ALLOC_BYTES);
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .context("guess image format")?;
+    reader.limits(limits);
+    Ok(reader.decode().context("decode bounded image")?.to_rgb8())
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+fn ensure_ocr_dimensions(width: u32, height: u32) -> Result<()> {
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| anyhow!("image dimensions overflow: {width}x{height}"))?;
+    if width > OCR_MAX_IMAGE_DIMENSION
+        || height > OCR_MAX_IMAGE_DIMENSION
+        || pixels > OCR_MAX_IMAGE_PIXELS
+    {
+        anyhow::bail!(
+            "image dimensions exceed OCR safety limit: {width}x{height} ({pixels} pixels)"
+        );
+    }
+    Ok(())
 }
 
 /// Result of one OCR call: per-image text outcomes (in input order) plus the
@@ -202,6 +250,8 @@ pub fn diagnostics() -> Value {
         "execution_provider": execution_provider,
         "image_batch_size": OCR_IMAGE_BATCH_SIZE,
         "region_batch_size": OCR_REGION_BATCH_SIZE,
+        "max_image_pixels": OCR_MAX_IMAGE_PIXELS,
+        "max_decode_alloc_bytes": OCR_MAX_DECODE_ALLOC_BYTES,
         // Debug builds run OCR ~7-8× slower than release; surface it so a slow
         // perf record is obviously attributable to an unoptimized build.
         "build": if cfg!(debug_assertions) { "debug" } else { "release" },
@@ -234,11 +284,17 @@ fn build_engine() -> Result<Mutex<OAROCR>> {
     let dict = write_asset(&dir, "ppocrv6_tiny_rec_dict.txt", REC_DICT)?;
 
     // CPU execution provider (oar-ocr's default when no ort_session is set).
+    let ort_session = OrtSessionConfig::new()
+        .with_intra_threads(1)
+        .with_inter_threads(1)
+        .with_parallel_execution(false)
+        .with_memory_pattern(false);
     let ocr = OAROCRBuilder::new(
         det.to_string_lossy().into_owned(),
         rec.to_string_lossy().into_owned(),
         dict.to_string_lossy().into_owned(),
     )
+    .ort_session(ort_session)
     .image_batch_size(OCR_IMAGE_BATCH_SIZE)
     .region_batch_size(OCR_REGION_BATCH_SIZE)
     .build()
@@ -283,6 +339,8 @@ mod tests {
         assert_eq!(d["execution_provider"], "cpu");
         assert_eq!(d["image_batch_size"], OCR_IMAGE_BATCH_SIZE);
         assert_eq!(d["region_batch_size"], OCR_REGION_BATCH_SIZE);
+        assert_eq!(d["max_image_pixels"], OCR_MAX_IMAGE_PIXELS);
+        assert_eq!(d["max_decode_alloc_bytes"], OCR_MAX_DECODE_ALLOC_BYTES);
         assert!(d["model"].as_str().is_some_and(|s| s.contains("PP-OCRv6")));
         let machine = &d["machine"];
         assert_eq!(machine["os"], std::env::consts::OS);
@@ -292,6 +350,14 @@ mod tests {
         assert!(machine.get("cpu_model").is_some());
         assert!(machine.get("cpu_count").is_some());
         assert!(machine.get("memory_total_mb").is_some());
+    }
+
+    #[test]
+    fn rejects_pathological_image_dimensions_before_decode() {
+        assert!(ensure_ocr_dimensions(1080, 1440).is_ok());
+        assert!(ensure_ocr_dimensions(4096, 4096).is_ok());
+        assert!(ensure_ocr_dimensions(4097, 4096).is_err());
+        assert!(ensure_ocr_dimensions(1024, OCR_MAX_IMAGE_DIMENSION + 1).is_err());
     }
 
     /// Manual smoke test: exercises the full embedded-model → ort → predict path
