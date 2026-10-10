@@ -40,12 +40,11 @@ impl MediaProcessor {
         }
     }
 
-    /// OCR the already-downloaded images of a note in place: read each image with
-    /// a `local_path`, run them as one batched PP-OCRv6 `predict`, and attach
-    /// `ocr_text` (or `ocr_error`) per image. Returns the batch inference time so
-    /// the caller can record per-note OCR cost. Runs the CPU-bound inference on a
-    /// blocking thread. No-op (returns zero) when OCR is disabled or no image has
-    /// a local path.
+    /// OCR the already-downloaded images of a note in place. Each image is read,
+    /// predicted, and released before the next image is loaded, so cancelling a
+    /// note task leaves at most one blocking image inference behind and carousel
+    /// bytes never accumulate in memory. Returns summed inference time. No-op
+    /// when OCR is disabled or no image has a local path.
     pub async fn ocr_downloaded_images(&self, images: &mut [Value]) -> std::time::Duration {
         if !self.config.use_ocr || images.is_empty() {
             return std::time::Duration::ZERO;
@@ -65,32 +64,34 @@ impl MediaProcessor {
             return std::time::Duration::ZERO;
         }
 
-        let batch = tokio::task::spawn_blocking(move || {
-            let items: Vec<(usize, Vec<u8>)> = jobs
-                .into_iter()
-                .filter_map(|(idx, path)| std::fs::read(&path).ok().map(|bytes| (idx, bytes)))
-                .collect();
-            crate::media::ocr::ocr_images_bytes(items)
-        })
-        .await;
-
-        let Ok(batch) = batch else {
-            return std::time::Duration::ZERO;
-        };
-        self.timing.record("ocr_predict", batch.predict);
-        for (idx, result) in batch.results {
-            let Some(item) = images.get_mut(idx) else {
+        let mut predict = std::time::Duration::ZERO;
+        for (idx, path) in jobs {
+            let batch = tokio::task::spawn_blocking(move || {
+                let items = std::fs::read(&path)
+                    .map(|bytes| vec![(idx, bytes)])
+                    .unwrap_or_default();
+                crate::media::ocr::ocr_images_bytes(items)
+            })
+            .await;
+            let Ok(batch) = batch else {
                 continue;
             };
-            match result {
-                Ok(text) if !text.trim().is_empty() => {
-                    insert_string(item, "ocr_text", text);
+            predict += batch.predict;
+            for (result_idx, result) in batch.results {
+                let Some(item) = images.get_mut(result_idx) else {
+                    continue;
+                };
+                match result {
+                    Ok(text) if !text.trim().is_empty() => {
+                        insert_string(item, "ocr_text", text);
+                    }
+                    Ok(_) => {}
+                    Err(err) => insert_string(item, "ocr_error", err),
                 }
-                Ok(_) => {}
-                Err(err) => insert_string(item, "ocr_error", err),
             }
         }
-        batch.predict
+        self.timing.record("ocr_predict", predict);
+        predict
     }
 
     /// OCR card cover images *without persisting them* — used by the cards-only
