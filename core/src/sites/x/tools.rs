@@ -1277,6 +1277,10 @@ impl Tool for ReplyTool {
         })
     }
 
+    fn external_write(&self) -> bool {
+        true
+    }
+
     async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let locator = required_string(&input, "post")?;
         let raw_text = input
@@ -1650,6 +1654,10 @@ impl Tool for PostTool {
             },
             "required": ["text"]
         })
+    }
+
+    fn external_write(&self) -> bool {
+        true
     }
 
     async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
@@ -2485,6 +2493,10 @@ impl Tool for LikeTool {
         })
     }
 
+    fn external_write(&self) -> bool {
+        true
+    }
+
     async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let locator = required_string(&input, "post")?;
         let wait_seconds =
@@ -2570,6 +2582,10 @@ impl Tool for FollowTool {
             },
             "required": ["profile"]
         })
+    }
+
+    fn external_write(&self) -> bool {
+        true
     }
 
     async fn call(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
