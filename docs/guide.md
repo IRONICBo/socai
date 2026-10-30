@@ -934,6 +934,23 @@ configuration, account linking, database rollout and acceptance checks. The
 companion private backend is `socai-server`; both it and the desktop app must
 include the Google login implementation.
 
+### Account balance and invalid sessions
+
+A wallet response with HTTP 401 shows **sign-in expired** and a **sign in again**
+button. That action clears the saved login through the logout flow and opens
+the existing phone/Google login options. A network failure or other HTTP error
+keeps the session and offers **retry**. Choosing a custom LLM API key does not
+disable wallet requests or invalidate the account login.
+
+Device credentials have no fixed expiry or refresh-token endpoint. When moving
+the backend, preserve its device-token hash key or configure the backend's
+trusted legacy device keys; copying device rows alone across different keys
+does not preserve sign-in.
+
+Run `node app/scripts/check-auth-session.mjs` from the repository root to check
+these UI flows with a mocked Tauri transport, including late responses after
+logout and re-login. It does not access real accounts or the network.
+
 ### Stripe sandbox checkout
 
 The desktop supports the private backend's optional Stripe Managed Payments

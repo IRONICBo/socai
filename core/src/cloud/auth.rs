@@ -475,7 +475,28 @@ pub(super) async fn require_success(
     }
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
-    anyhow::bail!("{action} failed ({status}): {body}")
+    Err(CloudHttpError {
+        action: action.to_owned(),
+        status,
+        body,
+    }
+    .into())
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{action} failed ({status}): {body}")]
+struct CloudHttpError {
+    action: String,
+    status: reqwest::StatusCode,
+    body: String,
+}
+
+/// Only an explicit service 401 invalidates the saved sign-in. Connection
+/// failures, provider errors and authorization failures must not log users out.
+pub fn authentication_rejected(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<CloudHttpError>()
+        .is_some_and(|error| error.status == reqwest::StatusCode::UNAUTHORIZED)
 }
 
 pub(super) fn configured_base_url() -> Option<String> {

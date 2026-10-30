@@ -251,6 +251,9 @@ const messages = {
   "billing.points": { en: "{points} points", zh: "{points} 点" },
   "billing.pointsUsed": { en: "{points} points used", zh: "消耗 {points} 点" },
   "billing.unavailable": { en: "unavailable", zh: "暂不可用" },
+  "auth.sessionExpired": { en: "sign-in expired", zh: "登录已失效" },
+  "auth.signInAgain": { en: "sign in again", zh: "重新登录" },
+  "billing.retry": { en: "retry", zh: "重试" },
   "billing.activeUntil": { en: "active until {date}", zh: "有效期至 {date}" },
   "billing.rechargeHint": {
     en: "mock recharge for the MVP; points are added immediately.",

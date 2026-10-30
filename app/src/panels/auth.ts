@@ -55,6 +55,8 @@ export namespace authMenu {
   let rerender: (() => void) | null = null;
   let wallet: WalletBalance | null = null;
   let walletUnavailable = false;
+  let sessionRejected = false;
+  let walletRequest = 0;
   let loginExpanded = false;
   let upgradeExpanded = false;
   let googleBrowserOpened = false;
@@ -75,6 +77,7 @@ export namespace authMenu {
   }
 
   export async function refreshWallet(): Promise<void> {
+    const request = ++walletRequest;
     if (!session.logged_in) {
       wallet = null;
       walletUnavailable = false;
@@ -82,13 +85,24 @@ export namespace authMenu {
       return;
     }
     try {
-      wallet = await invoke<WalletBalance>("billing_wallet");
+      const next = await invoke<WalletBalance>("billing_wallet");
+      if (request !== walletRequest) return;
+      wallet = next;
       walletUnavailable = false;
+      sessionRejected = false;
+      setAccountSignedIn(isLoggedIn());
       scheduleExpiryRefresh();
     } catch (err) {
+      if (request !== walletRequest) return;
       console.error("billing_wallet failed:", err);
       wallet = null;
       walletUnavailable = true;
+      if (typeof err === "object" && err !== null
+        && "code" in err && err.code === "authentication_required") {
+        sessionRejected = true;
+      }
+      setAccountSignedIn(isLoggedIn());
+      stopExpiryTimer();
     }
   }
 
@@ -98,7 +112,7 @@ export namespace authMenu {
 
   export function requireSignIn(shell: ShellState): void {
     open = true;
-    error = t("auth.trialUsed");
+    error = sessionRejected ? "" : t("auth.trialUsed");
     shell.rerender();
   }
 
@@ -107,12 +121,14 @@ export namespace authMenu {
   }
 
   export function isLoggedIn(): boolean {
-    return session.logged_in;
+    return session.logged_in && !sessionRejected;
   }
 
   // Single write path for the session so shared copy that depends on the
   // sign-in state (the api-error nudge toward the built-in model) stays in sync.
   function setSession(next: AuthSession): void {
+    ++walletRequest;
+    sessionRejected = false;
     session = next;
     setAccountSignedIn(next.logged_in);
   }
@@ -133,8 +149,8 @@ export namespace authMenu {
     modelConfigContent = "",
     subscriptionContent = "",
   ): string {
-    const accountLabel = session.logged_in ? (session.phone ? maskPhone(session.phone) : session.email || t("auth.title")) : t("auth.signIn");
-    const dot = session.logged_in ? "badge-dot-ink" : "badge-dot-hollow";
+    const accountLabel = sessionRejected ? t("auth.signInAgain") : session.logged_in ? (session.phone ? maskPhone(session.phone) : session.email || t("auth.title")) : t("auth.signIn");
+    const dot = isLoggedIn() ? "badge-dot-ink" : "badge-dot-hollow";
     return `
       <div class="auth-menu">
         <button
@@ -198,10 +214,13 @@ export namespace authMenu {
         <span class="t-small subtle">${esc(t("billing.remaining"))}</span>
         <span class="t-h2 auth-wallet-points">${wallet
           ? esc(t("billing.points", { points: wallet.balance_points }))
-          : esc(walletUnavailable ? t("billing.unavailable") : t("common.loading"))}</span>
+          : esc(sessionRejected ? t("auth.sessionExpired") : walletUnavailable ? t("billing.unavailable") : t("common.loading"))}</span>
       </div>
+      ${walletUnavailable && !sessionRejected ? `<button id="auth-wallet-retry" type="button" class="auth-text-button">${esc(t("billing.retry"))}</button>` : ""}
       <section class="auth-model-picker">${modelConfigContent}</section>
-      ${activeUntil ? `
+      ${sessionRejected ? `
+        <button id="auth-sign-in-again" type="button" class="btn-primary auth-full-button" ${phase !== "idle" ? "disabled" : ""}>${esc(t("auth.signInAgain"))}</button>
+      ` : activeUntil ? `
         <div class="auth-pro-status">
           <span class="badge"><i class="badge-dot badge-dot-ink" aria-hidden="true"></i>Pro</span>
           <span class="t-small subtle">${esc(t("billing.activeUntil", { date: formatDate(activeUntil) }))}</span>
@@ -210,8 +229,8 @@ export namespace authMenu {
       ` : `
         <button id="auth-upgrade" type="button" class="btn-primary auth-full-button" aria-expanded="${upgradeExpanded ? "true" : "false"}">${esc(t("subscription.upgradePro"))}</button>
       `}
-      ${upgradeExpanded ? `<section class="auth-upgrade-panel" aria-label="${esc(t("subscription.upgradePro"))}">${subscriptionContent}</section>` : ""}
-      ${phase === "google" ? renderGooglePending() : session.email ? ""
+      ${upgradeExpanded && !sessionRejected ? `<section class="auth-upgrade-panel" aria-label="${esc(t("subscription.upgradePro"))}">${subscriptionContent}</section>` : ""}
+      ${phase === "google" ? renderGooglePending() : session.email || sessionRejected ? ""
         : `<button id="auth-google-link" type="button" class="auth-text-button" ${phase !== "idle" ? "disabled" : ""}>${esc(t("auth.googleLink"))}</button>`}
       <div class="auth-session-actions">
         <button id="auth-logout" type="button" class="auth-text-button" ${phase !== "idle" ? "disabled" : ""}>${esc(phase === "logging_out" ? t("auth.loggingOut") : t("auth.logout"))}</button>
@@ -307,6 +326,14 @@ export namespace authMenu {
     });
 
     if (session.logged_in) {
+      document.getElementById("auth-sign-in-again")?.addEventListener("click", () => {
+        void logout(shell, onSessionChanged, true);
+      });
+      document.getElementById("auth-wallet-retry")?.addEventListener("click", () => {
+        walletUnavailable = false;
+        shell.rerender();
+        void refreshWallet().then(shell.rerender);
+      });
       document.getElementById("auth-upgrade")?.addEventListener("click", () => {
         upgradeExpanded = !upgradeExpanded;
         shell.rerender();
@@ -449,8 +476,10 @@ export namespace authMenu {
     }
   }
 
-  async function logout(shell: ShellState, onSessionChanged: () => Promise<void>): Promise<void> {
+  async function logout(shell: ShellState, onSessionChanged: () => Promise<void>, signInAgain = false): Promise<void> {
     if (phase !== "idle") return;
+    ++walletRequest;
+    const previousPhone = session.phone;
     phase = "logging_out";
     error = "";
     shell.rerender();
@@ -459,13 +488,18 @@ export namespace authMenu {
     } catch (err) {
       // The Rust side clears the local token even when remote revocation fails.
       console.error("auth_logout failed:", err);
-      error = friendlyError(err);
+      if (!signInAgain) error = friendlyError(err);
     } finally {
       setSession(EMPTY_SESSION);
       wallet = null;
       walletUnavailable = false;
-      loginExpanded = false;
-          upgradeExpanded = false;
+      if (signInAgain) phone = previousPhone;
+      loginExpanded = signInAgain && Boolean(previousPhone);
+      challenge = null;
+      code = "";
+      retryAt = 0;
+      stopCountdown();
+      upgradeExpanded = false;
       stopExpiryTimer();
       phase = "idle";
       await onSessionChanged();

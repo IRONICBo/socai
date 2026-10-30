@@ -21,10 +21,10 @@ pub use guest::{
 
 pub use asr::{cloud_asr_access_rejected, transcribe_audio_file, CloudAsrResult};
 pub use auth::{
-    activate, activate_with_base_url, auth_session, hosted_llm_selected, llm_gateway_config,
-    logout, pro_activated, redeem_invite, send_sms_code, set_hosted_llm_selected, status,
-    take_hosted_llm_default, verify_sms_code, AuthSession, CloudCredentials, CloudStatus,
-    InviteRedemption, LlmGatewayConfig, SmsChallengeResponse,
+    activate, activate_with_base_url, auth_session, authentication_rejected, hosted_llm_selected,
+    llm_gateway_config, logout, pro_activated, redeem_invite, send_sms_code,
+    set_hosted_llm_selected, status, take_hosted_llm_default, verify_sms_code, AuthSession,
+    CloudCredentials, CloudStatus, InviteRedemption, LlmGatewayConfig, SmsChallengeResponse,
 };
 pub use billing::{
     cancel_stripe_subscription, create_alipay_order, create_stripe_order, create_wechat_order,

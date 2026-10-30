@@ -3844,13 +3844,26 @@ pub async fn auth_logout(telemetry: State<'_, DesktopTelemetry>) -> Result<(), S
     result
 }
 
+#[derive(serde::Serialize)]
+pub struct BillingWalletError {
+    code: &'static str,
+    message: String,
+}
+
 #[tauri::command]
 pub async fn billing_wallet(
     telemetry: State<'_, DesktopTelemetry>,
-) -> Result<socai_core::cloud::WalletBalance, String> {
+) -> Result<socai_core::cloud::WalletBalance, BillingWalletError> {
     let result = socai_core::cloud::wallet_balance()
         .await
-        .map_err(|err| format!("{err:#}"));
+        .map_err(|err| BillingWalletError {
+            code: if socai_core::cloud::authentication_rejected(&err) {
+                "authentication_required"
+            } else {
+                "wallet_unavailable"
+            },
+            message: format!("{err:#}"),
+        });
     if let Ok(wallet) = &result {
         telemetry.capture(
             "socai_wallet_snapshot",
@@ -3861,6 +3874,8 @@ pub async fn billing_wallet(
                 "pro_active_until": wallet.active_until,
             }),
         );
+    } else if let Err(error) = &result {
+        telemetry.capture("socai_wallet_load_failed", json!({ "code": error.code }));
     }
     result
 }
