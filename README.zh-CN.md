@@ -124,13 +124,13 @@ socai podcast read <episode_slug> --section transcript
 
 桌面端支持 macOS 和 Windows：
 
-- [下载 macOS 版](https://github.com/socai-io/socai/releases/latest/download/socai-macos-universal.dmg)
-- [下载 Windows 版](https://github.com/socai-io/socai/releases/latest/download/socai-windows-x86_64-setup.exe)
+- [下载 macOS 版](https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-macos-universal.dmg)
+- [下载 Windows 版](https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-windows-x86_64-setup.exe)
 
 macOS 命令行：
 
 ```bash
-curl -fsSL https://github.com/socai-io/socai/releases/latest/download/install.sh | sh
+curl -fsSL https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/install.sh | sh
 ```
 
 Windows 安装、Agent 接入、平台命令、Chrome 配置、运行产物和本地开发流程统一见[使用与开发指南](docs/guide.md)。

@@ -52,17 +52,17 @@
     },
     {
       "source": "/download",
-      "destination": "https://socai-download.oss-cn-beijing.aliyuncs.com/releases/latest/socai-macos-universal.dmg",
+      "destination": "https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-macos-universal.dmg",
       "permanent": false
     },
     {
       "source": "/download/macos",
-      "destination": "https://socai-download.oss-cn-beijing.aliyuncs.com/releases/latest/socai-macos-universal.dmg",
+      "destination": "https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-macos-universal.dmg",
       "permanent": false
     },
     {
       "source": "/download/windows",
-      "destination": "https://socai-download.oss-cn-beijing.aliyuncs.com/releases/latest/socai-windows-x86_64-setup.exe",
+      "destination": "https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-windows-x86_64-setup.exe",
       "permanent": false
     },
     {

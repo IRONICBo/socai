@@ -20,8 +20,8 @@ Research is read-only by default. Explicit target-bound write commands run only 
 
 Use the desktop app to enter research tasks without setting up a command-line environment. It is available for macOS and Windows:
 
-- [Download for macOS](https://github.com/socai-io/socai/releases/latest/download/socai-macos-universal.dmg)
-- [Download for Windows](https://github.com/socai-io/socai/releases/latest/download/socai-windows-x86_64-setup.exe)
+- [Download for macOS](https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-macos-universal.dmg)
+- [Download for Windows](https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-windows-x86_64-setup.exe)
 
 After installation, follow the in-app steps to connect Chrome and enter a task such as:
 
@@ -39,13 +39,13 @@ The CLI is designed for agent-driven workflows, including Claude Code and Codex,
 macOS:
 
 ```bash
-curl -fsSL https://github.com/socai-io/socai/releases/latest/download/install.sh | sh
+curl -fsSL https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/install.sh | sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-$installer = Join-Path $env:TEMP 'socai-install.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/socai-io/socai/releases/latest/download/install.ps1 -OutFile $installer; Unblock-File $installer; & $installer
+$installer = Join-Path $env:TEMP 'socai-install.ps1'; Invoke-WebRequest -UseBasicParsing https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/install.ps1 -OutFile $installer; Unblock-File $installer; & $installer
 ```
 
 The installers download and verify the release archive, install socai at `~/.socai/bin/socai` on macOS or `%USERPROFILE%\.socai\bin\socai.exe` on Windows, and configure or explain the PATH update.

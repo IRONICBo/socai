@@ -124,13 +124,13 @@ socai podcast read <episode_slug> --section transcript
 
 デスクトップアプリは macOS と Windows に対応しています。
 
-- [macOS をダウンロード](https://github.com/socai-io/socai/releases/latest/download/socai-macos-universal.dmg)
-- [Windows をダウンロード](https://github.com/socai-io/socai/releases/latest/download/socai-windows-x86_64-setup.exe)
+- [macOS をダウンロード](https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-macos-universal.dmg)
+- [Windows をダウンロード](https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-windows-x86_64-setup.exe)
 
 macOS の CLI：
 
 ```bash
-curl -fsSL https://github.com/socai-io/socai/releases/latest/download/install.sh | sh
+curl -fsSL https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/install.sh | sh
 ```
 
 Windows のインストール、Agent 連携、プラットフォームコマンド、Chrome の設定、成果物、ローカル開発の手順は[利用・開発ガイド](docs/guide.md)にまとめています。

@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const LATEST_RELEASE_URL: &str = "https://github.com/socai-io/socai/releases/latest";
 const MACOS_INSTALL_SCRIPT_URL: &str =
-    "https://github.com/socai-io/socai/releases/latest/download/install.sh";
-const WINDOWS_INSTALL_COMMAND: &str = "(Invoke-WebRequest -UseBasicParsing https://github.com/socai-io/socai/releases/latest/download/install.ps1).Content | Invoke-Expression";
+    "https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/install.sh";
+const WINDOWS_INSTALL_COMMAND: &str = "(Invoke-WebRequest -UseBasicParsing https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/install.ps1).Content | Invoke-Expression";
 const UPDATE_COMMAND: &str = "socai update";
 const CHECK_INTERVAL: u64 = 24 * 60 * 60;
 const FAILED_CHECK_INTERVAL: u64 = 60 * 60;

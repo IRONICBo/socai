@@ -9,8 +9,8 @@ sidebar:
 
 The desktop app includes a task composer, run history, and artifact previews.
 
-- [Download for macOS](https://github.com/socai-io/socai/releases/latest/download/socai-macos-universal.dmg)
-- [Download for Windows](https://github.com/socai-io/socai/releases/latest/download/socai-windows-x86_64-setup.exe)
+- [Download for macOS](https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-macos-universal.dmg)
+- [Download for Windows](https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-windows-x86_64-setup.exe)
 
 After installation, open the app and follow the Chrome connection instructions.
 
@@ -19,14 +19,14 @@ After installation, open the app and follow the Chrome connection instructions.
 ### macOS
 
 ```bash
-curl -fsSL https://github.com/socai-io/socai/releases/latest/download/install.sh | sh
+curl -fsSL https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/install.sh | sh
 ```
 
 ### Windows PowerShell
 
 ```powershell
 $installer = Join-Path $env:TEMP 'socai-install.ps1'
-Invoke-WebRequest -UseBasicParsing https://github.com/socai-io/socai/releases/latest/download/install.ps1 -OutFile $installer
+Invoke-WebRequest -UseBasicParsing https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/install.ps1 -OutFile $installer
 Unblock-File $installer
 & $installer
 ```

@@ -125,13 +125,13 @@ Filters, comments, and the rest of the commands are in the [user guide](docs/gui
 
 Desktop app for macOS and Windows:
 
-- [Download for macOS](https://github.com/socai-io/socai/releases/latest/download/socai-macos-universal.dmg)
-- [Download for Windows](https://github.com/socai-io/socai/releases/latest/download/socai-windows-x86_64-setup.exe)
+- [Download for macOS](https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-macos-universal.dmg)
+- [Download for Windows](https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-windows-x86_64-setup.exe)
 
 CLI on macOS:
 
 ```bash
-curl -fsSL https://github.com/socai-io/socai/releases/latest/download/install.sh | sh
+curl -fsSL https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/install.sh | sh
 ```
 
 Connect the installed CLI to Codex, Claude Code, Cursor, Gemini CLI, OpenCode, GitHub Copilot, and other local Agent Skills hosts:
