@@ -4,7 +4,7 @@ set -eu
 repo="socai-io/socai"
 asset="socai-cli-macos-universal.tar.gz"
 checksum="${asset}.sha256"
-default_base_url="https://socai-download.oss-cn-beijing.aliyuncs.com/releases/latest"
+default_base_url="https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest"
 github_base_url="https://github.com/${repo}/releases/latest/download"
 base_url="${SOCAI_DOWNLOAD_BASE_URL:-$default_base_url}"
 install_dir="${SOCAI_INSTALL_DIR:-$HOME/.socai/bin}"

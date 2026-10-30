@@ -124,13 +124,13 @@ socai podcast read <episode_slug> --section transcript
 
 데스크톱 앱은 macOS와 Windows를 지원합니다.
 
-- [macOS 다운로드](https://github.com/socai-io/socai/releases/latest/download/socai-macos-universal.dmg)
-- [Windows 다운로드](https://github.com/socai-io/socai/releases/latest/download/socai-windows-x86_64-setup.exe)
+- [macOS 다운로드](https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-macos-universal.dmg)
+- [Windows 다운로드](https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-windows-x86_64-setup.exe)
 
 macOS CLI:
 
 ```bash
-curl -fsSL https://github.com/socai-io/socai/releases/latest/download/install.sh | sh
+curl -fsSL https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/install.sh | sh
 ```
 
 Windows 설치, Agent 연동, 플랫폼 명령, Chrome 설정, 산출물, 로컬 개발 절차는 [사용 및 개발 가이드](docs/guide.md)에 정리되어 있습니다.

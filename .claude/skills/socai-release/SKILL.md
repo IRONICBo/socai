@@ -29,7 +29,7 @@ A helper script wraps this command, finds the created run, watches it, and print
 - Version source: latest strict semver tag matching `vMAJOR.MINOR.PATCH`; if no tag exists, app version from `app/src-tauri/tauri.conf.json`
 - Desktop artifacts: `socai-macos-universal.dmg` and `socai-windows-x86_64-setup.exe`, plus the auto-updater set `socai-macos-universal.app.tar.gz` + `.sig`, `socai-windows-x86_64-setup.exe.sig`, and `latest.json` (darwin + windows platforms)
 - CLI artifacts: `install.sh`, `socai-cli-macos-universal.tar.gz` + `.sha256`, `install.ps1`, and `socai-cli-windows-x86_64.zip` + `.sha256`
-- Alibaba Cloud OSS mirror: every asset is also published to `https://socai-download.oss-cn-beijing.aliyuncs.com/releases/` (`vars.SOCAI_OSS_PUBLIC_BASE_URL` in the workflow) — an immutable `releases/vX.Y.Z/` copy staged before the GitHub release, and a mutable `releases/latest/` copy promoted after it. The OSS copy of `latest.json` is rewritten so its platform URLs point at the OSS `releases/vX.Y.Z/` assets instead of GitHub.
+- Alibaba Cloud OSS mirror: every asset is also published to `https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/` (`vars.SOCAI_OSS_PUBLIC_BASE_URL` in the workflow) — an immutable `releases/vX.Y.Z/` copy staged before the GitHub release, and a mutable `releases/latest/` copy promoted after it. The OSS copy of `latest.json` is rewritten so its platform URLs point at the OSS `releases/vX.Y.Z/` assets instead of GitHub.
 - Production publish steps on `main`:
   1. Build on GitHub Actions, in parallel: universal macOS app + DMG, universal macOS CLI, Windows CLI, and the Windows NSIS installer.
   2. Require Developer ID signing + notarization secrets, and the updater minisign keypair (`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`).
@@ -218,7 +218,7 @@ Verify download redirects. The site's `/download*` redirects resolve to the OSS 
 
 ```bash
 tag="$(gh release view --repo socai-io/socai --json tagName --jq '.tagName')"
-oss_base="https://socai-download.oss-cn-beijing.aliyuncs.com/releases"
+oss_base="https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases"
 
 curl -I -L --max-time 30 -o /dev/null -w 'code=%{http_code}\nfinal=%{url_effective}\n' https://socai.io/download
 # code=200, final=${oss_base}/latest/socai-macos-universal.dmg

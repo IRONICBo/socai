@@ -15,8 +15,8 @@ sidebar:
 
 For the lowest-friction start, download the desktop app:
 
-- [macOS](https://github.com/socai-io/socai/releases/latest/download/socai-macos-universal.dmg)
-- [Windows](https://github.com/socai-io/socai/releases/latest/download/socai-windows-x86_64-setup.exe)
+- [macOS](https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-macos-universal.dmg)
+- [Windows](https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/socai-windows-x86_64-setup.exe)
 
 CLI users can follow the complete [installation guide](/docs/installation/).
 

@@ -52,13 +52,13 @@ socai status --json
 macOS：
 
 ```bash
-curl -fsSL https://github.com/socai-io/socai/releases/latest/download/install.sh | sh
+curl -fsSL https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/install.sh | sh
 ```
 
 Windows PowerShell：
 
 ```powershell
-$installer = Join-Path $env:TEMP 'socai-install.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/socai-io/socai/releases/latest/download/install.ps1 -OutFile $installer; Unblock-File $installer; & $installer
+$installer = Join-Path $env:TEMP 'socai-install.ps1'; Invoke-WebRequest -UseBasicParsing https://socai-downloads.oss-cn-hangzhou.aliyuncs.com/releases/latest/install.ps1 -OutFile $installer; Unblock-File $installer; & $installer
 ```
 
 安装后需要重新打开终端让 PATH 生效，然后重跑 `socai status --json`。
