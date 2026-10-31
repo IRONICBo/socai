@@ -1,9 +1,10 @@
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use symphonia::core::codecs::CODEC_TYPE_AAC;
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_AAC};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
@@ -13,6 +14,10 @@ use symphonia::core::probe::Hint;
 use crate::media::asr::transcribe_local_file_with_timeout;
 use crate::media::common::{ensure_dir, url_suffix, MediaUnavailable};
 use crate::media::processor::MediaProcessor;
+
+const CLOUD_ASR_SAMPLE_RATE: u32 = 16_000;
+const MAX_AUDIO_CHANNELS: usize = 8;
+const MAX_PACKET_FRAMES: u64 = 1_048_576;
 
 impl MediaProcessor {
     /// Transcribe a video/audio source through managed cloud ASR for paid
@@ -46,10 +51,10 @@ impl MediaProcessor {
         }
         // Real clip duration (the clip is already capped at
         // max_audio_seconds); the server uses it for usage accounting.
-        let (aac, duration) = self.extract_audio_aac(&source_path).await?;
+        let (wav, duration) = self.extract_audio_wav(&source_path).await?;
         let duration_s = duration.ceil() as i64;
         let result = match crate::cloud::transcribe_audio_file(
-            &aac,
+            &wav,
             duration_s,
             Duration::from_secs(self.config.asr_timeout_s.max(60)),
             self.billing_task_id.as_deref(),
@@ -98,19 +103,19 @@ impl MediaProcessor {
         }
     }
 
-    /// Extract the source's AAC track into an ADTS `.aac` file without
-    /// re-encoding, capped at `max_audio_seconds`. Cloud ASR (Fun-ASR) accepts
-    /// aac as-is, so no local decode is needed. Returns the file path and its
-    /// duration in seconds.
-    async fn extract_audio_aac(&self, source_path: &Path) -> Result<(PathBuf, f64)> {
+    /// Decode the source's AAC track into a mono PCM WAV capped at
+    /// `max_audio_seconds`. WAV avoids provider-specific raw AAC handling while
+    /// 16 kHz mono keeps the upload bounded for speech recognition.
+    async fn extract_audio_wav(&self, source_path: &Path) -> Result<(PathBuf, f64)> {
         let out = self.audio_output_path(source_path)?;
         let source = source_path.to_path_buf();
         let target = out.clone();
         let max_seconds = self.config.max_audio_seconds;
-        let duration =
-            tokio::task::spawn_blocking(move || demux_aac_to_adts(&source, &target, max_seconds))
-                .await
-                .context("audio demux task panicked")??;
+        let duration = tokio::task::spawn_blocking(move || {
+            decode_aac_to_pcm_wav(&source, &target, max_seconds)
+        })
+        .await
+        .context("audio decode task panicked")??;
         Ok((out, duration))
     }
 
@@ -124,14 +129,18 @@ impl MediaProcessor {
             self.config.base_dir.join("audio")
         };
         let dir = ensure_dir(&dir)?;
-        Ok(dir.join("audio.aac"))
+        Ok(dir.join("audio.wav"))
     }
 }
 
-/// Copy the first AAC track of `source` into `target` as raw ADTS frames
-/// (one 7-byte header per packet, no re-encoding), keeping at most
+/// Decode the first AAC track of `source` into a mono PCM WAV, keeping at most
 /// `max_seconds` of audio. Returns the written duration in seconds.
-fn demux_aac_to_adts(source: &Path, target: &Path, max_seconds: u64) -> Result<f64> {
+fn decode_aac_to_pcm_wav(source: &Path, target: &Path, max_seconds: u64) -> Result<f64> {
+    if max_seconds == 0 {
+        anyhow::bail!(MediaUnavailable(
+            "managed audio duration limit must be positive".into()
+        ));
+    }
     let file = std::fs::File::open(source)
         .with_context(|| format!("failed to open {}", source.display()))?;
     let stream = MediaSourceStream::new(Box::new(file), Default::default());
@@ -154,27 +163,14 @@ fn demux_aac_to_adts(source: &Path, target: &Path, max_seconds: u64) -> Result<f
         .find(|track| track.codec_params.codec == CODEC_TYPE_AAC)
         .ok_or_else(|| MediaUnavailable(format!("no AAC audio track in {}", source.display())))?;
     let track_id = track.id;
-    let sample_rate = track
-        .codec_params
-        .sample_rate
-        .ok_or_else(|| MediaUnavailable("AAC track has no sample rate".into()))?;
-    let asc = track
-        .codec_params
-        .extra_data
-        .as_deref()
-        .ok_or_else(|| MediaUnavailable("AAC track has no decoder config".into()))?;
-    let header = AdtsHeader::from_asc(asc)?;
-    let mut writer = std::io::BufWriter::new(
-        std::fs::File::create(target)
-            .with_context(|| format!("failed to create {}", target.display()))?,
-    );
-    // The emitted ADTS header declares one 1024-sample AAC frame per packet.
-    // Bound the output using that exact duration contract, which is also what
-    // socai-server validates after upload. Using the source packet timestamp
-    // allowed the last frame to cross the configured limit while the client
-    // still reported the capped value.
-    let max_samples = max_seconds.saturating_mul(u64::from(sample_rate));
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .context("failed to initialize the AAC decoder")?;
+    let mut writer = None;
+    let mut resampler = None;
+    let mut decoded_sample_rate = None;
     let mut written_samples = 0u64;
+    let mut max_samples = 0u64;
     loop {
         let packet = match format.next_packet() {
             Ok(packet) => packet,
@@ -183,82 +179,196 @@ fn demux_aac_to_adts(source: &Path, target: &Path, max_seconds: u64) -> Result<f
             {
                 break
             }
+            Err(SymphoniaError::ResetRequired) => {
+                anyhow::bail!(MediaUnavailable(format!(
+                    "AAC stream changed format in {}",
+                    source.display()
+                )))
+            }
             Err(err) => return Err(err.into()),
         };
         if packet.track_id() != track_id {
             continue;
         }
-        const SAMPLES_PER_AAC_FRAME: u64 = 1024;
-        if written_samples.saturating_add(SAMPLES_PER_AAC_FRAME) > max_samples {
+        let decoded = match decoder.decode(&packet) {
+            Ok(decoded) => decoded,
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(err) => return Err(err.into()),
+        };
+        let spec = *decoded.spec();
+        if !(8_000..=384_000).contains(&spec.rate) {
+            anyhow::bail!(MediaUnavailable(format!(
+                "unsupported audio sample rate {} Hz",
+                spec.rate
+            )));
+        }
+        let channels = spec.channels.count();
+        if !(1..=MAX_AUDIO_CHANNELS).contains(&channels) {
+            anyhow::bail!(MediaUnavailable(format!(
+                "unsupported audio channel count {channels}"
+            )));
+        }
+        if decoded.capacity() as u64 > MAX_PACKET_FRAMES {
+            anyhow::bail!(MediaUnavailable(format!(
+                "decoded audio packet is too large: {} frames",
+                decoded.capacity()
+            )));
+        }
+        if decoded_sample_rate.is_some_and(|rate| rate != spec.rate) {
+            anyhow::bail!(MediaUnavailable(format!(
+                "audio sample rate changed in {}",
+                source.display()
+            )));
+        }
+        if decoded_sample_rate.is_none() {
+            let target_rate = spec.rate.min(CLOUD_ASR_SAMPLE_RATE);
+            decoded_sample_rate = Some(spec.rate);
+            max_samples = max_seconds.saturating_mul(u64::from(target_rate));
+            writer = Some(PcmWavWriter::create(target, target_rate)?);
+            resampler = Some(LinearResampler::new(spec.rate, target_rate));
+        }
+
+        let mut buffer = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
+        buffer.copy_interleaved_ref(decoded);
+        let mono = buffer
+            .samples()
+            .chunks(channels)
+            .map(|frame| frame.iter().copied().sum::<f32>() / frame.len() as f32);
+        let remaining = max_samples.saturating_sub(written_samples) as usize;
+        let samples = resampler
+            .as_mut()
+            .expect("resampler is initialized with the first decoded packet")
+            .push(mono, remaining);
+        writer
+            .as_mut()
+            .expect("WAV writer is initialized with the first decoded packet")
+            .write_samples(&samples)?;
+        written_samples += samples.len() as u64;
+        if written_samples >= max_samples {
             break;
         }
-        writer.write_all(&header.for_frame(packet.data.len())?)?;
-        writer.write_all(&packet.data)?;
-        written_samples += SAMPLES_PER_AAC_FRAME;
     }
-    writer.flush()?;
-    if written_samples == 0 {
+
+    if written_samples < max_samples {
+        if let Some(resampler) = resampler.as_mut() {
+            let remaining = max_samples.saturating_sub(written_samples) as usize;
+            let samples = resampler.finish(remaining);
+            writer
+                .as_mut()
+                .expect("WAV writer exists when the resampler exists")
+                .write_samples(&samples)?;
+            written_samples += samples.len() as u64;
+        }
+    }
+    let Some(writer) = writer else {
         anyhow::bail!(MediaUnavailable(format!(
-            "AAC track in {} contains no audio packets",
+            "AAC track in {} contains no decodable audio",
             source.display()
         )));
-    }
+    };
+    writer.finish()?;
+    let sample_rate = decoded_sample_rate
+        .expect("a decoded sample rate exists when the WAV writer exists")
+        .min(CLOUD_ASR_SAMPLE_RATE);
     Ok(written_samples as f64 / f64::from(sample_rate))
 }
 
-/// Fixed part of an ADTS header for an AAC-LC stream; only the per-frame
-/// length bits vary between frames.
-struct AdtsHeader {
-    sample_rate_index: u8,
-    channel_config: u8,
+struct LinearResampler {
+    step: f64,
+    position: f64,
+    buffered: Vec<f32>,
 }
 
-impl AdtsHeader {
-    /// Read the sample rate index and channel configuration from the track's
-    /// AudioSpecificConfig (the mp4 `esds` decoder config).
-    fn from_asc(asc: &[u8]) -> Result<Self> {
-        if asc.len() < 2 {
-            anyhow::bail!(MediaUnavailable("AAC decoder config is too short".into()));
+impl LinearResampler {
+    fn new(source_rate: u32, target_rate: u32) -> Self {
+        Self {
+            step: f64::from(source_rate) / f64::from(target_rate),
+            position: 0.0,
+            buffered: Vec::new(),
         }
-        let object_type = asc[0] >> 3;
-        if object_type == 31 {
-            // Escape-coded object type shifts every following field.
-            anyhow::bail!(MediaUnavailable(format!(
-                "unsupported AAC object type {object_type}"
-            )));
+    }
+
+    fn push(&mut self, samples: impl IntoIterator<Item = f32>, limit: usize) -> Vec<f32> {
+        self.buffered.extend(samples);
+        self.take(limit, false)
+    }
+
+    fn finish(&mut self, limit: usize) -> Vec<f32> {
+        self.take(limit, true)
+    }
+
+    fn take(&mut self, limit: usize, final_chunk: bool) -> Vec<f32> {
+        let mut output = Vec::with_capacity(limit.min(self.buffered.len()));
+        while output.len() < limit && self.position < self.buffered.len() as f64 {
+            let left = self.position.floor() as usize;
+            let right = left.saturating_add(1);
+            if right >= self.buffered.len() && !final_chunk {
+                break;
+            }
+            let fraction = (self.position - left as f64) as f32;
+            let a = self.buffered[left];
+            let b = self.buffered.get(right).copied().unwrap_or(a);
+            output.push(a + (b - a) * fraction);
+            self.position += self.step;
         }
-        let sample_rate_index = ((asc[0] & 0x7) << 1) | (asc[1] >> 7);
-        if sample_rate_index >= 13 {
-            anyhow::bail!(MediaUnavailable(
-                "AAC stream uses an explicit sample rate, unsupported in ADTS".into(),
-            ));
+        let consumed = (self.position.floor() as usize).min(self.buffered.len());
+        if consumed > 0 {
+            self.buffered.drain(..consumed);
+            self.position -= consumed as f64;
         }
-        let channel_config = (asc[1] >> 3) & 0xF;
-        if !(1..=7).contains(&channel_config) {
-            anyhow::bail!(MediaUnavailable(format!(
-                "unsupported AAC channel configuration {channel_config}"
-            )));
-        }
+        output
+    }
+}
+
+struct PcmWavWriter {
+    writer: std::io::BufWriter<std::fs::File>,
+    samples_written: u64,
+}
+
+impl PcmWavWriter {
+    fn create(target: &Path, sample_rate: u32) -> Result<Self> {
+        let file = std::fs::File::create(target)
+            .with_context(|| format!("failed to create {}", target.display()))?;
+        let mut writer = std::io::BufWriter::new(file);
+        writer.write_all(b"RIFF")?;
+        writer.write_all(&36u32.to_le_bytes())?;
+        writer.write_all(b"WAVEfmt ")?;
+        writer.write_all(&16u32.to_le_bytes())?;
+        writer.write_all(&1u16.to_le_bytes())?;
+        writer.write_all(&1u16.to_le_bytes())?;
+        writer.write_all(&sample_rate.to_le_bytes())?;
+        writer.write_all(&sample_rate.saturating_mul(2).to_le_bytes())?;
+        writer.write_all(&2u16.to_le_bytes())?;
+        writer.write_all(&16u16.to_le_bytes())?;
+        writer.write_all(b"data")?;
+        writer.write_all(&0u32.to_le_bytes())?;
         Ok(Self {
-            sample_rate_index,
-            channel_config,
+            writer,
+            samples_written: 0,
         })
     }
 
-    fn for_frame(&self, payload_len: usize) -> Result<[u8; 7]> {
-        let frame_len = payload_len + 7;
-        if frame_len > 0x1FFF {
-            anyhow::bail!("AAC frame too large for ADTS: {payload_len} bytes");
+    fn write_samples(&mut self, samples: &[f32]) -> Result<()> {
+        for sample in samples {
+            let value = (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16;
+            self.writer.write_all(&value.to_le_bytes())?;
         }
-        let frame_len = frame_len as u16;
-        Ok([
-            0xFF,                                                                  // syncword
-            0xF1, // syncword end, MPEG-4, layer 0, no CRC
-            (1 << 6) | (self.sample_rate_index << 2) | (self.channel_config >> 2), // AAC-LC
-            ((self.channel_config & 0x3) << 6) | ((frame_len >> 11) as u8 & 0x3),
-            (frame_len >> 3) as u8,
-            (((frame_len & 0x7) as u8) << 5) | 0x1F, // buffer fullness (VBR)
-            0xFC,                                    // buffer fullness end, 1 frame
-        ])
+        self.samples_written = self.samples_written.saturating_add(samples.len() as u64);
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<()> {
+        let data_bytes = self
+            .samples_written
+            .checked_mul(2)
+            .and_then(|value| u32::try_from(value).ok())
+            .context("decoded audio is too large for a WAV file")?;
+        self.writer.seek(SeekFrom::Start(4))?;
+        self.writer
+            .write_all(&data_bytes.saturating_add(36).to_le_bytes())?;
+        self.writer.seek(SeekFrom::Start(40))?;
+        self.writer.write_all(&data_bytes.to_le_bytes())?;
+        self.writer.flush()?;
+        Ok(())
     }
 }
