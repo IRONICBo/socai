@@ -28,9 +28,8 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 # Image compositing/resizing for batching note images into 2x2 vision grids.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-# Pure-Rust mp4 demux for managed ASR. Local Whisper decodes in the bundled
-# helper so the core only needs the existing MP4 container support.
-symphonia = { version = "0.5", default-features = false, features = ["isomp4"] }
+# Pure-Rust AAC decode and MP4 demux for provider-compatible managed ASR WAVs.
+symphonia = { version = "0.5", default-features = false, features = ["aac", "isomp4"] }
 sha2 = "0.10"
 fs2 = "0.4"
 # Local OCR engine (PP-OCRv6 tiny via ONNX Runtime). Default features pull a
