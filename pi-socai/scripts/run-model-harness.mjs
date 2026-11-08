@@ -47,3 +47,7 @@ process.stdout.write(`${JSON.stringify({
   finalText: final?.content?.filter((item) => item.type === "text").map((item) => item.text).join("") ?? "",
   eventCounts: Object.fromEntries(events.map((event) => event.type).map((type, _, all) => [type, all.filter((item) => item === type).length])),
 }, null, 2)}\n`);
+
+if (toolCalls !== 1 || toolResult?.toolName !== "socai_xhs_search" || toolResult?.isError) {
+  process.exitCode = 1;
+}

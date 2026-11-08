@@ -1,4 +1,5 @@
 import { runDurablePiHarness } from "../src/durable-harness.mjs";
+import { durableHarnessVerdict } from "../src/harness-verdict.mjs";
 import { summarizeSocaiResult } from "../src/result-summary.mjs";
 
 const result = await runDurablePiHarness({
@@ -12,9 +13,10 @@ const result = await runDurablePiHarness({
 });
 
 const toolDetails = result.toolEnd?.result?.details;
+const verdict = durableHarnessVerdict(result);
 process.stdout.write(`${JSON.stringify({
   mode: "pi-durable-harness + live-socai + scripted-model",
-  status: result.run.ok ? result.run.value.status : "admission_failed",
+  status: verdict.runStatus,
   operationId: result.run.ok ? result.run.value.operationId : undefined,
   eventTypes: result.eventTypes,
   tool: result.toolEnd?.toolName,
@@ -22,6 +24,8 @@ process.stdout.write(`${JSON.stringify({
   toolResult: toolDetails?.result ? summarizeSocaiResult(toolDetails.result) : undefined,
   faulted: result.snapshot.faulted,
   operationOpen: result.snapshot.operation !== null,
+  passed: verdict.ok,
+  issues: verdict.issues,
 }, null, 2)}\n`);
 
-if (!result.run.ok || result.run.value.status !== "completed") process.exitCode = 1;
+if (!verdict.ok) process.exitCode = 1;

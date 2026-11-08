@@ -14,13 +14,15 @@ This spike keeps one Agent loop: Pi chooses and executes tools, while the existi
 
 | Layer | Command | Result |
 | --- | --- | --- |
-| Adapter tests | `npm test` | 11 passed, 0 failed. Covered argument isolation, CLI errors, invalid JSON, cancellation, deadline termination, all seven CLI mappings, Pi continuation and durable-harness completion/abort. |
-| Durable contract | `npm run harness:contract` | Completed with `run_start` through `run_end`, one real Pi tool lifecycle, the expected argv and `faulted=false`. |
+| Adapter tests | `npm test` | 12 passed, 0 failed. Covered argument isolation, CLI errors, invalid JSON, cancellation, deadline termination, all seven CLI mappings, Pi continuation, durable-harness completion/abort and rejection of a failed tool inside a completed Pi run. |
+| Durable contract | `npm run harness:contract` | Completed with `run_start` through `run_end`, one real Pi tool lifecycle, the expected argv, `faulted=false`, `passed=true` and no open operation. With `FAKE_SOCAI_MODE=fail`, the same command reports the CLI login error and exits 1 even though Pi reports the run as completed. |
 | Real CLI | `SOCAI_BIN=.../target/debug/socai npm run harness:live` | Xiaohongshu preview search completed with 3 cards. Douyin page-state completed with a readable, non-challenged page. |
 | Pi + real socai | `SOCAI_BIN=.../target/debug/socai npm run harness:agent` | Durable run completed, `socai_xhs_search` returned 3 cards, `faulted=false`, and the operation closed. |
 | Dependency audit | `npm audit --omit=dev --audit-level=high` | 0 vulnerabilities reported. |
 
 The live Douyin state was `ok=true`, `login_required=false`, `challenge_required=false`, `blank_or_throttled=false`, and `signed_in=false`. This proves the public page is readable through the adapter; it does not claim an authenticated Douyin session.
+
+The earlier Xiaohongshu live pass used the authenticated browser state available at that time. A later rerun after the daemon restarted returned `login_required`; the adapter now treats that tool error as a failed harness verdict instead of accepting Pi's outer `completed` status. The browser was not reauthenticated just to make the rerun green.
 
 All seven adapter mappings were also compared with the `--help` contract from the binary built on this branch. The automated Codex CLI review was attempted but returned HTTP 401 before producing a review, so no automated-review pass is claimed.
 

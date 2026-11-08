@@ -31,10 +31,12 @@ PI_SOCAI_PROVIDER=<provider> PI_SOCAI_MODEL=<model-id> \
 SOCAI_BIN=/absolute/path/to/socai npm run harness:model
 ```
 
-- `harness:contract` runs Pi's durable harness with a deterministic fake CLI and checks the complete tool lifecycle.
+- `harness:contract` runs Pi's durable harness with a deterministic fake CLI and checks the complete tool lifecycle. It fails if Pi rejects or aborts the run, the socai tool fails, the durable session faults, or the operation remains open; Pi's outer `completed` status alone is not sufficient.
 - `harness:live` calls the real Xiaohongshu preview search and Douyin page-state tools without a model.
 - `harness:agent` runs Pi's durable harness against the real socai CLI with a scripted model. This isolates the Pi-to-socai integration from model quality.
 - `harness:model` adds a real model to test tool selection and synthesis. It fails closed when the requested provider is not authenticated.
+
+For the negative contract path, `FAKE_SOCAI_MODE=fail npm run harness:contract` must report the socai CLI error and exit non-zero even though the scripted Pi loop reaches its final message.
 
 The latest local verification record is in [`HARNESS-RESULTS.md`](./HARNESS-RESULTS.md).
 
