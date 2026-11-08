@@ -23,6 +23,9 @@ site/dist/
 site/.astro/
 site/.vercel/
 
+# Pi adapter spike
+pi-socai/node_modules/
+
 # Rust workspace
 target/
 
